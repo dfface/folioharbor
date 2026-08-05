@@ -1,4 +1,5 @@
 use folioharbor_application::error::{AppError, FieldViolation};
+use folioharbor_domain::id::RequestId;
 use serde::Serialize;
 use url::Url;
 
@@ -7,18 +8,33 @@ pub const PROBLEM_CONTENT_TYPE: &str = "application/problem+json";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProblemContext {
     problem_base: String,
-    request_id: String,
+    request_id: ProblemRequestId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ProblemRequestId {
+    Domain(RequestId),
+    Example(String),
+}
+
+impl ProblemRequestId {
+    fn to_public_string(&self) -> String {
+        match self {
+            Self::Domain(request_id) => request_id.as_ulid().to_string(),
+            Self::Example(request_id) => request_id.clone(),
+        }
+    }
 }
 
 impl ProblemContext {
     #[must_use]
-    pub fn new(public_base_url: &Url, request_id: impl Into<String>) -> Self {
+    pub fn new(public_base_url: &Url, request_id: RequestId) -> Self {
         Self {
             problem_base: format!(
                 "{}/problems/",
                 public_base_url.as_str().trim_end_matches('/')
             ),
-            request_id: request_id.into(),
+            request_id: ProblemRequestId::Domain(request_id),
         }
     }
 
@@ -26,7 +42,7 @@ impl ProblemContext {
     pub fn example(request_id: impl Into<String>) -> Self {
         Self {
             problem_base: "https://library.example/problems/".to_owned(),
-            request_id: request_id.into(),
+            request_id: ProblemRequestId::Example(request_id.into()),
         }
     }
 }
@@ -75,6 +91,7 @@ impl ProblemDetails {
     #[must_use]
     pub fn from_app_error(error: &AppError, context: &ProblemContext) -> Self {
         let mapping = ProblemMapping::from(error);
+        let request_id = context.request_id.to_public_string();
         let fields = match error {
             AppError::Invalid { fields, .. } => {
                 fields.iter().map(ProblemFieldViolation::from).collect()
@@ -90,9 +107,9 @@ impl ProblemDetails {
             title: mapping.title,
             status: mapping.status,
             detail: mapping.detail,
-            instance: format!("/problems/{}", context.request_id),
+            instance: format!("/problems/{request_id}"),
             code: mapping.code,
-            request_id: context.request_id.clone(),
+            request_id,
             fields,
         }
     }

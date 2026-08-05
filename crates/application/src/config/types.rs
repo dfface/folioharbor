@@ -83,6 +83,12 @@ impl SmtpUrl {
                 "scheme must be smtp or smtps",
             ));
         }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(ConfigError::invalid(
+                "mail.smtp_url",
+                "must not contain embedded credentials; use the dedicated mail credential settings",
+            ));
+        }
         Ok(Self(url))
     }
 
@@ -93,22 +99,87 @@ impl SmtpUrl {
 }
 
 #[derive(Debug)]
-pub struct ApplicationSecret {
-    pub key_id: String,
+pub(super) struct ApplicationSecret {
+    pub(super) key_id: ApplicationSecretKeyId,
     pub(super) secret: SecretString,
 }
 
-impl ApplicationSecret {
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ApplicationSecretKeyId(String);
+
+impl ApplicationSecretKeyId {
+    pub(super) fn parse(value: &str, key: &'static str) -> Result<Self, ConfigError> {
+        let mut characters = value.chars();
+        let valid_first = characters
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric());
+        let valid_rest = characters.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        });
+        if !valid_first || !valid_rest {
+            return Err(ConfigError::invalid(
+                key,
+                "must be a non-empty identifier using ASCII letters, digits, '.', '_', or '-'",
+            ));
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct EncryptionSecret<'a>(&'a ApplicationSecret);
+
+impl EncryptionSecret<'_> {
+    #[must_use]
+    pub const fn key_id(&self) -> &ApplicationSecretKeyId {
+        &self.0.key_id
+    }
+
     #[must_use]
     pub const fn secret(&self) -> &SecretString {
-        &self.secret
+        &self.0.secret
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DecryptionSecret<'a>(&'a ApplicationSecret);
+
+impl DecryptionSecret<'_> {
+    #[must_use]
+    pub const fn key_id(&self) -> &ApplicationSecretKeyId {
+        &self.0.key_id
+    }
+
+    #[must_use]
+    pub const fn secret(&self) -> &SecretString {
+        &self.0.secret
     }
 }
 
 #[derive(Debug)]
 pub struct ApplicationSecretRing {
-    pub current: ApplicationSecret,
-    pub old: Vec<ApplicationSecret>,
+    pub(super) current: ApplicationSecret,
+    pub(super) old: Vec<ApplicationSecret>,
+}
+
+impl ApplicationSecretRing {
+    #[must_use]
+    pub const fn current_for_encryption(&self) -> EncryptionSecret<'_> {
+        EncryptionSecret(&self.current)
+    }
+
+    #[must_use]
+    pub fn find_for_decryption(&self, key_id: &str) -> Option<DecryptionSecret<'_>> {
+        std::iter::once(&self.current)
+            .chain(&self.old)
+            .find(|secret| secret.key_id.as_str() == key_id)
+            .map(DecryptionSecret)
+    }
 }
 
 #[derive(Debug)]

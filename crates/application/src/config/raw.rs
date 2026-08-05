@@ -21,13 +21,27 @@ pub(super) struct RawSettings {
 impl RawSettings {
     pub(super) fn parse(sources: &ConfigSources) -> Result<Self, ConfigError> {
         let mut raw = match sources.toml.as_deref() {
-            Some(document) => toml::from_str(document)?,
+            Some(document) => parse_toml(document)?,
             None => Self::default(),
         };
         apply_environment(&mut raw, &sources.environment)?;
         apply_values(&mut raw, &sources.cli)?;
         Ok(raw)
     }
+}
+
+fn parse_toml(document: &str) -> Result<RawSettings, ConfigError> {
+    let deserializer = toml::Deserializer::parse(document)
+        .map_err(|_| ConfigError::invalid("toml", "document syntax is invalid"))?;
+    serde_path_to_error::deserialize(deserializer).map_err(|error| {
+        let path = error.path().to_string();
+        let key = if path.is_empty() || path == "." {
+            "toml".to_owned()
+        } else {
+            path
+        };
+        ConfigError::invalid(key, "value has an invalid type")
+    })
 }
 
 #[derive(Debug, Deserialize)]

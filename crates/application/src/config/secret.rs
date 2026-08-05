@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use secrecy::SecretString;
 
-use super::{ApplicationSecret, ApplicationSecretRing, ConfigError};
+use super::{ApplicationSecretKeyId, ApplicationSecretRing, ConfigError, types::ApplicationSecret};
 
 const MINIMUM_SECRET_BYTES: usize = 32;
 
@@ -17,7 +17,12 @@ pub(super) fn load_secret_ring(
                 "is required and must come from the environment or a secret file",
             )
         })?;
-    let current = parse_secret(key_id, &value, "auth.application_secret")?;
+    let current = parse_secret(
+        key_id,
+        &value,
+        "auth.application_secret_key_id",
+        "auth.application_secret",
+    )?;
     let old = secret_environment(environment, "FOLIOHARBOR_AUTH_OLD_APPLICATION_SECRETS")?.map_or(
         Ok(Vec::new()),
         |encoded| {
@@ -30,12 +35,23 @@ pub(super) fn load_secret_ring(
                             "entries must use key-id=secret format",
                         )
                     })?;
-                    parse_secret(old_key_id, old_value, "auth.old_application_secrets")
+                    parse_secret(
+                        old_key_id,
+                        old_value,
+                        "auth.old_application_secrets",
+                        "auth.old_application_secrets",
+                    )
                 })
                 .collect()
         },
     )?;
-    if old.iter().any(|secret| secret.key_id == current.key_id) {
+    let key_count = old.len() + 1;
+    let unique_key_count = std::iter::once(&current)
+        .chain(&old)
+        .map(|secret| &secret.key_id)
+        .collect::<HashSet<_>>()
+        .len();
+    if unique_key_count != key_count {
         return Err(ConfigError::invalid(
             "auth.old_application_secrets",
             "key IDs must be unique",
@@ -76,19 +92,18 @@ fn required_environment<'a>(
 fn parse_secret(
     key_id: &str,
     value: &str,
-    key: &'static str,
+    key_id_key: &'static str,
+    secret_key: &'static str,
 ) -> Result<ApplicationSecret, ConfigError> {
-    if key_id.is_empty() {
-        return Err(ConfigError::invalid(key, "key ID must not be empty"));
-    }
+    let key_id = ApplicationSecretKeyId::parse(key_id, key_id_key)?;
     if value.len() < MINIMUM_SECRET_BYTES || matches!(value, "change-me" | "default" | "secret") {
         return Err(ConfigError::invalid(
-            key,
+            secret_key,
             "must contain at least 32 bytes and must not be a default value",
         ));
     }
     Ok(ApplicationSecret {
-        key_id: key_id.to_owned(),
+        key_id,
         secret: SecretString::from(value.to_owned().into_boxed_str()),
     })
 }

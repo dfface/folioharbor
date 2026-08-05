@@ -10,9 +10,9 @@ use thiserror::Error;
 use raw::RawSettings;
 use secret::{load_secret_ring, secret_environment};
 pub use types::{
-    ApplicationSecret, ApplicationSecretRing, AuthSettings, ByteSize, DatabaseSettings, DedupScope,
-    Duration, MailSettings, ObservabilitySettings, PublicUrl, ServerSettings, Settings, SmtpUrl,
-    StorageSettings, WorkerSettings,
+    ApplicationSecretKeyId, ApplicationSecretRing, AuthSettings, ByteSize, DatabaseSettings,
+    DecryptionSecret, DedupScope, Duration, EncryptionSecret, MailSettings, ObservabilitySettings,
+    PublicUrl, ServerSettings, Settings, SmtpUrl, StorageSettings, WorkerSettings,
 };
 
 #[derive(Clone, Default)]
@@ -37,8 +37,6 @@ impl fmt::Debug for ConfigSources {
 pub enum ConfigError {
     #[error("invalid configuration key `{key}`: {reason}")]
     Invalid { key: String, reason: String },
-    #[error("could not parse TOML configuration: {0}")]
-    Toml(#[from] toml::de::Error),
 }
 
 impl ConfigError {

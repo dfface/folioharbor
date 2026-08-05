@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use folioharbor_application::error::{AppError, FieldViolation};
-use folioharbor_domain::id::ErrorId;
+use folioharbor_domain::id::{ErrorId, RequestId};
 use folioharbor_http::problem::{PROBLEM_CONTENT_TYPE, ProblemContext, ProblemDetails};
 use url::Url;
 
@@ -93,15 +93,17 @@ fn serialized_problems_do_not_leak_internal_error_ids() {
 #[test]
 fn production_context_builds_types_below_the_public_base_url() {
     let base = Url::parse("https://books.example/base/").expect("valid URL");
+    let request_id = RequestId::new();
     let problem = ProblemDetails::from_app_error(
         &AppError::NotFound {
             code: "item_not_found",
         },
-        &ProblemContext::new(&base, "01JREQ"),
+        &ProblemContext::new(&base, request_id),
     );
 
     assert_eq!(
         problem.type_uri.as_str(),
         "https://books.example/base/problems/item-not-found"
     );
+    assert_eq!(problem.request_id, request_id.as_ulid().to_string());
 }

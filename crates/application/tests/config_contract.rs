@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 
-use folioharbor_application::config::{ConfigSources, DedupScope, Settings};
+use folioharbor_application::config::{ConfigError, ConfigSources, DedupScope, Settings};
 use folioharbor_application::ports::{Clock, RandomSource};
 use folioharbor_domain::time::OffsetDateTime;
 
@@ -68,6 +68,22 @@ fn environment_overrides_toml_and_cli_overrides_environment() {
 }
 
 #[test]
+fn typed_toml_errors_name_the_key_without_echoing_source_values() {
+    let error = Settings::load(ConfigSources {
+        toml: Some("[worker]\nconcurrency = \"sentinel-source-value\"\n".to_owned()),
+        environment: minimum_environment(),
+        ..ConfigSources::default()
+    })
+    .expect_err("invalid typed TOML value must fail");
+
+    assert!(matches!(
+        &error,
+        ConfigError::Invalid { key, .. } if key == "worker.concurrency"
+    ));
+    assert!(!error.to_string().contains("sentinel-source-value"));
+}
+
+#[test]
 fn debug_output_redacts_secret_values() {
     let sources = ConfigSources {
         environment: minimum_environment(),
@@ -98,7 +114,12 @@ fn application_secret_can_be_loaded_from_a_secret_file() {
     .expect("valid file-injected secret");
 
     assert_eq!(
-        settings.auth.application_secrets.current.key_id,
+        settings
+            .auth
+            .application_secrets
+            .current_for_encryption()
+            .key_id()
+            .as_str(),
         "primary-2026"
     );
 }
@@ -135,6 +156,25 @@ fn enabled_mail_flows_require_smtp() {
 }
 
 #[test]
+fn smtp_urls_reject_embedded_credentials_without_echoing_them() {
+    let mut environment = minimum_environment();
+    environment.insert(
+        "FOLIOHARBOR_MAIL_SMTP_URL".to_owned(),
+        "smtp://mail-user:sentinel-credential@mail.example:2525".to_owned(),
+    );
+
+    let error = Settings::load(ConfigSources {
+        environment,
+        ..ConfigSources::default()
+    })
+    .expect_err("SMTP userinfo must fail");
+    let diagnostic = error.to_string();
+
+    assert!(diagnostic.contains("mail.smtp_url"));
+    assert!(!diagnostic.contains("sentinel-credential"));
+}
+
+#[test]
 fn storage_paths_must_be_absolute_non_root_and_distinct() {
     for (key, value) in [
         ("storage.root", "relative"),
@@ -166,15 +206,60 @@ fn old_application_secrets_are_retained_for_decryption_only() {
     })
     .expect("valid rotated secret ring");
 
-    assert_eq!(settings.auth.application_secrets.old.len(), 1);
     assert_eq!(
-        settings.auth.application_secrets.old[0].key_id,
-        "previous-2025"
-    );
-    assert_eq!(
-        settings.auth.application_secrets.current.key_id,
+        settings
+            .auth
+            .application_secrets
+            .current_for_encryption()
+            .key_id()
+            .as_str(),
         "primary-2026"
     );
+    assert!(
+        settings
+            .auth
+            .application_secrets
+            .find_for_decryption("previous-2025")
+            .is_some()
+    );
+}
+
+#[test]
+fn malformed_application_secret_key_ids_are_rejected() {
+    let mut environment = minimum_environment();
+    environment.insert(
+        "FOLIOHARBOR_AUTH_APPLICATION_SECRET_KEY_ID".to_owned(),
+        " bad key ".to_owned(),
+    );
+
+    let error = Settings::load(ConfigSources {
+        environment,
+        ..ConfigSources::default()
+    })
+    .expect_err("malformed key ID must fail");
+
+    assert!(error.to_string().contains("application_secret_key_id"));
+}
+
+#[test]
+fn duplicate_old_application_secret_key_ids_are_rejected() {
+    let mut environment = minimum_environment();
+    environment.insert(
+        "FOLIOHARBOR_AUTH_OLD_APPLICATION_SECRETS".to_owned(),
+        concat!(
+            "previous=an-old-secret-value-with-at-least-32-bytes,",
+            "previous=another-old-secret-value-with-at-least-32-bytes"
+        )
+        .to_owned(),
+    );
+
+    let error = Settings::load(ConfigSources {
+        environment,
+        ..ConfigSources::default()
+    })
+    .expect_err("duplicate key IDs must fail");
+
+    assert!(error.to_string().contains("old_application_secrets"));
 }
 
 #[test]
