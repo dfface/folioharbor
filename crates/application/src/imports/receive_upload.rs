@@ -1,9 +1,9 @@
 use crate::{
     error::AppError,
     ports::{
-        AuthorizedUploadTransition, BlobStoreError, FinalizeUploadReceipt, HeartbeatUploadReceipt,
-        MarkUploadReceived, PrepareUploadPromotion, RecordPromotionDisposition,
-        RecordUploadCleanup,
+        AuthorizedUploadTransition, BeginUploadReceipt, BlobStoreError, FinalizeUploadReceipt,
+        HeartbeatUploadReceipt, MarkUploadReceived, PrepareUploadPromotion,
+        RecordPromotionDisposition, UploadReceiptAttempt,
     },
 };
 use async_trait::async_trait;
@@ -30,6 +30,22 @@ struct ReceiptContext {
     library_id: folioharbor_domain::id::LibraryId,
     upload_id: UploadId,
     request_id: folioharbor_domain::id::RequestId,
+}
+
+struct ActiveReceipt {
+    attempt_token: String,
+    staging: folioharbor_domain::imports::blob::StorageKey,
+}
+
+impl From<UploadReceiptAttempt> for ActiveReceipt {
+    fn from(attempt: UploadReceiptAttempt) -> Self {
+        Self {
+            attempt_token: attempt.attempt_token,
+            staging: folioharbor_domain::imports::blob::StorageKey::from_opaque(
+                attempt.staging_key,
+            ),
+        }
+    }
 }
 
 #[async_trait]
@@ -64,40 +80,33 @@ impl UploadApi for UploadService {
                 });
             }
         };
-        let staging = self
-            .blobs
-            .create_staging()
-            .await
-            .map_err(|error| storage_error(&error))?;
-        if let Err(error) = self
-            .apply_transition(AuthorizedUploadTransition {
+        let attempt: ActiveReceipt = self
+            .uploads
+            .begin_receipt(BeginUploadReceipt {
                 actor: request.actor,
                 library_id: request.library_id,
                 upload_id: request.upload_id,
                 from,
-                to: UploadState::Receiving,
-                received: ByteCount::new(0),
-                storage_key: Some(staging.as_str().to_owned()),
-                error_code: None,
                 request_id: request.request_id,
                 now: self.clock.now(),
             })
             .await
-        {
-            if self.blobs.delete(&staging).await.is_err() {
-                let _ = self
-                    .uploads
-                    .record_orphan_cleanup(RecordUploadCleanup {
-                        actor: request.actor,
-                        library_id: request.library_id,
-                        upload_id: request.upload_id,
-                        staging_key: staging.as_str().to_owned(),
-                        request_id: request.request_id,
-                        now: self.clock.now(),
-                    })
-                    .await;
-            }
-            return Err(error);
+            .map_err(|_| dependency())?
+            .ok_or(AppError::Conflict {
+                code: "upload_state_conflict",
+            })?
+            .into();
+        if let Err(error) = self.blobs.create_staging_for(&attempt.staging).await {
+            let context = ReceiptContext {
+                actor: request.actor,
+                library_id: request.library_id,
+                upload_id: request.upload_id,
+                request_id: request.request_id,
+            };
+            let _ = self
+                .abort(context, &attempt, 0, "upload_storage_failed")
+                .await;
+            return Err(storage_error(&error));
         }
         let context = ReceiptContext {
             actor: request.actor,
@@ -106,16 +115,17 @@ impl UploadApi for UploadService {
             request_id: request.request_id,
         };
         let (received, digest) = self
-            .stream_content(&mut request, context, &staging, current.declared_bytes)
+            .stream_content(&mut request, context, &attempt, current.declared_bytes)
             .await?;
-        let stored = self.promote(context, &staging, received, digest).await?;
+        let stored = self.promote(context, &attempt, received, digest).await?;
         let marked = self
             .uploads
             .mark_received(MarkUploadReceived {
                 actor: context.actor,
                 library_id: context.library_id,
                 upload_id: context.upload_id,
-                staging_key: staging.as_str().to_owned(),
+                attempt_token: attempt.attempt_token.clone(),
+                staging_key: attempt.staging.as_str().to_owned(),
                 final_key: stored.as_str().to_owned(),
                 received: ByteCount::new(received),
                 request_id: context.request_id,
@@ -201,7 +211,7 @@ impl UploadService {
     async fn promote(
         &self,
         context: ReceiptContext,
-        staging: &folioharbor_domain::imports::blob::StorageKey,
+        attempt: &ActiveReceipt,
         received: u64,
         digest: Sha256Digest,
     ) -> Result<folioharbor_domain::imports::blob::StorageKey, AppError> {
@@ -217,7 +227,8 @@ impl UploadService {
                 actor: context.actor,
                 library_id: context.library_id,
                 upload_id: context.upload_id,
-                staging_key: staging.as_str().to_owned(),
+                attempt_token: attempt.attempt_token.clone(),
+                staging_key: attempt.staging.as_str().to_owned(),
                 final_key: candidate.as_str().to_owned(),
                 digest,
                 received: ByteCount::new(received),
@@ -231,7 +242,7 @@ impl UploadService {
                 code: "upload_state_conflict",
             });
         }
-        match self.blobs.promote(staging, &identity).await {
+        match self.blobs.promote(&attempt.staging, &identity).await {
             Ok(promoted) if promoted.key == candidate => {
                 let recorded = self
                     .uploads
@@ -239,7 +250,8 @@ impl UploadService {
                         actor: context.actor,
                         library_id: context.library_id,
                         upload_id: context.upload_id,
-                        staging_key: staging.as_str().to_owned(),
+                        attempt_token: attempt.attempt_token.clone(),
+                        staging_key: attempt.staging.as_str().to_owned(),
                         final_key: promoted.key.as_str().to_owned(),
                         disposition: promoted.disposition,
                         request_id: context.request_id,
@@ -256,36 +268,24 @@ impl UploadService {
             }
             Ok(_) => {
                 let _ = self
-                    .abort(context, staging, received, "upload_storage_failed")
+                    .abort(context, attempt, received, "upload_storage_failed")
                     .await;
                 Err(dependency())
             }
             Err(error) => {
                 let _ = self
-                    .abort(context, staging, received, "upload_storage_failed")
+                    .abort(context, attempt, received, "upload_storage_failed")
                     .await;
                 Err(storage_error(&error))
             }
         }
     }
 
-    async fn apply_transition(
-        &self,
-        transition: AuthorizedUploadTransition,
-    ) -> Result<(), AppError> {
-        match self.uploads.transition_authorized(transition).await {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(AppError::Conflict {
-                code: "upload_state_conflict",
-            }),
-            Err(_) => Err(dependency()),
-        }
-    }
     async fn stream_content(
         &self,
         request: &mut ReceiveUploadRequest,
         context: ReceiptContext,
-        staging: &folioharbor_domain::imports::blob::StorageKey,
+        attempt: &ActiveReceipt,
         declared: ByteCount,
     ) -> Result<(u64, Sha256Digest), AppError> {
         let mut received = 0_u64;
@@ -297,7 +297,7 @@ impl UploadService {
             let next = tokio::select! {
                 next = request.bytes.next() => next,
                 _ = heartbeat.tick() => {
-                    self.heartbeat(context, staging).await?;
+                    self.heartbeat(context, attempt).await?;
                     continue;
                 }
             };
@@ -306,7 +306,7 @@ impl UploadService {
             };
             let Ok(bytes) = next else {
                 return Err(self
-                    .abort(context, staging, received, "upload_interrupted")
+                    .abort(context, attempt, received, "upload_interrupted")
                     .await);
             };
             for chunk in bytes.chunks(MAX_APPEND_BYTES) {
@@ -314,18 +314,18 @@ impl UploadService {
                     received.checked_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX))
                 else {
                     return Err(self
-                        .abort(context, staging, received, "upload_exceeds_declared_size")
+                        .abort(context, attempt, received, "upload_exceeds_declared_size")
                         .await);
                 };
                 if total > declared.get() {
                     return Err(self
-                        .abort(context, staging, received, "upload_exceeds_declared_size")
+                        .abort(context, attempt, received, "upload_exceeds_declared_size")
                         .await);
                 }
                 received = total;
-                if let Err(error) = self.blobs.append(staging, chunk).await {
+                if let Err(error) = self.blobs.append(&attempt.staging, chunk).await {
                     let _ = self
-                        .abort(context, staging, received, "upload_storage_failed")
+                        .abort(context, attempt, received, "upload_storage_failed")
                         .await;
                     return Err(storage_error(&error));
                 }
@@ -338,7 +338,7 @@ impl UploadService {
     async fn heartbeat(
         &self,
         context: ReceiptContext,
-        staging: &folioharbor_domain::imports::blob::StorageKey,
+        attempt: &ActiveReceipt,
     ) -> Result<(), AppError> {
         let alive = self
             .uploads
@@ -346,7 +346,8 @@ impl UploadService {
                 actor: context.actor,
                 library_id: context.library_id,
                 upload_id: context.upload_id,
-                staging_key: staging.as_str().to_owned(),
+                attempt_token: attempt.attempt_token.clone(),
+                staging_key: attempt.staging.as_str().to_owned(),
                 request_id: context.request_id,
                 now: self.clock.now(),
             })
@@ -364,11 +365,11 @@ impl UploadService {
     async fn abort(
         &self,
         context: ReceiptContext,
-        staging: &folioharbor_domain::imports::blob::StorageKey,
+        attempt: &ActiveReceipt,
         received: u64,
         code: &'static str,
     ) -> AppError {
-        if self.blobs.delete(staging).await.is_err() {
+        if self.blobs.delete(&attempt.staging).await.is_err() {
             return dependency();
         }
         let transition = self
@@ -380,7 +381,8 @@ impl UploadService {
                 from: UploadState::Receiving,
                 to: UploadState::Failed,
                 received: ByteCount::new(received),
-                storage_key: Some(staging.as_str().to_owned()),
+                attempt_token: Some(attempt.attempt_token.clone()),
+                storage_key: Some(attempt.staging.as_str().to_owned()),
                 error_code: Some(code.to_owned()),
                 request_id: context.request_id,
                 now: self.clock.now(),

@@ -3,11 +3,12 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use folioharbor_application::{
+    error::AppError,
     imports::{ReceiveUploadRequest, UploadApi, UploadService},
     ports::{
-        AuthorizedUploadTransition, Clock, CreateUploadRecord, ExpireUploads,
+        AuthorizedUploadTransition, BeginUploadReceipt, Clock, CreateUploadRecord, ExpireUploads,
         FinalizeUploadReceipt, HeartbeatUploadReceipt, MarkUploadReceived, PrepareUploadPromotion,
-        RecordPromotionDisposition, UploadRepository, UploadRepositoryError,
+        RecordPromotionDisposition, UploadReceiptAttempt, UploadRepository, UploadRepositoryError,
         WorkerUploadTransition,
     },
 };
@@ -66,6 +67,12 @@ impl UploadRepository for FailFirstFinalize {
         transition: AuthorizedUploadTransition,
     ) -> Result<bool, UploadRepositoryError> {
         self.inner.transition_authorized(transition).await
+    }
+    async fn begin_receipt(
+        &self,
+        receipt: BeginUploadReceipt,
+    ) -> Result<Option<UploadReceiptAttempt>, UploadRepositoryError> {
+        self.inner.begin_receipt(receipt).await
     }
     async fn finalize_authorized(
         &self,
@@ -160,6 +167,14 @@ async fn process_restart_recovers_promoted_receipt_with_same_upload_id() -> anyh
         .receive_upload(request(actor, library, upload))
         .await
         .expect_err("injected finalize cut");
+    assert_eq!(
+        uploads
+            .find_authorized(actor, library, upload, RequestId::new())
+            .await?
+            .expect("upload after cut")
+            .state,
+        UploadState::Received
+    );
     drop(failing);
     let restarted = UploadService::new(
         Arc::new(uploads),
@@ -176,6 +191,97 @@ async fn process_restart_recovers_promoted_receipt_with_same_upload_id() -> anyh
     pools.close().await;
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_receipt_loser_never_creates_a_staging_file() -> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let directory = tempfile::tempdir()?;
+    let now = OffsetDateTime::now_utc();
+    let actor = UserId::new();
+    let library = LibraryId::new();
+    let upload = UploadId::new();
+    sqlx::query("INSERT INTO folioharbor.user_accounts(user_id,normalized_email,display_email,status,created_at,verified_at) VALUES($1,$2,$2,'verified',$3,$3)")
+        .bind(actor.as_uuid()).bind("concurrent-receipt@test.invalid").bind(now).execute(&pools.owner).await?;
+    sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,created_at,updated_at) VALUES($1,'Concurrent upload',$2,$2)")
+        .bind(library.as_uuid()).bind(now).execute(&pools.owner).await?;
+    sqlx::query("INSERT INTO folioharbor.library_memberships(library_id,user_id,role_code,status,joined_at) VALUES($1,$2,'editor','active',$3)")
+        .bind(library.as_uuid()).bind(actor.as_uuid()).bind(now).execute(&pools.owner).await?;
+    let uploads = Arc::new(PgUploadRepository::new(pools.api.clone()));
+    uploads
+        .create_authorized(CreateUploadRecord {
+            upload_id: upload,
+            library_id: library,
+            actor,
+            request_id: RequestId::new(),
+            file_name: "concurrent.epub".into(),
+            media_type: "application/epub+zip".into(),
+            declared_bytes: ByteCount::new(4),
+            dedup_scope: folioharbor_domain::imports::blob::DedupScope::Instance,
+            expires_at: now + Duration::hours(24),
+            now,
+        })
+        .await?;
+    let service = Arc::new(UploadService::new(
+        uploads,
+        Arc::new(PgAuthorizationRepository::new(pools.api.clone())),
+        Arc::new(LocalBlobStore::new(directory.path())),
+        Arc::new(FixedClock(now)),
+        folioharbor_domain::imports::blob::DedupScope::Instance,
+    ));
+    let first = tokio::spawn({
+        let service = service.clone();
+        async move {
+            service
+                .receive_upload(ReceiveUploadRequest {
+                    actor,
+                    request_id: RequestId::new(),
+                    library_id: library,
+                    upload_id: upload,
+                    bytes: Box::pin(futures_util::stream::pending()),
+                })
+                .await
+        }
+    });
+    for _ in 0..100 {
+        if staging_file_count(directory.path()) == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        !first.is_finished(),
+        "first receipt must still await body data"
+    );
+    assert_eq!(staging_file_count(directory.path()), 1);
+    let loser = service
+        .receive_upload(request(actor, library, upload))
+        .await
+        .expect_err("second receipt must lose the database claim");
+    assert!(matches!(
+        loser,
+        AppError::Conflict {
+            code: "upload_state_conflict"
+        }
+    ));
+    assert_eq!(staging_file_count(directory.path()), 1);
+    first.abort();
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+fn staging_file_count(root: &std::path::Path) -> usize {
+    std::fs::read_dir(root.join("staging"))
+        .map(|entries| entries.filter_map(Result::ok).count())
+        .unwrap_or(0)
 }
 
 fn request(actor: UserId, library: LibraryId, upload: UploadId) -> ReceiveUploadRequest {

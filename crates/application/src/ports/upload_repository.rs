@@ -29,10 +29,24 @@ pub struct AuthorizedUploadTransition {
     pub from: UploadState,
     pub to: UploadState,
     pub received: ByteCount,
+    pub attempt_token: Option<String>,
     pub storage_key: Option<String>,
     pub error_code: Option<String>,
     pub request_id: RequestId,
     pub now: OffsetDateTime,
+}
+pub struct BeginUploadReceipt {
+    pub actor: UserId,
+    pub library_id: LibraryId,
+    pub upload_id: UploadId,
+    pub from: UploadState,
+    pub request_id: RequestId,
+    pub now: OffsetDateTime,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UploadReceiptAttempt {
+    pub attempt_token: String,
+    pub staging_key: String,
 }
 pub struct WorkerUploadTransition {
     pub library_id: LibraryId,
@@ -58,6 +72,7 @@ pub struct HeartbeatUploadReceipt {
     pub actor: UserId,
     pub library_id: LibraryId,
     pub upload_id: UploadId,
+    pub attempt_token: String,
     pub staging_key: String,
     pub request_id: RequestId,
     pub now: OffsetDateTime,
@@ -66,6 +81,7 @@ pub struct PrepareUploadPromotion {
     pub actor: UserId,
     pub library_id: LibraryId,
     pub upload_id: UploadId,
+    pub attempt_token: String,
     pub staging_key: String,
     pub final_key: String,
     pub digest: folioharbor_domain::imports::blob::Sha256Digest,
@@ -77,6 +93,7 @@ pub struct RecordPromotionDisposition {
     pub actor: UserId,
     pub library_id: LibraryId,
     pub upload_id: UploadId,
+    pub attempt_token: String,
     pub staging_key: String,
     pub final_key: String,
     pub disposition: BlobDisposition,
@@ -87,6 +104,7 @@ pub struct MarkUploadReceived {
     pub actor: UserId,
     pub library_id: LibraryId,
     pub upload_id: UploadId,
+    pub attempt_token: String,
     pub staging_key: String,
     pub final_key: String,
     pub received: ByteCount,
@@ -97,6 +115,7 @@ pub struct RecordUploadCleanup {
     pub actor: UserId,
     pub library_id: LibraryId,
     pub upload_id: UploadId,
+    pub attempt_token: String,
     pub staging_key: String,
     pub request_id: RequestId,
     pub now: OffsetDateTime,
@@ -165,6 +184,12 @@ pub trait UploadRepository: Send + Sync {
         upload: UploadId,
         request: RequestId,
     ) -> Result<Option<UploadSession>, UploadRepositoryError>;
+    async fn begin_receipt(
+        &self,
+        _: BeginUploadReceipt,
+    ) -> Result<Option<UploadReceiptAttempt>, UploadRepositoryError> {
+        Err(UploadRepositoryError::Persistence)
+    }
     async fn transition_authorized(
         &self,
         transition: AuthorizedUploadTransition,

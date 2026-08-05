@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT attempt_token AS \"attempt_token!\",staging_key AS \"staging_key!\" FROM folioharbor.upload_begin_receipt_authorized($1,$2,$3,$4,$5)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "attempt_token!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "staging_key!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "545cd01138fb6afbbcce7d44bf3e996f10c7ea143bf768d7a23cdcce19671abd"
+}

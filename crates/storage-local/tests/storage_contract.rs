@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 use folioharbor_application::ports::{BlobDisposition, BlobStore};
 use folioharbor_domain::{
     id::{LibraryId, UploadId},
-    imports::blob::{BlobIdentity, ByteCount, DedupScope, Sha256Digest, StorageNamespace},
+    imports::blob::{
+        BlobIdentity, ByteCount, DedupScope, Sha256Digest, StorageKey, StorageNamespace,
+    },
 };
 use folioharbor_storage_local::{CapacityProbe, LocalBlobStore, MIN_FREE_BYTES};
 use sha2::{Digest, Sha256};
@@ -39,13 +41,23 @@ fn identity(namespace: StorageNamespace, payload: &[u8]) -> BlobIdentity {
     )
 }
 
+async fn create_staging(store: &LocalBlobStore<FakeCapacity>, marker: char) -> StorageKey {
+    let key = StorageKey::from_opaque(format!("staging:{}", marker.to_string().repeat(64)));
+    store
+        .create_staging_for(&key)
+        .await
+        .expect("staging object");
+    key
+}
+
 #[tokio::test]
-async fn staging_keys_are_unpredictable_and_traversal_never_escapes_the_root() {
+async fn supplied_staging_capabilities_are_exclusive_and_traversal_never_escapes_the_root() {
     let root = TempDir::new().expect("temporary root");
     let store = LocalBlobStore::with_capacity(root.path(), FakeCapacity::new(u64::MAX));
-    let first = store.create_staging().await.expect("first staging object");
-    let second = store.create_staging().await.expect("second staging object");
+    let first = create_staging(&store, '1').await;
+    let second = create_staging(&store, '2').await;
     assert_ne!(first, second);
+    assert!(store.create_staging_for(&first).await.is_err());
 
     let traversal = "staging:../../outside".parse().expect("opaque key syntax");
     assert!(store.append(&traversal, b"escape").await.is_err());
@@ -63,7 +75,7 @@ async fn staging_keys_are_unpredictable_and_traversal_never_escapes_the_root() {
 async fn append_is_bounded_ranges_are_exact_and_promotion_preserves_hash() {
     let root = TempDir::new().expect("temporary root");
     let store = LocalBlobStore::with_capacity(root.path(), FakeCapacity::new(u64::MAX));
-    let staging = store.create_staging().await.expect("staging object");
+    let staging = create_staging(&store, '3').await;
     store
         .append(&staging, b"hello ")
         .await
@@ -126,19 +138,21 @@ async fn capacity_is_checked_before_staging_append_and_promotion() {
     let root = TempDir::new().expect("temporary root");
     let low = FakeCapacity::new(MIN_FREE_BYTES - 1);
     let store = LocalBlobStore::with_capacity(root.path(), low);
-    assert!(store.create_staging().await.is_err());
+    let unavailable = StorageKey::from_opaque(format!("staging:{}", "4".repeat(64)));
+    assert!(store.create_staging_for(&unavailable).await.is_err());
 
     let capacity = FakeCapacity::new(MIN_FREE_BYTES + 3);
     let store = LocalBlobStore::with_capacity(root.path(), capacity.clone());
-    let staging = store
-        .create_staging()
+    let staging = StorageKey::from_opaque(format!("staging:{}", "5".repeat(64)));
+    store
+        .create_staging_for(&staging)
         .await
         .expect("threshold permits staging");
     assert!(store.append(&staging, b"four").await.is_err());
 
     let capacity = FakeCapacity::new(u64::MAX);
     let store = LocalBlobStore::with_capacity(root.path(), capacity.clone());
-    let staging = store.create_staging().await.expect("staging with capacity");
+    let staging = create_staging(&store, '6').await;
     store.append(&staging, b"blob").await.expect("append");
     capacity.set(MIN_FREE_BYTES - 1);
     let namespace =
@@ -166,7 +180,7 @@ async fn promotion_does_not_follow_an_internal_directory_symlink() {
     let root = TempDir::new().expect("temporary root");
     let outside = TempDir::new().expect("outside directory");
     let store = LocalBlobStore::with_capacity(root.path(), FakeCapacity::new(u64::MAX));
-    let staging = store.create_staging().await.expect("staging object");
+    let staging = create_staging(&store, '7').await;
     store.append(&staging, b"blob").await.expect("append");
     symlink(outside.path(), root.path().join("objects")).expect("internal symlink");
     let namespace =
@@ -218,7 +232,7 @@ async fn adapter_created_root_is_owner_only() {
     let parent = TempDir::new().expect("parent");
     let root = parent.path().join("new-root");
     let store = LocalBlobStore::with_capacity(&root, FakeCapacity::new(u64::MAX));
-    store.create_staging().await.expect("create root");
+    create_staging(&store, '8').await;
     let mode = std::fs::metadata(root)
         .expect("root metadata")
         .permissions()

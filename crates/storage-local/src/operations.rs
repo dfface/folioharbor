@@ -33,30 +33,15 @@ impl<P: CapacityProbe> LocalBlobStore<P> {
         }
     }
 
-    pub(super) fn create_staging_sync(&self) -> Result<StorageKey, BlobStoreError> {
+    pub(super) fn create_staging_sync(&self, key: &StorageKey) -> Result<(), BlobStoreError> {
         let root = self.secure_root()?;
         self.require_capacity(0)?;
-        for _ in 0..8 {
-            let mut random = [0_u8; 32];
-            getrandom::fill(&mut random).map_err(std::io::Error::other)?;
-            let key = StorageKey::from_opaque(format!("staging:{}", hex(&random)));
-            let relative = paths::staging_relative(&key)?;
-            let (directory, name) = root.open_parent(&relative, true)?;
-            match directory.open_with(&name, &private_create_options()) {
-                Ok(file) => {
-                    file.sync_all()?;
-                    sync_dir(&directory)?;
-                    return Ok(key);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "could not allocate a unique staging key",
-        )
-        .into())
+        let relative = paths::staging_relative(key)?;
+        let (directory, name) = root.open_parent(&relative, true)?;
+        let file = directory.open_with(&name, &private_create_options())?;
+        file.sync_all()?;
+        sync_dir(&directory)?;
+        Ok(())
     }
 
     pub(super) fn append_sync(&self, key: &StorageKey, bytes: &[u8]) -> Result<(), BlobStoreError> {
@@ -211,14 +196,4 @@ fn remove_source_if_present(root: &SecureRoot, relative: &Path) -> Result<(), Bl
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(char::from(HEX[usize::from(byte >> 4)]));
-        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    output
 }

@@ -123,3 +123,34 @@ Final fix-round verification:
 - The changed fixed-shape upload-creation statement remains a `query_scalar!` macro with regenerated checked-in offline metadata.
 - `cargo fmt --all --check`
 - `git diff --check`
+
+## Code-quality review fix round 4
+
+Focused RED evidence captured before production changes:
+
+- `/tmp/task-9-fix4-red-cross-upload-staging.log`: in an editor/API database context, upload A submitted upload B's syntactically valid staging key to the orphan-cleanup function. The test observed one unsafe cleanup target instead of zero.
+
+Root cause and fix:
+
+- The old application order created a random storage object before claiming the receipt in PostgreSQL. The `SECURITY DEFINER` transition and orphan-cleanup functions therefore had to trust a caller-supplied key and validated only its shape.
+- Receipt begin is now a dedicated atomic database operation. After authorization and row locking, PostgreSQL generates and stores an unpredictable UUID attempt token plus a 64-hex staging capability, then returns that exact pair.
+- Only a successful database claimant calls the narrow `BlobStore::create_staging_for` operation. Local storage validates the supplied capability and creates it exclusively without following links or overwriting an existing object.
+- Heartbeat, abort, promotion preparation, promotion-disposition recording, Received marking, and orphan cleanup compare both the stored attempt token and staging capability. Orphan cleanup inserts only values derived from the locked upload row.
+
+GREEN proof:
+
+- The adversarial PostgreSQL test creates two real receipt attempts, proves their generated capabilities differ, submits upload B's real token and key against upload A, and observes zero cleanup targets.
+- The real PostgreSQL plus `LocalBlobStore` concurrency test holds the winning request open on a pending body, observes one staging file, runs a losing request, and proves the staging directory still contains exactly one file.
+- The storage contract proves supplied staging capabilities use exclusive creation, reject reuse, preserve traversal defenses, and retain all symlink-race protections.
+- The restart test now asserts the injected finalize cut actually leaves the upload at Received before constructing the restarted service.
+
+Final fix-round verification:
+
+- Fresh database `folioharbor_task9_fix4_sqlx` migrated from zero through migration 9.
+- `FOLIOHARBOR_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:32771/postgres cargo test --workspace`
+- `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`
+- `DATABASE_URL=postgres://folioharbor_owner@127.0.0.1:32771/folioharbor_task9_fix4_sqlx cargo sqlx prepare --workspace -- --all-targets`
+- The changed fixed-shape receipt-begin and receipt-transition statements use SQLx compile-time checked macros with checked-in offline metadata.
+- `DATABASE_URL=postgres://folioharbor_owner@127.0.0.1:32771/folioharbor_task9_fix4_sqlx cargo sqlx prepare --check --workspace -- --all-targets`
+- `cargo fmt --all --check`
+- `git diff --check`

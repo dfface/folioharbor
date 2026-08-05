@@ -1,9 +1,10 @@
 #![allow(clippy::expect_used, clippy::too_many_lines)]
 
 use folioharbor_application::ports::{
-    AuthorizedUploadTransition, BlobDisposition, ClaimUploadCleanup, CreateUploadRecord,
-    ExpireUploads, FinalizeUploadReceipt, JobRepository, PrepareUploadPromotion,
-    RecordPromotionDisposition, UploadRepository, UploadRepositoryError, WorkerUploadTransition,
+    AuthorizedUploadTransition, BeginUploadReceipt, BlobDisposition, ClaimUploadCleanup,
+    CreateUploadRecord, ExpireUploads, FinalizeUploadReceipt, JobRepository,
+    PrepareUploadPromotion, RecordPromotionDisposition, UploadReceiptAttempt, UploadRepository,
+    UploadRepositoryError, WorkerUploadTransition,
 };
 use folioharbor_domain::{
     id::{JobId, LibraryId, RequestId, UploadId, UserId},
@@ -21,10 +22,6 @@ use folioharbor_postgres::{
 use folioharbor_test_support::postgres::TestPostgres;
 use time::{Duration, OffsetDateTime};
 
-fn staging_key(marker: char) -> String {
-    format!("staging:{}", marker.to_string().repeat(64))
-}
-
 fn instance_key(size: u64) -> String {
     format!("blob:instance-v1:{}:{size}", "0".repeat(64))
 }
@@ -38,6 +35,27 @@ fn disabled_key(upload: UploadId, size: u64) -> String {
 }
 
 const TEST_DIGEST: Sha256Digest = Sha256Digest::from_bytes([0; 32]);
+
+async fn begin_receipt(
+    repository: &PgUploadRepository,
+    actor: UserId,
+    library_id: LibraryId,
+    upload_id: UploadId,
+    from: UploadState,
+    now: OffsetDateTime,
+) -> anyhow::Result<UploadReceiptAttempt> {
+    repository
+        .begin_receipt(BeginUploadReceipt {
+            actor,
+            library_id,
+            upload_id,
+            from,
+            request_id: RequestId::new(),
+            now,
+        })
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("receipt was not claimed"))
+}
 
 #[tokio::test]
 async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -> anyhow::Result<()>
@@ -100,37 +118,29 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
         .await
         .expect_err("reader cannot create");
     assert!(matches!(denied, UploadRepositoryError::Forbidden));
+    let attempt = begin_receipt(
+        &repository,
+        user,
+        library,
+        upload,
+        UploadState::Created,
+        now,
+    )
+    .await?;
+    assert!(attempt.staging_key.starts_with("staging:"));
+    assert_eq!(attempt.staging_key.len(), 72);
     assert!(
         repository
-            .transition_authorized(AuthorizedUploadTransition {
-                actor: user,
-                library_id: library,
-                upload_id: upload,
-                from: UploadState::Created,
-                to: UploadState::Receiving,
-                received: ByteCount::new(0),
-                storage_key: Some(staging_key('a')),
-                error_code: None,
-                request_id: RequestId::new(),
-                now
-            })
-            .await?
-    );
-    assert!(
-        !repository
-            .transition_authorized(AuthorizedUploadTransition {
+            .begin_receipt(BeginUploadReceipt {
                 actor: user,
                 library_id: library,
                 upload_id: upload,
                 from: UploadState::Receiving,
-                to: UploadState::Receiving,
-                received: ByteCount::new(0),
-                storage_key: Some(staging_key('b')),
-                error_code: None,
                 request_id: RequestId::new(),
                 now,
             })
             .await?
+            .is_none()
     );
     assert!(
         repository
@@ -138,7 +148,8 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
                 actor: user,
                 library_id: library,
                 upload_id: upload,
-                staging_key: staging_key('a'),
+                attempt_token: attempt.attempt_token.clone(),
+                staging_key: attempt.staging_key.clone(),
                 final_key: instance_key(42),
                 digest: TEST_DIGEST,
                 received: ByteCount::new(42),
@@ -153,7 +164,8 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
                 actor: user,
                 library_id: library,
                 upload_id: upload,
-                staging_key: staging_key('a'),
+                attempt_token: attempt.attempt_token.clone(),
+                staging_key: attempt.staging_key.clone(),
                 final_key: instance_key(42),
                 disposition: BlobDisposition::Installed,
                 request_id: RequestId::new(),
@@ -174,7 +186,7 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
                 upload_id: upload,
                 received: ByteCount::new(42),
                 storage_key: instance_key(42),
-                staging_key: Some(staging_key('a')),
+                staging_key: Some(attempt.staging_key.clone()),
                 job_id: JobId::new(),
                 request_id: RequestId::new(),
                 now
@@ -220,6 +232,7 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
                 from: UploadState::Queued,
                 to: UploadState::Validating,
                 received: ByteCount::new(42),
+                attempt_token: None,
                 storage_key: Some(instance_key(42)),
                 error_code: None,
                 request_id: RequestId::new(),
@@ -297,29 +310,23 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
             now,
         })
         .await?;
-    assert!(
-        repository
-            .transition_authorized(AuthorizedUploadTransition {
-                actor: user,
-                library_id: library,
-                upload_id: duplicate,
-                from: UploadState::Created,
-                to: UploadState::Receiving,
-                received: ByteCount::new(0),
-                storage_key: Some(staging_key('c')),
-                error_code: None,
-                request_id: RequestId::new(),
-                now,
-            })
-            .await?
-    );
+    let duplicate_attempt = begin_receipt(
+        &repository,
+        user,
+        library,
+        duplicate,
+        UploadState::Created,
+        now,
+    )
+    .await?;
     assert!(
         repository
             .prepare_promotion(PrepareUploadPromotion {
                 actor: user,
                 library_id: library,
                 upload_id: duplicate,
-                staging_key: staging_key('c'),
+                attempt_token: duplicate_attempt.attempt_token.clone(),
+                staging_key: duplicate_attempt.staging_key.clone(),
                 final_key: instance_key(42),
                 digest: TEST_DIGEST,
                 received: ByteCount::new(42),
@@ -334,7 +341,8 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
                 actor: user,
                 library_id: library,
                 upload_id: duplicate,
-                staging_key: staging_key('c'),
+                attempt_token: duplicate_attempt.attempt_token.clone(),
+                staging_key: duplicate_attempt.staging_key.clone(),
                 final_key: instance_key(42),
                 disposition: BlobDisposition::Reused,
                 request_id: RequestId::new(),
@@ -363,7 +371,7 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
                 upload_id: duplicate,
                 received: ByteCount::new(42),
                 storage_key: instance_key(42),
-                staging_key: Some(staging_key('c')),
+                staging_key: Some(duplicate_attempt.staging_key),
                 job_id: JobId::new(),
                 request_id: RequestId::new(),
                 now,
@@ -469,22 +477,15 @@ async fn failed_receipts_release_once_and_retry_the_same_upload_id() -> anyhow::
             now,
         })
         .await?;
-    assert!(
-        repository
-            .transition_authorized(AuthorizedUploadTransition {
-                actor,
-                library_id: library,
-                upload_id: upload,
-                from: UploadState::Created,
-                to: UploadState::Receiving,
-                received: ByteCount::new(0),
-                storage_key: Some(staging_key('d')),
-                error_code: None,
-                request_id: RequestId::new(),
-                now
-            })
-            .await?
-    );
+    let first_attempt = begin_receipt(
+        &repository,
+        actor,
+        library,
+        upload,
+        UploadState::Created,
+        now,
+    )
+    .await?;
     assert!(
         repository
             .transition_authorized(AuthorizedUploadTransition {
@@ -494,7 +495,8 @@ async fn failed_receipts_release_once_and_retry_the_same_upload_id() -> anyhow::
                 from: UploadState::Receiving,
                 to: UploadState::Failed,
                 received: ByteCount::new(12),
-                storage_key: Some(staging_key('d')),
+                attempt_token: Some(first_attempt.attempt_token.clone()),
+                storage_key: Some(first_attempt.staging_key.clone()),
                 error_code: Some("upload_interrupted".into()),
                 request_id: RequestId::new(),
                 now
@@ -510,7 +512,8 @@ async fn failed_receipts_release_once_and_retry_the_same_upload_id() -> anyhow::
                 from: UploadState::Receiving,
                 to: UploadState::Failed,
                 received: ByteCount::new(12),
-                storage_key: Some(staging_key('d')),
+                attempt_token: Some(first_attempt.attempt_token.clone()),
+                storage_key: Some(first_attempt.staging_key.clone()),
                 error_code: Some("upload_interrupted".into()),
                 request_id: RequestId::new(),
                 now
@@ -519,22 +522,15 @@ async fn failed_receipts_release_once_and_retry_the_same_upload_id() -> anyhow::
     );
     let after_failure:(i64,String)=sqlx::query_as("SELECT l.quota_reserved_bytes,q.state FROM folioharbor.libraries l JOIN folioharbor.quota_reservations q USING(library_id) WHERE q.upload_id=$1").bind(upload.as_uuid()).fetch_one(&pools.owner).await?;
     assert_eq!(after_failure, (0, "released".into()));
-    assert!(
-        repository
-            .transition_authorized(AuthorizedUploadTransition {
-                actor,
-                library_id: library,
-                upload_id: upload,
-                from: UploadState::Failed,
-                to: UploadState::Receiving,
-                received: ByteCount::new(0),
-                storage_key: Some(staging_key('e')),
-                error_code: None,
-                request_id: RequestId::new(),
-                now
-            })
-            .await?
-    );
+    let second_attempt = begin_receipt(
+        &repository,
+        actor,
+        library,
+        upload,
+        UploadState::Failed,
+        now,
+    )
+    .await?;
     let after_retry:(i64,String)=sqlx::query_as("SELECT l.quota_reserved_bytes,q.state FROM folioharbor.libraries l JOIN folioharbor.quota_reservations q USING(library_id) WHERE q.upload_id=$1").bind(upload.as_uuid()).fetch_one(&pools.owner).await?;
     assert_eq!(after_retry, (50, "active".into()));
     assert!(
@@ -546,7 +542,8 @@ async fn failed_receipts_release_once_and_retry_the_same_upload_id() -> anyhow::
                 from: UploadState::Receiving,
                 to: UploadState::Failed,
                 received: ByteCount::new(12),
-                storage_key: Some(staging_key('d')),
+                attempt_token: Some(first_attempt.attempt_token.clone()),
+                storage_key: Some(first_attempt.staging_key.clone()),
                 error_code: Some("upload_interrupted".into()),
                 request_id: RequestId::new(),
                 now,
@@ -556,6 +553,7 @@ async fn failed_receipts_release_once_and_retry_the_same_upload_id() -> anyhow::
     let after_stale_abort: (i64, String) = sqlx::query_as("SELECT l.quota_reserved_bytes,q.state FROM folioharbor.libraries l JOIN folioharbor.quota_reservations q USING(library_id) WHERE q.upload_id=$1")
         .bind(upload.as_uuid()).fetch_one(&pools.owner).await?;
     assert_eq!(after_stale_abort, (50, "active".into()));
+    assert_ne!(first_attempt.staging_key, second_attempt.staging_key);
     pools.close().await;
     database.cleanup().await?;
     Ok(())
@@ -576,6 +574,7 @@ async fn security_definer_rejects_forged_storage_keys_identity_and_ownership() -
     let actor = UserId::new();
     let library = LibraryId::new();
     let upload = UploadId::new();
+    let other_upload = UploadId::new();
     sqlx::query("INSERT INTO folioharbor.user_accounts(user_id,normalized_email,display_email,status,created_at,verified_at) VALUES($1,$2,$2,'verified',$3,$3)")
         .bind(actor.as_uuid()).bind("storage-forgery@test.invalid").bind(now).execute(&pools.owner).await?;
     sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,created_at,updated_at) VALUES($1,'Storage forgery',$2,$2)")
@@ -597,22 +596,39 @@ async fn security_definer_rejects_forged_storage_keys_identity_and_ownership() -
             now,
         })
         .await?;
-    assert!(
-        repository
-            .transition_authorized(AuthorizedUploadTransition {
-                actor,
-                library_id: library,
-                upload_id: upload,
-                from: UploadState::Created,
-                to: UploadState::Receiving,
-                received: ByteCount::new(0),
-                storage_key: Some(format!("staging:{}", "a".repeat(64))),
-                error_code: None,
-                request_id: RequestId::new(),
-                now,
-            })
-            .await?
-    );
+    repository
+        .create_authorized(CreateUploadRecord {
+            upload_id: other_upload,
+            library_id: library,
+            actor,
+            request_id: RequestId::new(),
+            file_name: "other.epub".into(),
+            media_type: "application/epub+zip".into(),
+            declared_bytes: ByteCount::new(4),
+            dedup_scope: folioharbor_domain::imports::blob::DedupScope::Instance,
+            expires_at: now + Duration::hours(1),
+            now,
+        })
+        .await?;
+    let attempt = begin_receipt(
+        &repository,
+        actor,
+        library,
+        upload,
+        UploadState::Created,
+        now,
+    )
+    .await?;
+    let other_attempt = begin_receipt(
+        &repository,
+        actor,
+        library,
+        other_upload,
+        UploadState::Created,
+        now,
+    )
+    .await?;
+    assert_ne!(attempt.staging_key, other_attempt.staging_key);
 
     let mut transaction = pools.api.begin().await?;
     PgTransactionContext::apply(
@@ -620,21 +636,32 @@ async fn security_definer_rejects_forged_storage_keys_identity_and_ownership() -
         &DatabaseContext::api(actor, library, RequestId::new()),
     )
     .await?;
-    sqlx::query("SELECT folioharbor.upload_record_orphan_cleanup_authorized($1,$2,$3,$4,$5)")
+    sqlx::query("SELECT folioharbor.upload_record_orphan_cleanup_authorized($1,$2,$3,$4,$5,$6)")
         .bind(upload.as_uuid())
         .bind(library.as_uuid())
         .bind(actor.as_uuid())
+        .bind(attempt.attempt_token.parse::<uuid::Uuid>()?)
         .bind("blob:instance-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:4")
         .bind(now)
         .execute(&mut *transaction)
         .await?;
+    sqlx::query("SELECT folioharbor.upload_record_orphan_cleanup_authorized($1,$2,$3,$4,$5,$6)")
+        .bind(upload.as_uuid())
+        .bind(library.as_uuid())
+        .bind(actor.as_uuid())
+        .bind(other_attempt.attempt_token.parse::<uuid::Uuid>()?)
+        .bind(&other_attempt.staging_key)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
     let forged = sqlx::query_scalar::<_, bool>(
-        "SELECT folioharbor.upload_prepare_promotion_authorized($1,$2,$3,$4,$5,$6,$7,$8)",
+        "SELECT folioharbor.upload_prepare_promotion_authorized($1,$2,$3,$4,$5,$6,$7,$8,$9)",
     )
     .bind(upload.as_uuid())
     .bind(library.as_uuid())
     .bind(actor.as_uuid())
-    .bind(format!("staging:{}", "a".repeat(64)))
+    .bind(attempt.attempt_token.parse::<uuid::Uuid>()?)
+    .bind(&attempt.staging_key)
     .bind("blob:library-forged:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:4")
     .bind(vec![0_u8; 32])
     .bind(4_i64)
@@ -723,22 +750,16 @@ async fn worker_expiry_releases_created_upload_reservations_exactly_once() -> an
             now: now - Duration::hours(25),
         })
         .await?;
-    assert!(
-        PgUploadRepository::new(pools.api.clone())
-            .transition_authorized(AuthorizedUploadTransition {
-                actor,
-                library_id: library,
-                upload_id: receiving,
-                from: UploadState::Created,
-                to: UploadState::Receiving,
-                received: ByteCount::new(0),
-                storage_key: Some(staging_key('f')),
-                error_code: None,
-                request_id: RequestId::new(),
-                now: now - Duration::hours(2),
-            })
-            .await?
-    );
+    let api_repository = PgUploadRepository::new(pools.api.clone());
+    let receiving_attempt = begin_receipt(
+        &api_repository,
+        actor,
+        library,
+        receiving,
+        UploadState::Created,
+        now - Duration::hours(2),
+    )
+    .await?;
     let receipt_time = now - Duration::hours(2) + Duration::minutes(1);
     assert!(
         PgUploadRepository::new(pools.api.clone())
@@ -746,7 +767,8 @@ async fn worker_expiry_releases_created_upload_reservations_exactly_once() -> an
                 actor,
                 library_id: library,
                 upload_id: receiving,
-                staging_key: staging_key('f'),
+                attempt_token: receiving_attempt.attempt_token.clone(),
+                staging_key: receiving_attempt.staging_key.clone(),
                 final_key: disabled_key(receiving, 0),
                 digest: TEST_DIGEST,
                 received: ByteCount::new(0),
@@ -761,7 +783,8 @@ async fn worker_expiry_releases_created_upload_reservations_exactly_once() -> an
                 actor,
                 library_id: library,
                 upload_id: receiving,
-                staging_key: staging_key('f'),
+                attempt_token: receiving_attempt.attempt_token.clone(),
+                staging_key: receiving_attempt.staging_key.clone(),
                 final_key: disabled_key(receiving, 0),
                 disposition: BlobDisposition::Installed,
                 request_id: RequestId::new(),
@@ -797,22 +820,26 @@ async fn worker_expiry_releases_created_upload_reservations_exactly_once() -> an
     .bind(receiving.as_uuid())
     .fetch_one(&pools.owner)
     .await?;
-    assert_eq!(cleanup, ("pending".into(), staging_key('f'), true));
+    assert_eq!(
+        cleanup,
+        (
+            "pending".into(),
+            receiving_attempt.staging_key.clone(),
+            true
+        )
+    );
     assert!(
-        !PgUploadRepository::new(pools.api.clone())
-            .transition_authorized(AuthorizedUploadTransition {
+        PgUploadRepository::new(pools.api.clone())
+            .begin_receipt(BeginUploadReceipt {
                 actor,
                 library_id: library,
                 upload_id: receiving,
                 from: UploadState::Failed,
-                to: UploadState::Receiving,
-                received: ByteCount::new(0),
-                storage_key: Some(staging_key('1')),
-                error_code: None,
                 request_id: RequestId::new(),
                 now,
             })
             .await?
+            .is_none()
     );
     let cleanup_guard = expiry
         .claim_cleanup(ClaimUploadCleanup {
@@ -823,20 +850,17 @@ async fn worker_expiry_releases_created_upload_reservations_exactly_once() -> an
         .await?
         .expect("cleanup claim");
     assert!(
-        !PgUploadRepository::new(pools.api.clone())
-            .transition_authorized(AuthorizedUploadTransition {
+        PgUploadRepository::new(pools.api.clone())
+            .begin_receipt(BeginUploadReceipt {
                 actor,
                 library_id: library,
                 upload_id: receiving,
                 from: UploadState::Failed,
-                to: UploadState::Receiving,
-                received: ByteCount::new(0),
-                storage_key: Some(staging_key('3')),
-                error_code: None,
                 request_id: RequestId::new(),
                 now: now + Duration::hours(1),
             })
             .await?
+            .is_none()
     );
     let late_worker_pool = sqlx::PgPool::connect(&database.worker_url()?).await?;
     assert!(
@@ -853,19 +877,16 @@ async fn worker_expiry_releases_created_upload_reservations_exactly_once() -> an
     assert!(cleanup_guard.complete(now + Duration::hours(1)).await?);
     assert!(
         PgUploadRepository::new(pools.api.clone())
-            .transition_authorized(AuthorizedUploadTransition {
+            .begin_receipt(BeginUploadReceipt {
                 actor,
                 library_id: library,
                 upload_id: receiving,
                 from: UploadState::Failed,
-                to: UploadState::Receiving,
-                received: ByteCount::new(0),
-                storage_key: Some(staging_key('2')),
-                error_code: None,
                 request_id: RequestId::new(),
                 now,
             })
             .await?
+            .is_some()
     );
     pools.close().await;
     database.cleanup().await?;

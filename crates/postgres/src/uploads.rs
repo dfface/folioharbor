@@ -1,9 +1,10 @@
 use async_trait::async_trait;
 use folioharbor_application::ports::{
-    AuthorizedUploadTransition, BlobDisposition, ClaimUploadCleanup, CreateUploadRecord,
-    ExpireUploads, FinalizeUploadReceipt, HeartbeatUploadReceipt, MarkUploadReceived,
-    PrepareUploadPromotion, RecordPromotionDisposition, RecordUploadCleanup, UploadCleanup,
-    UploadCleanupGuard, UploadRepository, UploadRepositoryError, WorkerUploadTransition,
+    AuthorizedUploadTransition, BeginUploadReceipt, BlobDisposition, ClaimUploadCleanup,
+    CreateUploadRecord, ExpireUploads, FinalizeUploadReceipt, HeartbeatUploadReceipt,
+    MarkUploadReceived, PrepareUploadPromotion, RecordPromotionDisposition, RecordUploadCleanup,
+    UploadCleanup, UploadCleanupGuard, UploadReceiptAttempt, UploadRepository,
+    UploadRepositoryError, WorkerUploadTransition,
 };
 use folioharbor_domain::{
     id::{LibraryId, RequestId, UploadId, UserId},
@@ -103,6 +104,10 @@ fn persistence_error(_: sqlx::Error) -> UploadRepositoryError {
     UploadRepositoryError::Persistence
 }
 
+fn attempt_uuid(value: &str) -> Result<uuid::Uuid, UploadRepositoryError> {
+    value.parse().map_err(|_| UploadRepositoryError::Invalid)
+}
+
 #[async_trait]
 impl UploadRepository for PgUploadRepository {
     async fn create_authorized(
@@ -199,13 +204,54 @@ impl UploadRepository for PgUploadRepository {
             .await?;
         let received =
             i64::try_from(change.received.get()).map_err(|_| UploadRepositoryError::Invalid)?;
-        let changed = sqlx::query_scalar!(r#"SELECT folioharbor.upload_transition_authorized($1,$2,$3,$4,$5,$6,$7,$8,$9) AS "changed!""#,
-            change.upload_id.as_uuid(),change.library_id.as_uuid(),change.actor.as_uuid(),change.from.as_str(),change.to.as_str(),received,change.storage_key,change.error_code,change.now)
+        let attempt = change
+            .attempt_token
+            .as_deref()
+            .map(attempt_uuid)
+            .transpose()?;
+        let changed = sqlx::query_scalar!(
+            r#"SELECT folioharbor.upload_transition_authorized($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) AS "changed!""#,
+            change.upload_id.as_uuid(),
+            change.library_id.as_uuid(),
+            change.actor.as_uuid(),
+            change.from.as_str(),
+            change.to.as_str(),
+            received,
+            attempt,
+            change.storage_key,
+            change.error_code,
+            change.now,
+        )
         .fetch_one(&mut *transaction)
         .await
         .map_err(persistence_error)?;
         transaction.commit().await.map_err(persistence_error)?;
         Ok(changed)
+    }
+
+    async fn begin_receipt(
+        &self,
+        receipt: BeginUploadReceipt,
+    ) -> Result<Option<UploadReceiptAttempt>, UploadRepositoryError> {
+        let mut transaction = self
+            .transaction(receipt.actor, receipt.library_id, receipt.request_id)
+            .await?;
+        let row = sqlx::query!(
+            r#"SELECT attempt_token AS "attempt_token!",staging_key AS "staging_key!" FROM folioharbor.upload_begin_receipt_authorized($1,$2,$3,$4,$5)"#,
+            receipt.upload_id.as_uuid(),
+            receipt.library_id.as_uuid(),
+            receipt.actor.as_uuid(),
+            receipt.from.as_str(),
+            receipt.now,
+        )
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(persistence_error)?;
+        transaction.commit().await.map_err(persistence_error)?;
+        Ok(row.map(|row| UploadReceiptAttempt {
+            attempt_token: row.attempt_token.to_string(),
+            staging_key: row.staging_key,
+        }))
     }
 
     async fn transition_worker(
@@ -270,10 +316,11 @@ impl UploadRepository for PgUploadRepository {
             .transaction(receipt.actor, receipt.library_id, receipt.request_id)
             .await?;
         let changed: bool =
-            sqlx::query_scalar("SELECT folioharbor.upload_heartbeat_authorized($1,$2,$3,$4,$5)")
+            sqlx::query_scalar("SELECT folioharbor.upload_heartbeat_authorized($1,$2,$3,$4,$5,$6)")
                 .bind(receipt.upload_id.as_uuid())
                 .bind(receipt.library_id.as_uuid())
                 .bind(receipt.actor.as_uuid())
+                .bind(attempt_uuid(&receipt.attempt_token)?)
                 .bind(receipt.staging_key)
                 .bind(receipt.now)
                 .fetch_one(&mut *transaction)
@@ -291,11 +338,12 @@ impl UploadRepository for PgUploadRepository {
             .transaction(promotion.actor, promotion.library_id, promotion.request_id)
             .await?;
         let changed: bool = sqlx::query_scalar(
-            "SELECT folioharbor.upload_prepare_promotion_authorized($1,$2,$3,$4,$5,$6,$7,$8)",
+            "SELECT folioharbor.upload_prepare_promotion_authorized($1,$2,$3,$4,$5,$6,$7,$8,$9)",
         )
         .bind(promotion.upload_id.as_uuid())
         .bind(promotion.library_id.as_uuid())
         .bind(promotion.actor.as_uuid())
+        .bind(attempt_uuid(&promotion.attempt_token)?)
         .bind(promotion.staging_key)
         .bind(promotion.final_key)
         .bind(promotion.digest.as_bytes().to_vec())
@@ -320,11 +368,12 @@ impl UploadRepository for PgUploadRepository {
             .transaction(promotion.actor, promotion.library_id, promotion.request_id)
             .await?;
         let changed: bool = sqlx::query_scalar(
-            "SELECT folioharbor.upload_record_promotion_disposition_authorized($1,$2,$3,$4,$5,$6,$7)",
+            "SELECT folioharbor.upload_record_promotion_disposition_authorized($1,$2,$3,$4,$5,$6,$7,$8)",
         )
         .bind(promotion.upload_id.as_uuid())
         .bind(promotion.library_id.as_uuid())
         .bind(promotion.actor.as_uuid())
+        .bind(attempt_uuid(&promotion.attempt_token)?)
         .bind(promotion.staging_key)
         .bind(promotion.final_key)
         .bind(disposition)
@@ -346,11 +395,12 @@ impl UploadRepository for PgUploadRepository {
             .transaction(receipt.actor, receipt.library_id, receipt.request_id)
             .await?;
         let changed: bool = sqlx::query_scalar(
-            "SELECT folioharbor.upload_mark_received_authorized($1,$2,$3,$4,$5,$6,$7)",
+            "SELECT folioharbor.upload_mark_received_authorized($1,$2,$3,$4,$5,$6,$7,$8)",
         )
         .bind(receipt.upload_id.as_uuid())
         .bind(receipt.library_id.as_uuid())
         .bind(receipt.actor.as_uuid())
+        .bind(attempt_uuid(&receipt.attempt_token)?)
         .bind(receipt.staging_key)
         .bind(receipt.final_key)
         .bind(received)
@@ -369,15 +419,18 @@ impl UploadRepository for PgUploadRepository {
         let mut transaction = self
             .transaction(cleanup.actor, cleanup.library_id, cleanup.request_id)
             .await?;
-        sqlx::query("SELECT folioharbor.upload_record_orphan_cleanup_authorized($1,$2,$3,$4,$5)")
-            .bind(cleanup.upload_id.as_uuid())
-            .bind(cleanup.library_id.as_uuid())
-            .bind(cleanup.actor.as_uuid())
-            .bind(cleanup.staging_key)
-            .bind(cleanup.now)
-            .execute(&mut *transaction)
-            .await
-            .map_err(persistence_error)?;
+        sqlx::query(
+            "SELECT folioharbor.upload_record_orphan_cleanup_authorized($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(cleanup.upload_id.as_uuid())
+        .bind(cleanup.library_id.as_uuid())
+        .bind(cleanup.actor.as_uuid())
+        .bind(attempt_uuid(&cleanup.attempt_token)?)
+        .bind(cleanup.staging_key)
+        .bind(cleanup.now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(persistence_error)?;
         transaction.commit().await.map_err(persistence_error)
     }
 

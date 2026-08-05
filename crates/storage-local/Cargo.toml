@@ -12,7 +12,6 @@ cap-fs-ext.workspace = true
 folioharbor-application = { path = "../application", version = "0.1.0" }
 folioharbor-domain = { path = "../domain", version = "0.1.0" }
 fs2.workspace = true
-getrandom.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

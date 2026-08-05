@@ -12,7 +12,9 @@ use std::{
 use folioharbor_application::ports::{BlobStore, BlobStoreError};
 use folioharbor_domain::{
     id::{LibraryId, UploadId},
-    imports::blob::{BlobIdentity, ByteCount, DedupScope, Sha256Digest, StorageNamespace},
+    imports::blob::{
+        BlobIdentity, ByteCount, DedupScope, Sha256Digest, StorageKey, StorageNamespace,
+    },
 };
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -36,6 +38,12 @@ fn identity(payload: &[u8]) -> BlobIdentity {
     )
 }
 
+async fn create_staging(store: &LocalBlobStore<UnlimitedCapacity>, marker: char) -> StorageKey {
+    let key = StorageKey::from_opaque(format!("staging:{}", marker.to_string().repeat(64)));
+    store.create_staging_for(&key).await.expect("staging");
+    key
+}
+
 fn one_shot_swap(
     point: HookPoint,
     action: impl Fn() + Send + Sync + 'static,
@@ -56,7 +64,7 @@ async fn append_cannot_escape_when_staging_directory_is_swapped_after_validation
     let root = TempDir::new().expect("root");
     let outside = TempDir::new().expect("outside");
     let base = LocalBlobStore::with_capacity(root.path(), UnlimitedCapacity);
-    let key = base.create_staging().await.expect("staging");
+    let key = create_staging(&base, '1').await;
     let token = key
         .as_str()
         .strip_prefix("staging:")
@@ -86,7 +94,7 @@ async fn read_cannot_observe_outside_bytes_when_staging_directory_is_swapped() {
     let root = TempDir::new().expect("root");
     let outside = TempDir::new().expect("outside");
     let base = LocalBlobStore::with_capacity(root.path(), UnlimitedCapacity);
-    let key = base.create_staging().await.expect("staging");
+    let key = create_staging(&base, '2').await;
     base.append(&key, b"inside").await.expect("inside bytes");
     let token = key
         .as_str()
@@ -114,7 +122,7 @@ async fn delete_cannot_remove_outside_file_when_staging_directory_is_swapped() {
     let root = TempDir::new().expect("root");
     let outside = TempDir::new().expect("outside");
     let base = LocalBlobStore::with_capacity(root.path(), UnlimitedCapacity);
-    let key = base.create_staging().await.expect("staging");
+    let key = create_staging(&base, '3').await;
     let token = key
         .as_str()
         .strip_prefix("staging:")
@@ -144,7 +152,7 @@ async fn promotion_cannot_escape_when_object_directory_is_swapped_before_install
     let root = TempDir::new().expect("root");
     let outside = TempDir::new().expect("outside");
     let base = LocalBlobStore::with_capacity(root.path(), UnlimitedCapacity);
-    let staging = base.create_staging().await.expect("staging");
+    let staging = create_staging(&base, '4').await;
     base.append(&staging, b"blob").await.expect("payload");
     let blob = identity(b"blob");
     let relative = paths::final_relative(&blob);
@@ -174,7 +182,7 @@ async fn promotion_cannot_escape_when_object_directory_is_swapped_before_install
 async fn concurrent_destination_creation_never_gets_overwritten_during_install() {
     let root = TempDir::new().expect("root");
     let base = LocalBlobStore::with_capacity(root.path(), UnlimitedCapacity);
-    let staging = base.create_staging().await.expect("staging");
+    let staging = create_staging(&base, '5').await;
     base.append(&staging, b"blob").await.expect("payload");
     let blob = identity(b"blob");
     let destination = root.path().join(paths::final_relative(&blob));

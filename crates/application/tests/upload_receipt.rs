@@ -10,10 +10,11 @@ use folioharbor_application::{
     },
     ports::{
         AuthorizationRepository, AuthorizationRepositoryError, AuthorizedUploadTransition,
-        BlobDisposition, BlobStore, BlobStoreError, ClaimUploadCleanup, CreateUploadRecord,
-        ExpireUploads, FinalizeUploadReceipt, HeartbeatUploadReceipt, MarkUploadReceived,
-        PrepareUploadPromotion, RecordPromotionDisposition, UploadCleanup, UploadCleanupGuard,
-        UploadRepository, UploadRepositoryError, WorkerUploadTransition,
+        BeginUploadReceipt, BlobDisposition, BlobStore, BlobStoreError, ClaimUploadCleanup,
+        CreateUploadRecord, ExpireUploads, FinalizeUploadReceipt, HeartbeatUploadReceipt,
+        MarkUploadReceived, PrepareUploadPromotion, RecordPromotionDisposition, UploadCleanup,
+        UploadCleanupGuard, UploadReceiptAttempt, UploadRepository, UploadRepositoryError,
+        WorkerUploadTransition,
     },
 };
 use folioharbor_domain::{
@@ -108,6 +109,26 @@ impl UploadRepository for Uploads {
             .expect("transitions")
             .push((change.from, change.to));
         Ok(true)
+    }
+    async fn begin_receipt(
+        &self,
+        receipt: BeginUploadReceipt,
+    ) -> Result<Option<UploadReceiptAttempt>, UploadRepositoryError> {
+        let mut session = self.session.lock().expect("session");
+        if session.state != receipt.from {
+            return Ok(None);
+        }
+        self.transitions
+            .lock()
+            .expect("transitions")
+            .push((receipt.from, UploadState::Receiving));
+        let staging_key = format!("staging:{}", "a".repeat(64));
+        session.state = UploadState::Receiving;
+        session.storage_key = Some(StorageKey::from_opaque(staging_key.clone()));
+        Ok(Some(UploadReceiptAttempt {
+            attempt_token: UploadId::new().as_uuid().to_string(),
+            staging_key,
+        }))
     }
     async fn finalize_authorized(
         &self,
@@ -212,8 +233,8 @@ impl BlobStore for Blobs {
     fn candidate_key(&self, identity: &BlobIdentity) -> StorageKey {
         StorageKey::from_opaque(format!("blobs:{}", identity.namespace().as_str()))
     }
-    async fn create_staging(&self) -> Result<StorageKey, BlobStoreError> {
-        Ok(StorageKey::from_opaque("staging:test".into()))
+    async fn create_staging_for(&self, _: &StorageKey) -> Result<(), BlobStoreError> {
+        Ok(())
     }
     async fn append(&self, _: &StorageKey, bytes: &[u8]) -> Result<(), BlobStoreError> {
         self.appended.lock().expect("appended").push(bytes.len());

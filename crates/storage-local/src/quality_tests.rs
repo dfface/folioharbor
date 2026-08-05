@@ -15,7 +15,9 @@ use std::{
 use folioharbor_application::ports::BlobStore;
 use folioharbor_domain::{
     id::{LibraryId, UploadId},
-    imports::blob::{BlobIdentity, ByteCount, DedupScope, Sha256Digest, StorageNamespace},
+    imports::blob::{
+        BlobIdentity, ByteCount, DedupScope, Sha256Digest, StorageKey, StorageNamespace,
+    },
 };
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -37,6 +39,12 @@ fn identity(payload: &[u8]) -> BlobIdentity {
         Sha256Digest::from_bytes(Sha256::digest(payload).into()),
         ByteCount::new(payload.len() as u64),
     )
+}
+
+async fn create_staging(store: &LocalBlobStore<UnlimitedCapacity>, marker: char) -> StorageKey {
+    let key = StorageKey::from_opaque(format!("staging:{}", marker.to_string().repeat(64)));
+    store.create_staging_for(&key).await.expect("staging");
+    key
 }
 
 struct ShortReader {
@@ -72,7 +80,7 @@ fn bounded_read_continues_after_short_reads_until_length_or_eof() {
 async fn append_yields_the_current_thread_while_filesystem_work_is_blocked() {
     let root = TempDir::new().expect("root");
     let base = LocalBlobStore::with_capacity(root.path(), UnlimitedCapacity);
-    let key = base.create_staging().await.expect("staging");
+    let key = create_staging(&base, '6').await;
     let heartbeat = Arc::new(AtomicBool::new(false));
     let heartbeat_task = Arc::clone(&heartbeat);
     tokio::spawn(async move {
@@ -117,7 +125,7 @@ async fn append_yields_the_current_thread_while_filesystem_work_is_blocked() {
 async fn promotion_recovery_syncs_matching_destination_then_its_parent() {
     let root = TempDir::new().expect("root");
     let base = LocalBlobStore::with_capacity(root.path(), UnlimitedCapacity);
-    let staging = base.create_staging().await.expect("staging");
+    let staging = create_staging(&base, '7').await;
     base.append(&staging, b"blob").await.expect("payload");
     let blob = identity(b"blob");
     let destination = root.path().join(paths::final_relative(&blob));
