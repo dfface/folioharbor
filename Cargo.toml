@@ -24,6 +24,8 @@ argon2 = "0.5"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["json"] }
 base64 = "0.22"
+cap-std = "4.0"
+cap-fs-ext = "4.0"
 fs2 = "0.4"
 getrandom = "0.3"
 hmac = "0.12"

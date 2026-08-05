@@ -1,28 +1,57 @@
 #![forbid(unsafe_code)]
 
 mod capacity;
+mod file_ops;
 mod paths;
+mod secure_fs;
 
+#[cfg(test)]
+use std::sync::Arc;
 use std::{
-    fs::{self, File, OpenOptions},
+    fmt,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
 use async_trait::async_trait;
+use file_ops::{
+    append_options, open_optional, private_create_options, read_options,
+    remove_named_file_if_present, verify_file,
+};
 use folioharbor_application::ports::{BlobStore, BlobStoreError};
 use folioharbor_domain::imports::blob::{BlobIdentity, StorageKey};
-use sha2::{Digest, Sha256};
+use secure_fs::{SecureRoot, sync_dir};
 
 pub use capacity::{CapacityProbe, SystemCapacityProbe};
 
 pub const MIN_FREE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_IO_BYTES: usize = 8 * 1024 * 1024;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LocalBlobStore<P = SystemCapacityProbe> {
     root: PathBuf,
     capacity: P,
+    #[cfg(test)]
+    hook: Option<Arc<dyn Fn(HookPoint) + Send + Sync>>,
+}
+
+impl<P: fmt::Debug> fmt::Debug for LocalBlobStore<P> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalBlobStore")
+            .field("root", &self.root)
+            .field("capacity", &self.capacity)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HookPoint {
+    AppendOpen,
+    ReadOpen,
+    PromoteInstall,
+    Delete,
 }
 
 impl LocalBlobStore<SystemCapacityProbe> {
@@ -38,17 +67,28 @@ impl<P> LocalBlobStore<P> {
         Self {
             root: root.into(),
             capacity,
+            #[cfg(test)]
+            hook: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_test_hook(mut self, hook: Arc<dyn Fn(HookPoint) + Send + Sync>) -> Self {
+        self.hook = Some(hook);
+        self
+    }
+
+    #[cfg(test)]
+    fn run_test_hook(&self, point: HookPoint) {
+        if let Some(hook) = &self.hook {
+            hook(point);
         }
     }
 }
 
 impl<P: CapacityProbe> LocalBlobStore<P> {
-    fn prepare_root(&self) -> Result<(), BlobStoreError> {
-        fs::create_dir_all(&self.root)?;
-        if fs::symlink_metadata(&self.root)?.file_type().is_symlink() {
-            return Err(BlobStoreError::InvalidKey);
-        }
-        Ok(())
+    fn secure_root(&self) -> Result<SecureRoot, BlobStoreError> {
+        SecureRoot::open(&self.root).map_err(Into::into)
     }
 
     fn require_capacity(&self, additional: u64) -> Result<(), BlobStoreError> {
@@ -64,27 +104,18 @@ impl<P: CapacityProbe> LocalBlobStore<P> {
 #[async_trait]
 impl<P: CapacityProbe> BlobStore for LocalBlobStore<P> {
     async fn create_staging(&self) -> Result<StorageKey, BlobStoreError> {
-        self.prepare_root()?;
+        let root = self.secure_root()?;
         self.require_capacity(0)?;
-        let directory = self.root.join("staging");
-        ensure_directory(&self.root, &directory)?;
         for _ in 0..8 {
             let mut random = [0_u8; 32];
             getrandom::fill(&mut random).map_err(std::io::Error::other)?;
-            let token = hex(&random);
-            let key = StorageKey::from_opaque(format!("staging:{token}"));
-            let path = paths::staging_path(&self.root, &key)?;
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            match options.open(path) {
+            let key = StorageKey::from_opaque(format!("staging:{}", hex(&random)));
+            let relative = paths::staging_relative(&key)?;
+            let (directory, name) = root.open_parent(&relative, true)?;
+            match directory.open_with(&name, &private_create_options()) {
                 Ok(file) => {
                     file.sync_all()?;
-                    sync_directory(&directory)?;
+                    sync_dir(&directory)?;
                     return Ok(key);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -102,13 +133,14 @@ impl<P: CapacityProbe> BlobStore for LocalBlobStore<P> {
         if bytes.len() > MAX_IO_BYTES {
             return Err(BlobStoreError::InvalidRange);
         }
-        self.prepare_root()?;
+        let root = self.secure_root()?;
         self.require_capacity(u64::try_from(bytes.len()).map_err(std::io::Error::other)?)?;
-        let path = paths::staging_path(&self.root, key)?;
-        reject_symlink_below(&self.root, &path)?;
-        OpenOptions::new()
-            .append(true)
-            .open(path)?
+        let relative = paths::staging_relative(key)?;
+        let (directory, name) = root.open_parent(&relative, false)?;
+        #[cfg(test)]
+        self.run_test_hook(HookPoint::AppendOpen);
+        directory
+            .open_with(name, &append_options())?
             .write_all(bytes)?;
         Ok(())
     }
@@ -123,9 +155,12 @@ impl<P: CapacityProbe> BlobStore for LocalBlobStore<P> {
         if length > MAX_IO_BYTES {
             return Err(BlobStoreError::InvalidRange);
         }
-        let path = paths::stored_path(&self.root, key)?;
-        reject_symlink_below(&self.root, &path)?;
-        let mut file = File::open(path)?;
+        let root = self.secure_root()?;
+        let relative = paths::stored_relative(key)?;
+        let (directory, name) = root.open_parent(&relative, false)?;
+        #[cfg(test)]
+        self.run_test_hook(HookPoint::ReadOpen);
+        let mut file = directory.open_with(name, &read_options())?;
         file.seek(SeekFrom::Start(offset))?;
         let mut output = vec![0; length];
         let count = file.read(&mut output)?;
@@ -138,122 +173,96 @@ impl<P: CapacityProbe> BlobStore for LocalBlobStore<P> {
         staging: &StorageKey,
         identity: &BlobIdentity,
     ) -> Result<StorageKey, BlobStoreError> {
-        self.prepare_root()?;
+        let root = self.secure_root()?;
         self.require_capacity(0)?;
-        let source = paths::staging_path(&self.root, staging)?;
-        let destination = paths::final_path(&self.root, identity);
+        let source_relative = paths::staging_relative(staging)?;
+        let destination_relative = paths::final_relative(identity);
         let final_key = paths::final_key(identity);
-        reject_symlink_below(&self.root, &destination)?;
-        if destination.exists() {
-            verify_identity(&self.root, &destination, identity)?;
-            reject_symlink_below(&self.root, &source)?;
-            if source.exists() {
-                fs::remove_file(source)?;
-            }
+        let (destination_dir, destination_name) = root.open_parent(&destination_relative, true)?;
+        if let Some(mut existing) = open_optional(&destination_dir, &destination_name)? {
+            verify_file(&mut existing, identity)?;
+            existing.sync_all()?;
+            sync_dir(&destination_dir)?;
+            remove_source_if_present(&root, &source_relative)?;
             return Ok(final_key);
         }
-        reject_symlink_below(&self.root, &source)?;
-        verify_identity(&self.root, &source, identity)?;
-        let parent = destination.parent().ok_or(BlobStoreError::InvalidKey)?;
-        ensure_directory(&self.root, parent)?;
-        File::open(&source)?.sync_all()?;
-        fs::rename(&source, &destination)?;
-        File::open(&destination)?.sync_all()?;
-        sync_directory(parent)?;
+        let (source_dir, source_name) = match root.open_parent(&source_relative, false) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut existing = destination_dir.open_with(&destination_name, &read_options())?;
+                verify_file(&mut existing, identity)?;
+                return Ok(final_key);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut source = source_dir.open_with(&source_name, &read_options())?;
+        verify_file(&mut source, identity)?;
+        source.sync_all()?;
+        #[cfg(test)]
+        self.run_test_hook(HookPoint::PromoteInstall);
+        let installed =
+            match source_dir.hard_link(&source_name, &destination_dir, &destination_name) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+                Err(error) => return Err(error.into()),
+            };
+        let mut destination = destination_dir.open_with(&destination_name, &read_options())?;
+        if let Err(error) = verify_file(&mut destination, identity) {
+            drop(destination);
+            if installed {
+                destination_dir.remove_file(&destination_name)?;
+                sync_dir(&destination_dir)?;
+            }
+            return Err(error);
+        }
+        destination.sync_all()?;
+        drop(destination);
+        sync_dir(&destination_dir)?;
+        remove_named_file_if_present(&source_dir, &source_name)?;
+        sync_dir(&source_dir)?;
         Ok(final_key)
     }
 
     async fn delete(&self, key: &StorageKey) -> Result<(), BlobStoreError> {
-        let path = paths::stored_path(&self.root, key)?;
-        reject_symlink_below(&self.root, &path)?;
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => Err(BlobStoreError::InvalidKey),
-            Ok(_) => {
-                fs::remove_file(path)?;
-                Ok(())
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    async fn free_bytes(&self) -> Result<u64, BlobStoreError> {
-        self.prepare_root()?;
-        Ok(self.capacity.free_bytes(&self.root)?)
-    }
-}
-
-fn verify_identity(
-    root: &Path,
-    path: &Path,
-    identity: &BlobIdentity,
-) -> Result<(), BlobStoreError> {
-    reject_symlink_below(root, path)?;
-    let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let copied = std::io::copy(&mut file, &mut hasher)?;
-    let digest: [u8; 32] = hasher.finalize().into();
-    if copied != identity.byte_size().get() || digest != identity.sha256().as_bytes() {
-        return Err(BlobStoreError::IdentityMismatch);
-    }
-    Ok(())
-}
-
-fn ensure_directory(root: &Path, path: &Path) -> Result<(), BlobStoreError> {
-    let relative = path
-        .strip_prefix(root)
-        .map_err(|_| BlobStoreError::InvalidKey)?;
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        current.push(component);
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(BlobStoreError::InvalidKey);
-            }
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => return Err(BlobStoreError::InvalidKey),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                create_private_directory(&current)?;
-            }
+        let root = self.secure_root()?;
+        let relative = paths::stored_relative(key)?;
+        let (directory, name) = match root.open_parent(&relative, false) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-fn create_private_directory(path: &Path) -> Result<(), BlobStoreError> {
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(path)?;
-    Ok(())
-}
-
-fn reject_symlink_below(root: &Path, path: &Path) -> Result<(), BlobStoreError> {
-    let relative = path
-        .strip_prefix(root)
-        .map_err(|_| BlobStoreError::InvalidKey)?;
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        current.push(component);
-        match fs::symlink_metadata(&current) {
+        };
+        match directory.symlink_metadata(&name) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(BlobStoreError::InvalidKey);
             }
             Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error.into()),
         }
+        #[cfg(test)]
+        self.run_test_hook(HookPoint::Delete);
+        remove_named_file_if_present(&directory, &name)?;
+        sync_dir(&directory)?;
+        Ok(())
     }
-    Ok(())
+
+    async fn free_bytes(&self) -> Result<u64, BlobStoreError> {
+        let root = self.secure_root()?;
+        root.sync()?;
+        Ok(self.capacity.free_bytes(&self.root)?)
+    }
 }
 
-fn sync_directory(path: &Path) -> Result<(), BlobStoreError> {
-    File::open(path)?.sync_all()?;
-    Ok(())
+fn remove_source_if_present(root: &SecureRoot, relative: &Path) -> Result<(), BlobStoreError> {
+    match root.open_parent(relative, false) {
+        Ok((directory, name)) => {
+            remove_named_file_if_present(&directory, &name)?;
+            sync_dir(&directory)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -265,3 +274,6 @@ fn hex(bytes: &[u8]) -> String {
     }
     output
 }
+
+#[cfg(test)]
+mod race_tests;

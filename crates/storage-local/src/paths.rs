@@ -1,16 +1,16 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use folioharbor_domain::imports::blob::{BlobIdentity, StorageKey};
 
 use folioharbor_application::ports::BlobStoreError;
 
-pub(crate) fn staging_path(root: &Path, key: &StorageKey) -> Result<PathBuf, BlobStoreError> {
+pub(crate) fn staging_relative(key: &StorageKey) -> Result<PathBuf, BlobStoreError> {
     let token = key
         .as_str()
         .strip_prefix("staging:")
         .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .ok_or(BlobStoreError::InvalidKey)?;
-    Ok(root.join("staging").join(token))
+    Ok(PathBuf::from("staging").join(token))
 }
 
 pub(crate) fn final_key(identity: &BlobIdentity) -> StorageKey {
@@ -22,18 +22,18 @@ pub(crate) fn final_key(identity: &BlobIdentity) -> StorageKey {
     ))
 }
 
-pub(crate) fn final_path(root: &Path, identity: &BlobIdentity) -> PathBuf {
+pub(crate) fn final_relative(identity: &BlobIdentity) -> PathBuf {
     let hash = identity.sha256().to_hex();
-    root.join("objects")
+    PathBuf::from("objects")
         .join(identity.namespace().as_str())
         .join(&hash[0..2])
         .join(&hash[2..4])
         .join(format!("{hash}-{}", identity.byte_size().get()))
 }
 
-pub(crate) fn stored_path(root: &Path, key: &StorageKey) -> Result<PathBuf, BlobStoreError> {
+pub(crate) fn stored_relative(key: &StorageKey) -> Result<PathBuf, BlobStoreError> {
     if key.as_str().starts_with("staging:") {
-        return staging_path(root, key);
+        return staging_relative(key);
     }
     let mut parts = key.as_str().split(':');
     if parts.next() != Some("blob") {
@@ -53,8 +53,7 @@ pub(crate) fn stored_path(root: &Path, key: &StorageKey) -> Result<PathBuf, Blob
     {
         return Err(BlobStoreError::InvalidKey);
     }
-    Ok(root
-        .join("objects")
+    Ok(PathBuf::from("objects")
         .join(namespace)
         .join(&hash[0..2])
         .join(&hash[2..4])

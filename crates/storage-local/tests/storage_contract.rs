@@ -209,6 +209,23 @@ async fn deletion_does_not_follow_an_internal_directory_symlink() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn adapter_created_root_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = TempDir::new().expect("parent");
+    let root = parent.path().join("new-root");
+    let store = LocalBlobStore::with_capacity(&root, FakeCapacity::new(u64::MAX));
+    store.create_staging().await.expect("create root");
+    let mode = std::fs::metadata(root)
+        .expect("root metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700);
+}
+
 #[test]
 fn dedup_scopes_resolve_to_the_required_stable_or_fresh_namespaces() {
     let library = LibraryId::from_uuid(uuid::Uuid::from_u128(11));
