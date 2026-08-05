@@ -96,16 +96,17 @@ impl<R: IdentityRepository, C: Clock> AuthenticateSession<'_, R, C> {
             }))
     }
 }
-pub struct CurrentSession<'a, R> {
+pub struct CurrentSession<'a, R, C> {
     repository: &'a R,
+    clock: &'a C,
 }
-impl<'a, R> CurrentSession<'a, R> {
+impl<'a, R, C> CurrentSession<'a, R, C> {
     #[must_use]
-    pub const fn new(repository: &'a R) -> Self {
-        Self { repository }
+    pub const fn new(repository: &'a R, clock: &'a C) -> Self {
+        Self { repository, clock }
     }
 }
-impl<R: IdentityRepository> CurrentSession<'_, R> {
+impl<R: IdentityRepository, C: Clock> CurrentSession<'_, R, C> {
     /// Returns safe metadata for the actor's current session.
     ///
     /// # Errors
@@ -117,34 +118,36 @@ impl<R: IdentityRepository> CurrentSession<'_, R> {
             .map_err(|_| internal_error())?
             .into_iter()
             .find(|record| record.session_id == actor.session_id)
-            .map(|record| safe(record, actor.session_id))
+            .map(|record| safe(record, actor.session_id, self.clock.now()))
             .ok_or(AppError::NotFound {
                 code: "session_not_found",
             })
     }
 }
-pub struct ListSessions<'a, R> {
+pub struct ListSessions<'a, R, C> {
     repository: &'a R,
+    clock: &'a C,
 }
-impl<'a, R> ListSessions<'a, R> {
+impl<'a, R, C> ListSessions<'a, R, C> {
     #[must_use]
-    pub const fn new(repository: &'a R) -> Self {
-        Self { repository }
+    pub const fn new(repository: &'a R, clock: &'a C) -> Self {
+        Self { repository, clock }
     }
 }
-impl<R: IdentityRepository> ListSessions<'_, R> {
+impl<R: IdentityRepository, C: Clock> ListSessions<'_, R, C> {
     /// Lists only safe metadata for sessions owned by the actor.
     ///
     /// # Errors
     /// Returns an internal error when persistence is unavailable.
     pub async fn execute(&self, actor: Actor) -> Result<Vec<SafeSession>, AppError> {
+        let now = self.clock.now();
         Ok(self
             .repository
             .list_user_sessions(actor.user_id)
             .await
             .map_err(|_| internal_error())?
             .into_iter()
-            .map(|record| safe(record, actor.session_id))
+            .map(|record| safe(record, actor.session_id, now))
             .collect())
     }
 }
@@ -187,13 +190,17 @@ impl<R: IdentityRepository, C: Clock> RevokeSession<'_, R, C> {
         })
     }
 }
-fn safe(record: crate::ports::SessionRecord, current: SessionId) -> SafeSession {
+fn safe(
+    record: crate::ports::SessionRecord,
+    current: SessionId,
+    now: OffsetDateTime,
+) -> SafeSession {
     let status = SessionStatus::at(
         record.revoked_at,
         record.last_seen_at,
         record.idle_expires_at,
         record.absolute_expires_at,
-        record.last_seen_at,
+        now,
     );
     SafeSession {
         session_id: record.session_id,

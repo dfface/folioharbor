@@ -1,29 +1,42 @@
 openapi: 3.1.0
-info: {title: FolioHarbor API, version: 0.1.0}
+info:
+  title: FolioHarbor API
+  version: 0.1.0
 paths:
   /api/v1/auth/register:
     post:
       operationId: register
-      requestBody: {$ref: '#/components/requestBodies/Credentials'}
+      requestBody: {$ref: '#/components/requestBodies/Register'}
       responses:
-        '202': {description: Registration accepted}
+        '202': {$ref: '#/components/responses/RegistrationAccepted'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '413': {$ref: '#/components/responses/Problem'}
+        '415': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
         '429': {$ref: '#/components/responses/Problem'}
   /api/v1/auth/verify-email:
     post:
       operationId: verifyEmail
+      requestBody: {$ref: '#/components/requestBodies/VerifyEmail'}
       responses:
-        '204': {description: Verified}
+        '204': {description: Email address verified}
+        '400': {$ref: '#/components/responses/Problem'}
+        '413': {$ref: '#/components/responses/Problem'}
+        '415': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
         '429': {$ref: '#/components/responses/Problem'}
   /api/v1/auth/login:
     post:
       operationId: login
-      requestBody: {$ref: '#/components/requestBodies/Credentials'}
+      requestBody: {$ref: '#/components/requestBodies/Login'}
       responses:
-        '200': {description: Session cookie issued, headers: {Set-Cookie: {schema: {type: string}}}}
+        '200': {$ref: '#/components/responses/SessionIssued'}
+        '400': {$ref: '#/components/responses/Problem'}
         '401': {$ref: '#/components/responses/Problem'}
         '403': {$ref: '#/components/responses/Problem'}
+        '413': {$ref: '#/components/responses/Problem'}
+        '415': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
         '429': {$ref: '#/components/responses/Problem'}
   /api/v1/auth/logout:
     post:
@@ -31,20 +44,29 @@ paths:
       security: [{cookieAuth: []}]
       parameters: [{$ref: '#/components/parameters/CsrfToken'}]
       responses:
-        '204': {description: Logged out}
+        '204': {description: Session revoked and authentication cookies cleared}
         '401': {$ref: '#/components/responses/Problem'}
         '403': {$ref: '#/components/responses/Problem'}
   /api/v1/auth/forgot-password:
     post:
       operationId: forgotPassword
+      requestBody: {$ref: '#/components/requestBodies/ForgotPassword'}
       responses:
-        '202': {description: Request accepted whether or not the account exists}
+        '202': {$ref: '#/components/responses/PasswordResetAccepted'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '413': {$ref: '#/components/responses/Problem'}
+        '415': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
         '429': {$ref: '#/components/responses/Problem'}
   /api/v1/auth/reset-password:
     post:
       operationId: resetPassword
+      requestBody: {$ref: '#/components/requestBodies/ResetPassword'}
       responses:
-        '204': {description: Password changed and sessions revoked}
+        '200': {$ref: '#/components/responses/SessionIssued'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '413': {$ref: '#/components/responses/Problem'}
+        '415': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
         '429': {$ref: '#/components/responses/Problem'}
   /api/v1/auth/session:
@@ -52,24 +74,24 @@ paths:
       operationId: currentSession
       security: [{cookieAuth: []}]
       responses:
-        '200': {description: Current session, content: {application/json: {schema: {$ref: '#/components/schemas/Session'}}}}
+        '200': {$ref: '#/components/responses/CurrentSession'}
         '401': {$ref: '#/components/responses/Problem'}
   /api/v1/auth/sessions:
     get:
       operationId: listSessions
       security: [{cookieAuth: []}]
       responses:
-        '200': {description: Safe session metadata, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Session'}}}}}
+        '200': {$ref: '#/components/responses/SessionList'}
         '401': {$ref: '#/components/responses/Problem'}
   /api/v1/auth/sessions/{session_id}/revoke:
     post:
       operationId: revokeSession
       security: [{cookieAuth: []}]
       parameters:
-        - {name: session_id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: session_id, in: path, required: true, schema: {type: string, format: uuid}, example: 018f47b5-58b4-7ba6-9a3a-d9f41f17a26d}
         - {$ref: '#/components/parameters/CsrfToken'}
       responses:
-        '204': {description: Session revoked}
+        '204': {description: Owned session revoked; current-session cookies are cleared}
         '401': {$ref: '#/components/responses/Problem'}
         '403': {$ref: '#/components/responses/Problem'}
         '404': {$ref: '#/components/responses/Problem'}
@@ -77,20 +99,124 @@ components:
   securitySchemes:
     cookieAuth: {type: apiKey, in: cookie, name: folioharbor_session}
   parameters:
-    CsrfToken: {name: X-CSRF-Token, in: header, required: true, schema: {type: string}, description: Opaque session-bound CSRF token for unsafe authenticated requests}
-  requestBodies:
-    Credentials:
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
       required: true
-      content: {application/json: {schema: {type: object, required: [email, password], properties: {email: {type: string, format: email}, password: {type: string, format: password}}}}}
+      schema: {type: string}
+      example: opaque-csrf-token
+      description: Opaque session-bound CSRF token for unsafe authenticated requests
+  requestBodies:
+    Register:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/RegisterRequest'}
+          example: {email: reader@example.com, password: correct horse battery staple}
+    VerifyEmail:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/VerifyEmailRequest'}
+          example: {token: opaque-email-verification-token}
+    Login:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/LoginRequest'}
+          example: {email: reader@example.com, password: correct horse battery staple}
+    ForgotPassword:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ForgotPasswordRequest'}
+          example: {email: reader@example.com}
+    ResetPassword:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ResetPasswordRequest'}
+          example: {token: opaque-password-reset-token, new_password: a new correct horse battery staple}
   responses:
     Problem:
-      description: RFC 9457 problem
-      content: {application/problem+json: {schema: {$ref: '#/components/schemas/ProblemDetails'}}}
+      description: RFC 9457 problem details
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/ProblemDetails'}
+          example: {type: 'https://library.example/problems/invalid-json-body', title: Invalid request body, status: 422, detail: The request body could not be accepted as JSON for this operation., instance: /problems/01JREQ00000000000000000000, code: invalid_json_body, request_id: 01JREQ00000000000000000000}
+    RegistrationAccepted:
+      description: Registration accepted without account enumeration
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AcceptedResponse'}
+          example: {status: pending}
+    PasswordResetAccepted:
+      description: Password reset accepted whether or not the account exists
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AcceptedResponse'}
+          example: {status: accepted}
+    SessionIssued:
+      description: Fresh opaque session and CSRF cookies issued; secrets are absent from JSON
+      headers:
+        Set-Cookie: {schema: {type: string}, example: 'folioharbor_session=opaque; HttpOnly; Secure; SameSite=Lax; Path=/'}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/SessionIssuedResponse'}
+          example: {user_id: 018f47b5-58b4-7ba6-9a3a-d9f41f17a26d, session_id: 018f47b5-58b4-7ba6-9a3a-d9f41f17a26e}
+    CurrentSession:
+      description: Current safe session metadata
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Session'}
+          example: {session_id: 018f47b5-58b4-7ba6-9a3a-d9f41f17a26e, is_current: true, status: active}
+    SessionList:
+      description: Safe metadata for sessions owned by the authenticated user
+      content:
+        application/json:
+          schema: {type: array, items: {$ref: '#/components/schemas/Session'}}
+          example: [{session_id: 018f47b5-58b4-7ba6-9a3a-d9f41f17a26e, is_current: true, status: active}]
   schemas:
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties: {email: {type: string, format: email}, password: {type: string, format: password}}
+    VerifyEmailRequest:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties: {token: {type: string}}
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties: {email: {type: string, format: email}, password: {type: string, format: password}}
+    ForgotPasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [email]
+      properties: {email: {type: string, format: email}}
+    ResetPasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [token, new_password]
+      properties: {token: {type: string}, new_password: {type: string, format: password}}
+    AcceptedResponse:
+      type: object
+      required: [status]
+      properties: {status: {type: string, enum: [pending, accepted]}}
+    SessionIssuedResponse:
+      type: object
+      required: [user_id, session_id]
+      properties: {user_id: {type: string, format: uuid}, session_id: {type: string, format: uuid}}
     Session:
       type: object
       required: [session_id, is_current, status]
-      properties: {session_id: {type: string, format: uuid}, is_current: {type: boolean}, status: {type: string, enum: [active, idle_expired, absolute_expired, revoked]}}
+      properties:
+        session_id: {type: string, format: uuid}
+        is_current: {type: boolean}
+        status: {type: string, enum: [active, idle_expired, absolute_expired, revoked]}
     ProblemDetails:
       type: object
       required: [type, title, status, detail, instance, code, request_id]
@@ -100,5 +226,5 @@ components:
         status: {type: integer}
         detail: {type: string}
         instance: {type: string}
-        code: {type: string, examples: [unauthenticated, csrf_failed, rate_limited, session_not_found]}
+        code: {type: string, examples: [malformed_json, invalid_json_body, unsupported_media_type, unauthenticated, csrf_failed, rate_limited, session_not_found]}
         request_id: {type: string, description: ULID request identifier}

@@ -1,5 +1,7 @@
 use anyhow::Context;
-use folioharbor_application::ports::{IdentityRepository, NewAccount, NewSession, RegisterOutcome};
+use folioharbor_application::ports::{
+    IdentityRepository, NewAccount, NewSession, PasswordResetSession, RegisterOutcome,
+};
 use folioharbor_domain::{
     id::{DeviceId, LibraryId, RequestId, SessionId, UserId},
     identity::{
@@ -336,7 +338,25 @@ async fn repository_enforces_uniqueness_single_use_expiry_and_revocation() -> an
     );
     assert_eq!(
         repository
-            .reset_password(reset.hash_for_storage(), "new hash".to_owned(), now)
+            .reset_password(
+                reset.hash_for_storage(),
+                "new hash".to_owned(),
+                PasswordResetSession {
+                    session_id: SessionId::new(),
+                    session_token_hash: SessionToken::parse(SecretString::from(
+                        "new reset session".to_owned(),
+                    ))
+                    .hash_for_storage(),
+                    csrf_token_hash: SessionToken::parse(SecretString::from(
+                        "new reset csrf".to_owned(),
+                    ))
+                    .hash_for_storage(),
+                    created_at: now,
+                    idle_expires_at: now + time::Duration::minutes(30),
+                    absolute_expires_at: now + time::Duration::hours(2),
+                },
+                now,
+            )
             .await?,
         Some(user_id)
     );
@@ -359,7 +379,25 @@ async fn repository_enforces_uniqueness_single_use_expiry_and_revocation() -> an
     );
     assert_eq!(
         repository
-            .reset_password(reset.hash_for_storage(), "another".to_owned(), now)
+            .reset_password(
+                reset.hash_for_storage(),
+                "another".to_owned(),
+                PasswordResetSession {
+                    session_id: SessionId::new(),
+                    session_token_hash: SessionToken::parse(SecretString::from(
+                        "unused session".to_owned(),
+                    ))
+                    .hash_for_storage(),
+                    csrf_token_hash: SessionToken::parse(SecretString::from(
+                        "unused csrf".to_owned(),
+                    ))
+                    .hash_for_storage(),
+                    created_at: now,
+                    idle_expires_at: now + time::Duration::minutes(30),
+                    absolute_expires_at: now + time::Duration::hours(2),
+                },
+                now,
+            )
             .await?,
         None
     );

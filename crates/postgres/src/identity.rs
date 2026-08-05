@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use folioharbor_application::ports::{
     IdentityRepository, IdentityRepositoryError, LoginIdentity, NewAccount, NewSession,
-    RegisterOutcome, SessionPrincipal, SessionRecord,
+    PasswordResetSession, RegisterOutcome, SessionPrincipal, SessionRecord,
 };
 use folioharbor_domain::{
     id::{SessionId, UserId},
@@ -188,15 +188,22 @@ impl IdentityRepository for PgIdentityRepository {
         &self,
         token_hash: TokenHash,
         password_hash: String,
+        session: PasswordResetSession,
         now: OffsetDateTime,
     ) -> Result<Option<UserId>, IdentityRepositoryError> {
         let mut tx = self.pool.begin().await.map_err(persistence_error)?;
         let user_id = sqlx::query_scalar!(
-            "SELECT folioharbor.identity_reset_password($1, $2, $3, $4)",
+            "SELECT folioharbor.identity_reset_password($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             token_hash.as_bytes().as_slice(),
             password_hash,
             now,
             revocation_reason_value(SessionRevocationReason::PasswordReset),
+            session.session_id.as_uuid(),
+            session.session_token_hash.as_bytes().as_slice(),
+            session.csrf_token_hash.as_bytes().as_slice(),
+            session.created_at,
+            session.idle_expires_at,
+            session.absolute_expires_at,
         )
         .fetch_one(&mut *tx)
         .await

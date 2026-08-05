@@ -7,18 +7,22 @@ use async_trait::async_trait;
 use folioharbor_application::{
     error::AppError,
     identity::{
-        Login, LoginCommand, Logout, LogoutCommand, PasswordResetRequested, PendingAccount,
+        CompletePasswordReset, CompletePasswordResetCommand, CurrentSession, ListSessions, Login,
+        LoginCommand, Logout, LogoutCommand, PasswordResetRequested, PendingAccount,
         RegisterAccount, RegisterAccountCommand, RequestPasswordReset, RequestPasswordResetCommand,
     },
     ports::{
         Argon2PasswordHasher, IdentityRepository, IdentityRepositoryError, LoginIdentity,
         MailError, Mailer, NewAccount, NewSession, PasswordHashError, PasswordHasher,
-        RegisterOutcome, SessionPrincipal,
+        PasswordResetSession, RandomSource, RegisterOutcome, SessionPrincipal, SessionRecord,
     },
 };
 use folioharbor_domain::{
-    id::UserId,
-    identity::{AccountStatus, NormalizedEmail, SessionRevocationReason, SessionToken, TokenHash},
+    id::{SessionId, UserId},
+    identity::{
+        AccountStatus, CsrfToken, NormalizedEmail, SessionRevocationReason, SessionStatus,
+        SessionToken, TokenHash,
+    },
     time::OffsetDateTime,
 };
 use folioharbor_test_support::{clock::FakeClock, random::FixedRandom};
@@ -49,8 +53,11 @@ struct FakeRepository {
     register_outcome: RegisterOutcome,
     login: Mutex<Option<LoginIdentity>>,
     reset_exists: bool,
+    reset_user_id: Option<UserId>,
     created_session: Mutex<Option<NewSession>>,
     revocations: Mutex<Vec<SessionRevocationReason>>,
+    sessions: Mutex<Vec<SessionRecord>>,
+    reset_session: Mutex<Option<PasswordResetSession>>,
 }
 
 impl FakeRepository {
@@ -59,8 +66,11 @@ impl FakeRepository {
             register_outcome: RegisterOutcome::Existing,
             login: Mutex::new(None),
             reset_exists: false,
+            reset_user_id: None,
             created_session: Mutex::new(None),
             revocations: Mutex::new(Vec::new()),
+            sessions: Mutex::new(Vec::new()),
+            reset_session: Mutex::new(None),
         }
     }
 }
@@ -75,7 +85,7 @@ impl IdentityRepository for FakeRepository {
         _: TokenHash,
         _: OffsetDateTime,
     ) -> Result<Option<UserId>, IdentityRepositoryError> {
-        Ok(None)
+        Ok(self.reset_user_id)
     }
     async fn find_login_identity(
         &self,
@@ -127,15 +137,41 @@ impl IdentityRepository for FakeRepository {
         &self,
         _: TokenHash,
         _: String,
+        session: PasswordResetSession,
         _: OffsetDateTime,
     ) -> Result<Option<UserId>, IdentityRepositoryError> {
-        Ok(None)
+        *self
+            .reset_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session);
+        Ok(self.reset_user_id)
+    }
+    async fn list_user_sessions(
+        &self,
+        _: UserId,
+    ) -> Result<Vec<SessionRecord>, IdentityRepositoryError> {
+        Ok(self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone())
     }
 }
 
 struct SpyHasher {
     valid: bool,
     dummy_calls: AtomicUsize,
+}
+struct SequenceRandom(AtomicUsize);
+impl RandomSource for SequenceRandom {
+    fn fill(&self, destination: &mut [u8]) {
+        let value = if self.0.fetch_add(1, Ordering::SeqCst).is_multiple_of(2) {
+            73
+        } else {
+            74
+        };
+        destination.fill(value);
+    }
 }
 impl PasswordHasher for SpyHasher {
     fn hash(&self, _: &SecretString) -> Result<String, PasswordHashError> {
@@ -228,6 +264,103 @@ async fn failing_mail_delivery_cannot_enumerate_registration_or_reset_accounts()
 
 fn fixture_clock() -> FakeClock {
     FakeClock::new(OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1_800_000_000))
+}
+
+#[tokio::test]
+async fn safe_session_status_uses_clock_for_idle_and_absolute_expiry() -> Result<(), AppError> {
+    let now = OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1_800_000_000);
+    let idle = SessionId::new();
+    let absolute = SessionId::new();
+    let repository = FakeRepository {
+        sessions: Mutex::new(vec![
+            SessionRecord {
+                session_id: idle,
+                created_at: now - time::Duration::hours(2),
+                last_seen_at: now - time::Duration::hours(1),
+                idle_expires_at: now,
+                absolute_expires_at: now + time::Duration::hours(1),
+                revoked_at: None,
+            },
+            SessionRecord {
+                session_id: absolute,
+                created_at: now - time::Duration::hours(3),
+                last_seen_at: now - time::Duration::minutes(1),
+                idle_expires_at: now + time::Duration::minutes(30),
+                absolute_expires_at: now,
+                revoked_at: None,
+            },
+        ]),
+        ..FakeRepository::empty()
+    };
+    let actor = folioharbor_application::actor::Actor {
+        user_id: UserId::new(),
+        session_id: idle,
+    };
+
+    let clock = FakeClock::new(now);
+    let current = CurrentSession::new(&repository, &clock)
+        .execute(actor)
+        .await?;
+    let listed = ListSessions::new(&repository, &clock)
+        .execute(actor)
+        .await?;
+
+    assert_eq!(current.status, SessionStatus::IdleExpired);
+    assert_eq!(listed[0].status, SessionStatus::IdleExpired);
+    assert_eq!(listed[1].status, SessionStatus::AbsolutelyExpired);
+    Ok(())
+}
+
+#[tokio::test]
+async fn password_reset_issues_fresh_opaque_session_and_csrf_tokens() -> Result<(), AppError> {
+    let user_id = UserId::new();
+    let repository = FakeRepository {
+        reset_user_id: Some(user_id),
+        ..FakeRepository::empty()
+    };
+    let hasher = SpyHasher {
+        valid: true,
+        dummy_calls: AtomicUsize::new(0),
+    };
+    let clock = fixture_clock();
+    let random = SequenceRandom(AtomicUsize::new(0));
+
+    let issued = CompletePasswordReset::new(&repository, &hasher, &clock, &random)
+        .execute(CompletePasswordResetCommand {
+            token: SecretString::from("reset-token".to_owned()),
+            new_password: SecretString::from("new-password".to_owned()),
+        })
+        .await?;
+
+    assert_eq!(issued.user_id, user_id);
+    assert_eq!(issued.session_token.expose_secret().len(), 43);
+    assert_eq!(issued.csrf_token.expose_secret().len(), 43);
+    assert_ne!(
+        issued.session_token.expose_secret(),
+        issued.csrf_token.expose_secret()
+    );
+    let stored = repository
+        .reset_session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stored = stored.as_ref().ok_or(AppError::DependencyUnavailable {
+        code: "test_reset_session_missing",
+    })?;
+    assert_eq!(
+        stored.session_token_hash,
+        SessionToken::parse(SecretString::from(
+            issued.session_token.expose_secret().to_owned()
+        ))
+        .hash_for_storage()
+    );
+    assert_eq!(
+        stored.csrf_token_hash,
+        CsrfToken::parse(SecretString::from(
+            issued.csrf_token.expose_secret().to_owned()
+        ))
+        .hash_for_storage()
+    );
+    Ok(())
 }
 
 #[tokio::test]

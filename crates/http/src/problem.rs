@@ -235,6 +235,34 @@ pub fn response(error: &AppError, context: &ProblemContext) -> Response {
 }
 
 #[must_use]
+pub(crate) fn request_validation_response(
+    status: StatusCode,
+    code: &'static str,
+    context: &ProblemContext,
+) -> Response {
+    let request_id = context.request_id.to_public_string();
+    let problem = ProblemDetails {
+        type_uri: ProblemTypeUri(format!(
+            "{}{}",
+            context.problem_base,
+            code.replace('_', "-")
+        )),
+        title: "Invalid request body",
+        status: status.as_u16(),
+        detail: "The request body could not be accepted as JSON for this operation.",
+        instance: format!("/problems/{request_id}"),
+        code,
+        request_id,
+        fields: Vec::new(),
+    };
+    let mut response = (status, axum::Json(problem)).into_response();
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(PROBLEM_CONTENT_TYPE));
+    response
+}
+
+#[must_use]
 pub fn response_from_extensions(
     extensions: &Extensions,
     public_base_url: &Url,

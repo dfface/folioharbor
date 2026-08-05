@@ -1,6 +1,7 @@
 use super::AppState;
 use crate::{
     auth::{AuthenticatedActor, ClientIpPrefix},
+    json::ApiJson,
     middleware::csrf::{SESSION_COOKIE, cookie_value},
     problem::{ProblemContext, response as problem_response},
 };
@@ -22,7 +23,10 @@ use folioharbor_application::{
     },
     rate_limit::{CheckRateLimit, RateLimitDecision, RateLimitPurpose},
 };
-use folioharbor_domain::{id::SessionId, identity::SessionStatus};
+use folioharbor_domain::{
+    id::{SessionId, UserId},
+    identity::SessionStatus,
+};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -74,6 +78,34 @@ struct SessionResponse {
     status: &'static str,
 }
 
+fn issued_session_response(
+    user_id: UserId,
+    session_id: SessionId,
+    session_token: &SecretString,
+    csrf_token: &SecretString,
+) -> Response {
+    let mut response = Json(LoginResponse {
+        user_id: user_id.as_uuid().to_string(),
+        session_id: session_id.as_uuid().to_string(),
+    })
+    .into_response();
+    let cookie = format!(
+        "{SESSION_COOKIE}={}; HttpOnly; Secure; SameSite=Lax; Path=/",
+        session_token.expose_secret()
+    );
+    let csrf = format!(
+        "folioharbor_csrf={}; Secure; SameSite=Lax; Path=/",
+        csrf_token.expose_secret()
+    );
+    if let Ok(value) = HeaderValue::from_str(&cookie) {
+        response.headers_mut().append(SET_COOKIE, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&csrf) {
+        response.headers_mut().append(SET_COOKIE, value);
+    }
+    response
+}
+
 async fn limited(
     state: &AppState,
     purpose: RateLimitPurpose,
@@ -98,7 +130,7 @@ async fn register(
     State(state): State<AppState>,
     Extension(problem): Extension<ProblemContext>,
     ClientIpPrefix(ip_prefix): ClientIpPrefix,
-    Json(body): Json<Credentials>,
+    ApiJson(body): ApiJson<Credentials>,
 ) -> Response {
     if let Err(error) = limited(
         &state,
@@ -126,7 +158,7 @@ async fn verify_email(
     State(state): State<AppState>,
     Extension(problem): Extension<ProblemContext>,
     ClientIpPrefix(ip_prefix): ClientIpPrefix,
-    Json(body): Json<TokenBody>,
+    ApiJson(body): ApiJson<TokenBody>,
 ) -> Response {
     if let Err(error) = limited(
         &state,
@@ -153,7 +185,7 @@ async fn login(
     State(state): State<AppState>,
     Extension(problem): Extension<ProblemContext>,
     ClientIpPrefix(ip_prefix): ClientIpPrefix,
-    Json(body): Json<Credentials>,
+    ApiJson(body): ApiJson<Credentials>,
 ) -> Response {
     if let Err(error) = limited(&state, RateLimitPurpose::Login, &body.email, &ip_prefix).await {
         return problem_response(&error, &problem);
@@ -166,28 +198,12 @@ async fn login(
         })
         .await
     {
-        Ok(session) => {
-            let mut response = Json(LoginResponse {
-                user_id: session.user_id.as_uuid().to_string(),
-                session_id: session.session_id.as_uuid().to_string(),
-            })
-            .into_response();
-            let cookie = format!(
-                "{SESSION_COOKIE}={}; HttpOnly; Secure; SameSite=Lax; Path=/",
-                session.session_token.expose_secret()
-            );
-            let csrf = format!(
-                "folioharbor_csrf={}; Secure; SameSite=Lax; Path=/",
-                session.csrf_token.expose_secret()
-            );
-            if let Ok(value) = HeaderValue::from_str(&cookie) {
-                response.headers_mut().append(SET_COOKIE, value);
-            }
-            if let Ok(value) = HeaderValue::from_str(&csrf) {
-                response.headers_mut().append(SET_COOKIE, value);
-            }
-            response
-        }
+        Ok(session) => issued_session_response(
+            session.user_id,
+            session.session_id,
+            &session.session_token,
+            &session.csrf_token,
+        ),
         Err(error) => problem_response(&error, &problem),
     }
 }
@@ -218,7 +234,7 @@ async fn forgot_password(
     State(state): State<AppState>,
     Extension(problem): Extension<ProblemContext>,
     ClientIpPrefix(ip_prefix): ClientIpPrefix,
-    Json(body): Json<ForgotPasswordBody>,
+    ApiJson(body): ApiJson<ForgotPasswordBody>,
 ) -> Response {
     if let Err(error) = limited(
         &state,
@@ -243,7 +259,7 @@ async fn reset_password(
     State(state): State<AppState>,
     Extension(problem): Extension<ProblemContext>,
     ClientIpPrefix(ip_prefix): ClientIpPrefix,
-    Json(body): Json<ResetPasswordBody>,
+    ApiJson(body): ApiJson<ResetPasswordBody>,
 ) -> Response {
     if let Err(error) = limited(
         &state,
@@ -263,7 +279,12 @@ async fn reset_password(
         })
         .await
     {
-        Ok(_) => cleared_cookie_response(),
+        Ok(session) => issued_session_response(
+            session.user_id,
+            session.session_id,
+            &session.session_token,
+            &session.csrf_token,
+        ),
         Err(error) => problem_response(&error, &problem),
     }
 }

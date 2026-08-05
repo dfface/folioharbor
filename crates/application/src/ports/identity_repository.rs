@@ -45,6 +45,16 @@ pub struct NewSession {
     pub absolute_expires_at: OffsetDateTime,
 }
 
+#[derive(Debug)]
+pub struct PasswordResetSession {
+    pub session_id: SessionId,
+    pub session_token_hash: TokenHash,
+    pub csrf_token_hash: TokenHash,
+    pub created_at: OffsetDateTime,
+    pub idle_expires_at: OffsetDateTime,
+    pub absolute_expires_at: OffsetDateTime,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionPrincipal {
     pub user_id: UserId,
@@ -115,6 +125,7 @@ pub trait IdentityRepository: Send + Sync {
         &self,
         token_hash: TokenHash,
         password_hash: String,
+        session: PasswordResetSession,
         now: OffsetDateTime,
     ) -> Result<Option<UserId>, IdentityRepositoryError>;
 

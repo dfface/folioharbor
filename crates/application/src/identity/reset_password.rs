@@ -1,15 +1,17 @@
 use folioharbor_domain::{
-    id::UserId,
-    identity::{NormalizedEmail, PasswordResetToken},
+    id::{SessionId, UserId},
+    identity::{CsrfToken, NormalizedEmail, PasswordResetToken, SessionToken},
 };
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::{
     error::{AppError, FieldViolation},
-    ports::{Clock, IdentityRepository, Mailer, PasswordHasher, RandomSource},
+    ports::{
+        Clock, IdentityRepository, Mailer, PasswordHasher, PasswordResetSession, RandomSource,
+    },
 };
 
-use super::{RESET_LIFETIME, internal_error};
+use super::{RESET_LIFETIME, SESSION_ABSOLUTE_LIFETIME, SESSION_IDLE_LIFETIME, internal_error};
 
 pub struct RequestPasswordResetCommand {
     pub email: String,
@@ -70,27 +72,39 @@ pub struct CompletePasswordResetCommand {
     pub token: SecretString,
     pub new_password: SecretString,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct PasswordResetComplete {
     pub user_id: UserId,
+    pub session_id: SessionId,
+    pub session_token: SecretString,
+    pub csrf_token: SecretString,
 }
 
-pub struct CompletePasswordReset<'a, R, H, C> {
+pub struct CompletePasswordReset<'a, R, H, C, N> {
     repository: &'a R,
     password_hasher: &'a H,
     clock: &'a C,
+    random: &'a N,
 }
-impl<'a, R, H, C> CompletePasswordReset<'a, R, H, C> {
+impl<'a, R, H, C, N> CompletePasswordReset<'a, R, H, C, N> {
     #[must_use]
-    pub const fn new(repository: &'a R, password_hasher: &'a H, clock: &'a C) -> Self {
+    pub const fn new(
+        repository: &'a R,
+        password_hasher: &'a H,
+        clock: &'a C,
+        random: &'a N,
+    ) -> Self {
         Self {
             repository,
             password_hasher,
             clock,
+            random,
         }
     }
 }
-impl<R: IdentityRepository, H: PasswordHasher, C: Clock> CompletePasswordReset<'_, R, H, C> {
+impl<R: IdentityRepository, H: PasswordHasher, C: Clock, N: RandomSource>
+    CompletePasswordReset<'_, R, H, C, N>
+{
     /// Consumes a reset token, replaces the password, and revokes active sessions.
     ///
     /// # Errors
@@ -114,11 +128,36 @@ impl<R: IdentityRepository, H: PasswordHasher, C: Clock> CompletePasswordReset<'
             .password_hasher
             .hash(&command.new_password)
             .map_err(|_| internal_error())?;
+        let mut session_bytes = [0_u8; 32];
+        let mut csrf_bytes = [0_u8; 32];
+        self.random.fill(&mut session_bytes);
+        self.random.fill(&mut csrf_bytes);
+        let session_token = SessionToken::from_random_bytes(session_bytes);
+        let csrf_token = CsrfToken::from_random_bytes(csrf_bytes);
+        let session_id = SessionId::new();
+        let now = self.clock.now();
         self.repository
-            .reset_password(hash, password_hash, self.clock.now())
+            .reset_password(
+                hash,
+                password_hash,
+                PasswordResetSession {
+                    session_id,
+                    session_token_hash: session_token.hash_for_storage(),
+                    csrf_token_hash: csrf_token.hash_for_storage(),
+                    created_at: now,
+                    idle_expires_at: now + SESSION_IDLE_LIFETIME,
+                    absolute_expires_at: now + SESSION_ABSOLUTE_LIFETIME,
+                },
+                now,
+            )
             .await
             .map_err(|_| internal_error())?
-            .map(|user_id| PasswordResetComplete { user_id })
+            .map(|user_id| PasswordResetComplete {
+                user_id,
+                session_id,
+                session_token: session_token.into_secret(),
+                csrf_token: csrf_token.into_secret(),
+            })
             .ok_or(AppError::Invalid {
                 code: "invalid_or_expired_password_reset_token",
                 fields: Vec::new(),

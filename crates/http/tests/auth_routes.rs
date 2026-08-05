@@ -106,6 +106,9 @@ impl CompletePasswordResetUseCase for FakeAuth {
     ) -> Result<PasswordResetComplete, AppError> {
         Ok(PasswordResetComplete {
             user_id: actor().user_id,
+            session_id: actor().session_id,
+            session_token: SecretString::from("rotated-session-secret".to_owned()),
+            csrf_token: SecretString::from("rotated-csrf-secret".to_owned()),
         })
     }
 }
@@ -199,6 +202,56 @@ async fn response_json(response: axum::response::Response) -> serde_json::Value 
 }
 
 #[tokio::test]
+async fn request_validation_failures_are_correlated_problem_details() {
+    let cases = [
+        (
+            Some("application/json"),
+            r#"{"email":"reader@example.com""#,
+            StatusCode::BAD_REQUEST,
+            "malformed_json",
+        ),
+        (
+            Some("application/json"),
+            r#"{"email":"reader@example.com"}"#,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_json_body",
+        ),
+        (
+            Some("text/plain"),
+            r#"{"email":"reader@example.com","password":"secret"}"#,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+        ),
+    ];
+
+    for (content_type, body, expected_status, expected_code) in cases {
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/auth/login");
+        if let Some(content_type) = content_type {
+            request = request.header(CONTENT_TYPE, content_type);
+        }
+        let response = app(Arc::new(FakeAuth::default()))
+            .oneshot(request.body(Body::from(body)).expect("request"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), expected_status);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/problem+json")
+        );
+        let json = response_json(response).await;
+        assert_eq!(json["code"], expected_code);
+        let request_id = json["request_id"].as_str().expect("request ID");
+        assert_eq!(request_id.len(), 26);
+        assert_eq!(json["instance"], format!("/problems/{request_id}"));
+    }
+}
+
+#[tokio::test]
 async fn login_sets_secure_opaque_cookie_without_returning_tokens_in_json() {
     let response = app(Arc::new(FakeAuth::default()))
         .oneshot(
@@ -226,6 +279,48 @@ async fn login_sets_secure_opaque_cookie_without_returning_tokens_in_json() {
     assert!(cookie.contains("SameSite=Lax"));
     assert!(cookie.contains("Path=/"));
     let json = response_json(response).await;
+    assert!(json.get("session_token").is_none());
+    assert!(json.get("csrf_token").is_none());
+}
+
+#[tokio::test]
+async fn password_reset_sets_fresh_secure_cookies_without_tokens_in_json() {
+    let response = app(Arc::new(FakeAuth::default()))
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/auth/reset-password")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"token":"reset-token","new_password":"new-password"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookies = response
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>();
+    assert!(cookies.iter().any(|cookie| {
+        cookie.starts_with("folioharbor_session=rotated-session-secret;")
+            && cookie.contains("HttpOnly")
+            && cookie.contains("Secure")
+            && cookie.contains("SameSite=Lax")
+            && cookie.contains("Path=/")
+    }));
+    assert!(cookies.iter().any(
+        |cookie| cookie.starts_with("folioharbor_csrf=rotated-csrf-secret;")
+            && cookie.contains("Secure")
+            && cookie.contains("SameSite=Lax")
+            && cookie.contains("Path=/")
+    ));
+    let json = response_json(response).await;
+    assert_eq!(json["user_id"], actor().user_id.as_uuid().to_string());
+    assert_eq!(json["session_id"], actor().session_id.as_uuid().to_string());
     assert!(json.get("session_token").is_none());
     assert!(json.get("csrf_token").is_none());
 }

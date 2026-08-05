@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT folioharbor.identity_reset_password($1, $2, $3, $4)",
+  "query": "SELECT folioharbor.identity_reset_password($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
   "describe": {
     "columns": [
       {
@@ -14,12 +14,18 @@
         "Bytea",
         "Text",
         "Timestamptz",
-        "Text"
+        "Text",
+        "Uuid",
+        "Bytea",
+        "Bytea",
+        "Timestamptz",
+        "Timestamptz",
+        "Timestamptz"
       ]
     },
     "nullable": [
       null
     ]
   },
-  "hash": "eb88f11904989ca2b5f3a418397c51b8c3c515c1ad92ed8d43303cd91074b495"
+  "hash": "64b3dbbe04b160bc0f3b44bb0b1af7d2d029ba2e3a270778c047e04021bab3be"
 }

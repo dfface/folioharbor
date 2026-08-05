@@ -162,9 +162,14 @@ impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSou
         &self,
         command: CompletePasswordResetCommand,
     ) -> Result<PasswordResetComplete, AppError> {
-        CompletePasswordReset::new(&self.repository, &self.password_hasher, &self.clock)
-            .execute(command)
-            .await
+        CompletePasswordReset::new(
+            &self.repository,
+            &self.password_hasher,
+            &self.clock,
+            &self.random,
+        )
+        .execute(command)
+        .await
     }
 }
 #[async_trait]
@@ -185,7 +190,9 @@ impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSou
     CurrentSessionUseCase for IdentityApi<R, H, M, C, N>
 {
     async fn current_session(&self, actor: Actor) -> Result<SafeSession, AppError> {
-        CurrentSession::new(&self.repository).execute(actor).await
+        CurrentSession::new(&self.repository, &self.clock)
+            .execute(actor)
+            .await
     }
 }
 #[async_trait]
@@ -193,7 +200,9 @@ impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSou
     ListSessionsUseCase for IdentityApi<R, H, M, C, N>
 {
     async fn list_sessions(&self, actor: Actor) -> Result<Vec<SafeSession>, AppError> {
-        ListSessions::new(&self.repository).execute(actor).await
+        ListSessions::new(&self.repository, &self.clock)
+            .execute(actor)
+            .await
     }
 }
 #[async_trait]

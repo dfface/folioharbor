@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+pub mod json;
 pub mod middleware;
 pub mod problem;
 pub mod routes;
