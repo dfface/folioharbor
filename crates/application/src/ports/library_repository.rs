@@ -54,7 +54,6 @@ pub trait LibraryRepository: Send + Sync {
     async fn accept_invitation(
         &self,
         _: UserId,
-        _: &NormalizedEmail,
         _: TokenHash,
         _: OffsetDateTime,
     ) -> Result<AcceptInvitationOutcome, LibraryRepositoryError> {

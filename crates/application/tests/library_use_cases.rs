@@ -85,7 +85,7 @@ struct CommandRepository {
     invitation: Mutex<Option<NewLibraryInvitation>>,
     invitation_outcome: LibraryMutationOutcome,
     mutation_outcome: LibraryMutationOutcome,
-    accepted_email: String,
+    accepted_user: UserId,
     accepted_hash: TokenHash,
     accepted_library: LibraryId,
 }
@@ -96,7 +96,7 @@ impl CommandRepository {
             invitation: Mutex::new(None),
             invitation_outcome,
             mutation_outcome: LibraryMutationOutcome::Applied,
-            accepted_email: String::new(),
+            accepted_user: UserId::new(),
             accepted_hash: TokenHash::from_bytes([0; 32]),
             accepted_library: LibraryId::new(),
         }
@@ -133,12 +133,11 @@ impl LibraryRepository for CommandRepository {
 
     async fn accept_invitation(
         &self,
-        _: UserId,
-        email: &NormalizedEmail,
+        user_id: UserId,
         hash: TokenHash,
         _: OffsetDateTime,
     ) -> Result<AcceptInvitationOutcome, LibraryRepositoryError> {
-        if email.as_str() == self.accepted_email && hash == self.accepted_hash {
+        if user_id == self.accepted_user && hash == self.accepted_hash {
             Ok(AcceptInvitationOutcome::Accepted(self.accepted_library))
         } else {
             Ok(AcceptInvitationOutcome::Invalid)
@@ -362,17 +361,16 @@ async fn library_commands_preserve_owner_only_denials() {
 }
 
 #[tokio::test]
-async fn invitation_acceptance_binds_normalized_authenticated_email_and_token()
--> Result<(), AppError> {
+async fn invitation_acceptance_uses_only_trusted_user_id_and_token() -> Result<(), AppError> {
     let token = "single-use-invitation";
     let accepted_library = LibraryId::new();
+    let user_id = UserId::new();
     let repository = CommandRepository {
-        accepted_email: "Reader@example.com".to_owned(),
+        accepted_user: user_id,
         accepted_hash: SessionToken::parse(SecretString::from(token.to_owned())).hash_for_storage(),
         accepted_library,
         ..CommandRepository::new(LibraryMutationOutcome::Applied)
     };
-    let user_id = UserId::new();
     let clock = clock();
     let accept = AcceptInvitation::new(&repository, &clock);
 
@@ -380,7 +378,6 @@ async fn invitation_acceptance_binds_normalized_authenticated_email_and_token()
         accept
             .execute(AcceptInvitationCommand {
                 user_id,
-                authenticated_email: "Reader@EXAMPLE.COM".to_owned(),
                 token: SecretString::from(token.to_owned()),
             })
             .await?,
@@ -390,8 +387,7 @@ async fn invitation_acceptance_binds_normalized_authenticated_email_and_token()
         accept
             .execute(AcceptInvitationCommand {
                 user_id,
-                authenticated_email: "other@example.com".to_owned(),
-                token: SecretString::from(token.to_owned()),
+                token: SecretString::from("wrong-token".to_owned()),
             })
             .await,
         Err(AppError::Conflict {

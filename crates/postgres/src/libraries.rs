@@ -5,7 +5,7 @@ use folioharbor_application::ports::{
 };
 use folioharbor_domain::{
     id::{LibraryId, UserId},
-    identity::{NormalizedEmail, TokenHash},
+    identity::TokenHash,
     libraries::{Library, role::RoleCode},
     time::OffsetDateTime,
 };
@@ -57,11 +57,10 @@ impl LibraryRepository for PgLibraryRepository {
     async fn accept_invitation(
         &self,
         user_id: UserId,
-        email: &NormalizedEmail,
         hash: TokenHash,
         now: OffsetDateTime,
     ) -> Result<AcceptInvitationOutcome, LibraryRepositoryError> {
-        let row=sqlx::query!(r#"SELECT outcome AS "outcome!", accepted_library_id FROM folioharbor.library_accept_invitation($1,$2,$3,$4)"#,user_id.as_uuid(),email.as_str(),hash.as_bytes().as_slice(),now).fetch_one(&self.pool).await.map_err(persistence_error)?;
+        let row=sqlx::query!(r#"SELECT outcome AS "outcome!", accepted_library_id FROM folioharbor.library_accept_invitation($1,$2,$3)"#,user_id.as_uuid(),hash.as_bytes().as_slice(),now).fetch_one(&self.pool).await.map_err(persistence_error)?;
         match (row.outcome.as_str(), row.accepted_library_id) {
             ("accepted", Some(id)) => {
                 Ok(AcceptInvitationOutcome::Accepted(LibraryId::from_uuid(id)))

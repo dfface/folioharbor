@@ -41,9 +41,11 @@ async fn invitations_are_email_bound_expiring_single_use_and_preserve_personal_l
     let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
     let owner = UserId::new();
     let invitee = UserId::new();
+    let attacker = UserId::new();
     for (user_id, email) in [
         (owner, "owner@example.com"),
         (invitee, "invitee@example.com"),
+        (attacker, "attacker@example.com"),
     ] {
         sqlx::query("INSERT INTO folioharbor.user_accounts(user_id, normalized_email, display_email, status, created_at) VALUES ($1,$2,$2,'verified',$3)").bind(user_id.as_uuid()).bind(email).bind(now).execute(&owner_pool).await?;
     }
@@ -71,24 +73,34 @@ async fn invitations_are_email_bound_expiring_single_use_and_preserve_personal_l
     );
     assert_eq!(
         repository
-            .accept_invitation(
-                invitee,
-                &NormalizedEmail::parse("wrong@example.com")?,
-                token_hash,
-                now
-            )
+            .accept_invitation(attacker, token_hash, now)
             .await?,
         AcceptInvitationOutcome::Invalid
     );
+    let attacker_memberships: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM folioharbor.library_memberships WHERE library_id=$1 AND user_id=$2 AND status='active'",
+    )
+    .bind(shared.library_id.as_uuid())
+    .bind(attacker.as_uuid())
+    .fetch_one(&owner_pool)
+    .await?;
+    let consumed_at: Option<OffsetDateTime> = sqlx::query_scalar(
+        "SELECT consumed_at FROM folioharbor.library_invitations WHERE token_hash=$1",
+    )
+    .bind(token_hash.as_bytes().as_slice())
+    .fetch_one(&owner_pool)
+    .await?;
+    assert_eq!(attacker_memberships, 0);
+    assert!(consumed_at.is_none());
     assert_eq!(
         repository
-            .accept_invitation(invitee, &invitee_email, token_hash, now)
+            .accept_invitation(invitee, token_hash, now)
             .await?,
         AcceptInvitationOutcome::Accepted(shared.library_id)
     );
     assert_eq!(
         repository
-            .accept_invitation(invitee, &invitee_email, token_hash, now)
+            .accept_invitation(invitee, token_hash, now)
             .await?,
         AcceptInvitationOutcome::Invalid
     );
@@ -116,12 +128,7 @@ async fn invitations_are_email_bound_expiring_single_use_and_preserve_personal_l
         .await?;
     assert_eq!(
         repository
-            .accept_invitation(
-                invitee,
-                &invitee_email,
-                expired_hash,
-                now + time::Duration::minutes(2)
-            )
+            .accept_invitation(invitee, expired_hash, now + time::Duration::minutes(2))
             .await?,
         AcceptInvitationOutcome::Invalid
     );

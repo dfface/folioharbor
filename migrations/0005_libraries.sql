@@ -88,20 +88,26 @@ BEGIN
     RETURN 'applied';
 END $$;
 
-CREATE FUNCTION folioharbor.library_accept_invitation(p_user_id uuid, p_email text, p_hash bytea, p_now timestamptz)
+CREATE FUNCTION folioharbor.library_accept_invitation(p_user_id uuid, p_hash bytea, p_now timestamptz)
 RETURNS TABLE(outcome text, accepted_library_id uuid) LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 #variable_conflict use_column
-DECLARE invitation folioharbor.library_invitations%ROWTYPE;
+DECLARE
+    invitation folioharbor.library_invitations%ROWTYPE;
+    authenticated_email text;
 BEGIN
-    SELECT * INTO invitation FROM folioharbor.library_invitations
-      WHERE token_hash=p_hash AND consumed_at IS NULL FOR UPDATE;
-    IF invitation.invitation_id IS NULL OR invitation.expires_at <= p_now OR invitation.normalized_email <> p_email THEN
+    SELECT i.* INTO invitation FROM folioharbor.library_invitations AS i
+      WHERE i.token_hash=p_hash AND i.consumed_at IS NULL FOR UPDATE;
+    SELECT a.normalized_email INTO authenticated_email
+      FROM folioharbor.user_accounts AS a
+      WHERE a.user_id=p_user_id
+      FOR KEY SHARE;
+    IF invitation.invitation_id IS NULL OR authenticated_email IS NULL OR invitation.expires_at <= p_now OR invitation.normalized_email <> authenticated_email THEN
       RETURN QUERY SELECT 'invalid'::text, NULL::uuid; RETURN;
     END IF;
     INSERT INTO folioharbor.library_memberships(library_id,user_id,role_code,status,joined_at)
       VALUES(invitation.library_id,p_user_id,invitation.role_code,'active',p_now)
       ON CONFLICT (library_id,user_id) WHERE status='active' DO NOTHING;
-    UPDATE folioharbor.library_invitations SET consumed_at=p_now,consumed_by=p_user_id,version=version+1 WHERE invitation_id=invitation.invitation_id;
+    UPDATE folioharbor.library_invitations AS i SET consumed_at=p_now,consumed_by=p_user_id,version=i.version+1 WHERE i.invitation_id=invitation.invitation_id;
     RETURN QUERY SELECT 'accepted'::text, invitation.library_id;
 END $$;
 
@@ -139,8 +145,8 @@ END $$;
 
 REVOKE ALL ON FUNCTION folioharbor.library_provision_personal(uuid,uuid,timestamptz) FROM PUBLIC;
 REVOKE ALL ON FUNCTION folioharbor.library_create_invitation(uuid,uuid,uuid,text,text,text,bytea,timestamptz,timestamptz) FROM PUBLIC;
-REVOKE ALL ON FUNCTION folioharbor.library_accept_invitation(uuid,text,bytea,timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION folioharbor.library_accept_invitation(uuid,bytea,timestamptz) FROM PUBLIC;
 REVOKE ALL ON FUNCTION folioharbor.library_change_role(uuid,uuid,uuid,text,timestamptz) FROM PUBLIC;
 REVOKE ALL ON FUNCTION folioharbor.library_remove_member(uuid,uuid,uuid,timestamptz) FROM PUBLIC;
 REVOKE ALL ON FUNCTION folioharbor.library_update_settings(uuid,uuid,text,timestamptz) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION folioharbor.library_provision_personal(uuid,uuid,timestamptz),folioharbor.library_create_invitation(uuid,uuid,uuid,text,text,text,bytea,timestamptz,timestamptz),folioharbor.library_accept_invitation(uuid,text,bytea,timestamptz),folioharbor.library_change_role(uuid,uuid,uuid,text,timestamptz),folioharbor.library_remove_member(uuid,uuid,uuid,timestamptz),folioharbor.library_update_settings(uuid,uuid,text,timestamptz) TO folioharbor_api;
+GRANT EXECUTE ON FUNCTION folioharbor.library_provision_personal(uuid,uuid,timestamptz),folioharbor.library_create_invitation(uuid,uuid,uuid,text,text,text,bytea,timestamptz,timestamptz),folioharbor.library_accept_invitation(uuid,bytea,timestamptz),folioharbor.library_change_role(uuid,uuid,uuid,text,timestamptz),folioharbor.library_remove_member(uuid,uuid,uuid,timestamptz),folioharbor.library_update_settings(uuid,uuid,text,timestamptz) TO folioharbor_api;
