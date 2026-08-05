@@ -41,7 +41,7 @@ impl<R: IdentityRepository, M: Mailer, C: Clock, N: RandomSource>
     ///
     /// # Errors
     ///
-    /// Returns [`AppError`] when persistence or mail delivery fails.
+    /// Returns [`AppError`] when persistence fails.
     pub async fn execute(
         &self,
         command: RequestPasswordResetCommand,
@@ -53,17 +53,15 @@ impl<R: IdentityRepository, M: Mailer, C: Clock, N: RandomSource>
         self.random.fill(&mut bytes);
         let token = PasswordResetToken::from_random_bytes(bytes);
         let now = self.clock.now();
-        let issued = self
+        let _issued = self
             .repository
             .issue_password_reset(&email, token.hash_for_storage(), now, now + RESET_LIFETIME)
             .await
             .map_err(|_| internal_error())?;
-        if issued {
-            self.mailer
-                .send_password_reset(&email, token.into_secret())
-                .await
-                .map_err(|_| internal_error())?;
-        }
+        let _delivery = self
+            .mailer
+            .send_password_reset(&email, token.into_secret())
+            .await;
         Ok(PasswordResetRequested)
     }
 }

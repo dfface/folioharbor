@@ -5,7 +5,7 @@ use folioharbor_application::ports::{
 };
 use folioharbor_domain::{
     id::{SessionId, UserId},
-    identity::{AccountStatus, NormalizedEmail, TokenHash},
+    identity::{AccountStatus, NormalizedEmail, SessionRevocationReason, TokenHash},
     time::OffsetDateTime,
 };
 use sqlx::PgPool;
@@ -25,6 +25,13 @@ impl PgIdentityRepository {
 
 fn persistence_error(_: sqlx::Error) -> IdentityRepositoryError {
     IdentityRepositoryError
+}
+
+const fn revocation_reason_value(reason: SessionRevocationReason) -> &'static str {
+    match reason {
+        SessionRevocationReason::Logout => "logout",
+        SessionRevocationReason::PasswordReset => "password_reset",
+    }
 }
 
 #[async_trait]
@@ -137,14 +144,14 @@ impl IdentityRepository for PgIdentityRepository {
         &self,
         token_hash: TokenHash,
         now: OffsetDateTime,
-        reason: &'static str,
+        reason: SessionRevocationReason,
     ) -> Result<(), IdentityRepositoryError> {
         let mut tx = self.pool.begin().await.map_err(persistence_error)?;
         sqlx::query!(
             "SELECT folioharbor.identity_revoke_session($1, $2, $3)",
             token_hash.as_bytes().as_slice(),
             now,
-            reason,
+            revocation_reason_value(reason),
         )
         .execute(&mut *tx)
         .await
@@ -179,10 +186,11 @@ impl IdentityRepository for PgIdentityRepository {
     ) -> Result<Option<UserId>, IdentityRepositoryError> {
         let mut tx = self.pool.begin().await.map_err(persistence_error)?;
         let user_id = sqlx::query_scalar!(
-            "SELECT folioharbor.identity_reset_password($1, $2, $3)",
+            "SELECT folioharbor.identity_reset_password($1, $2, $3, $4)",
             token_hash.as_bytes().as_slice(),
             password_hash,
             now,
+            revocation_reason_value(SessionRevocationReason::PasswordReset),
         )
         .fetch_one(&mut *tx)
         .await

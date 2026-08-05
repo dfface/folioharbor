@@ -98,11 +98,16 @@ CREATE FUNCTION folioharbor.identity_verify_email(p_token_hash bytea, p_now time
 RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 DECLARE matched_user_id uuid;
 BEGIN
-    UPDATE folioharbor.email_verification_tokens SET consumed_at = p_now, version = version + 1
-    WHERE token_hash = p_token_hash AND consumed_at IS NULL AND expires_at > p_now RETURNING user_id INTO matched_user_id;
+    SELECT user_id INTO matched_user_id
+    FROM folioharbor.email_verification_tokens
+    WHERE token_hash = p_token_hash AND consumed_at IS NULL AND expires_at > p_now
+    FOR UPDATE;
     IF matched_user_id IS NULL THEN RETURN NULL; END IF;
     UPDATE folioharbor.user_accounts SET status = 'verified', verified_at = p_now, version = version + 1
     WHERE user_id = matched_user_id AND status = 'pending_verification';
+    IF NOT FOUND THEN RETURN NULL; END IF;
+    UPDATE folioharbor.email_verification_tokens SET consumed_at = p_now, version = version + 1
+    WHERE token_hash = p_token_hash AND consumed_at IS NULL;
     RETURN matched_user_id;
 END $$;
 
@@ -146,7 +151,7 @@ BEGIN
     RETURN FOUND;
 END $$;
 
-CREATE FUNCTION folioharbor.identity_reset_password(p_token_hash bytea, p_password_hash text, p_now timestamptz)
+CREATE FUNCTION folioharbor.identity_reset_password(p_token_hash bytea, p_password_hash text, p_now timestamptz, p_reason text)
 RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 DECLARE matched_user_id uuid;
 BEGIN
@@ -155,7 +160,7 @@ BEGIN
     IF matched_user_id IS NULL THEN RETURN NULL; END IF;
     UPDATE folioharbor.password_credentials SET password_hash = p_password_hash, changed_at = p_now, version = version + 1
     WHERE user_id = matched_user_id;
-    UPDATE folioharbor.user_sessions SET revoked_at = p_now, revocation_reason = 'password_reset', version = version + 1
+    UPDATE folioharbor.user_sessions SET revoked_at = p_now, revocation_reason = p_reason, version = version + 1
     WHERE user_id = matched_user_id AND revoked_at IS NULL;
     RETURN matched_user_id;
 END $$;
@@ -167,7 +172,7 @@ ALTER FUNCTION folioharbor.identity_create_session(uuid, uuid, bytea, bytea, tim
 ALTER FUNCTION folioharbor.identity_authenticate_session(bytea, timestamptz, timestamptz) OWNER TO folioharbor_owner;
 ALTER FUNCTION folioharbor.identity_revoke_session(bytea, timestamptz, text) OWNER TO folioharbor_owner;
 ALTER FUNCTION folioharbor.identity_issue_password_reset(uuid, text, bytea, timestamptz, timestamptz) OWNER TO folioharbor_owner;
-ALTER FUNCTION folioharbor.identity_reset_password(bytea, text, timestamptz) OWNER TO folioharbor_owner;
+ALTER FUNCTION folioharbor.identity_reset_password(bytea, text, timestamptz, text) OWNER TO folioharbor_owner;
 
 REVOKE ALL ON FUNCTION folioharbor.identity_register(uuid, text, text, text, uuid, bytea, timestamptz, timestamptz) FROM PUBLIC;
 REVOKE ALL ON FUNCTION folioharbor.identity_verify_email(bytea, timestamptz) FROM PUBLIC;
@@ -176,7 +181,7 @@ REVOKE ALL ON FUNCTION folioharbor.identity_create_session(uuid, uuid, bytea, by
 REVOKE ALL ON FUNCTION folioharbor.identity_authenticate_session(bytea, timestamptz, timestamptz) FROM PUBLIC;
 REVOKE ALL ON FUNCTION folioharbor.identity_revoke_session(bytea, timestamptz, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION folioharbor.identity_issue_password_reset(uuid, text, bytea, timestamptz, timestamptz) FROM PUBLIC;
-REVOKE ALL ON FUNCTION folioharbor.identity_reset_password(bytea, text, timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION folioharbor.identity_reset_password(bytea, text, timestamptz, text) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION folioharbor.identity_register(uuid, text, text, text, uuid, bytea, timestamptz, timestamptz) TO folioharbor_api;
 GRANT EXECUTE ON FUNCTION folioharbor.identity_verify_email(bytea, timestamptz) TO folioharbor_api;
@@ -185,7 +190,7 @@ GRANT EXECUTE ON FUNCTION folioharbor.identity_create_session(uuid, uuid, bytea,
 GRANT EXECUTE ON FUNCTION folioharbor.identity_authenticate_session(bytea, timestamptz, timestamptz) TO folioharbor_api;
 GRANT EXECUTE ON FUNCTION folioharbor.identity_revoke_session(bytea, timestamptz, text) TO folioharbor_api;
 GRANT EXECUTE ON FUNCTION folioharbor.identity_issue_password_reset(uuid, text, bytea, timestamptz, timestamptz) TO folioharbor_api;
-GRANT EXECUTE ON FUNCTION folioharbor.identity_reset_password(bytea, text, timestamptz) TO folioharbor_api;
+GRANT EXECUTE ON FUNCTION folioharbor.identity_reset_password(bytea, text, timestamptz, text) TO folioharbor_api;
 
 GRANT SELECT, INSERT, UPDATE ON folioharbor.user_sessions, folioharbor.user_devices TO folioharbor_api;
 

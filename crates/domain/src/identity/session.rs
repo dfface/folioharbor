@@ -15,6 +15,12 @@ pub enum SessionStatus {
     Revoked,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionRevocationReason {
+    Logout,
+    PasswordReset,
+}
+
 impl SessionStatus {
     #[must_use]
     pub fn at(

@@ -6,10 +6,7 @@ use secrecy::SecretString;
 
 use crate::{
     error::{AppError, FieldViolation},
-    ports::{
-        Clock, IdentityRepository, Mailer, NewAccount, PasswordHasher, RandomSource,
-        RegisterOutcome,
-    },
+    ports::{Clock, IdentityRepository, Mailer, NewAccount, PasswordHasher, RandomSource},
 };
 
 use super::{VERIFICATION_LIFETIME, internal_error};
@@ -56,7 +53,7 @@ impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSou
     ///
     /// # Errors
     ///
-    /// Returns [`AppError`] for invalid input or a hashing, persistence, or mail dependency failure.
+    /// Returns [`AppError`] for invalid input or a hashing or persistence dependency failure.
     pub async fn execute(
         &self,
         command: RegisterAccountCommand,
@@ -85,7 +82,7 @@ impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSou
         self.random.fill(&mut bytes);
         let token = EmailVerificationToken::from_random_bytes(bytes);
         let now = self.clock.now();
-        let outcome = self
+        let _outcome = self
             .repository
             .register(NewAccount {
                 user_id: UserId::new(),
@@ -98,12 +95,10 @@ impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSou
             })
             .await
             .map_err(|_| internal_error())?;
-        if outcome == RegisterOutcome::Created {
-            self.mailer
-                .send_verification(&email, token.into_secret())
-                .await
-                .map_err(|_| internal_error())?;
-        }
+        let _delivery = self
+            .mailer
+            .send_verification(&email, token.into_secret())
+            .await;
         Ok(PendingAccount)
     }
 }

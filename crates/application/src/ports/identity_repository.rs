@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use folioharbor_domain::{
     id::{SessionId, UserId},
-    identity::{AccountStatus, NormalizedEmail, TokenHash},
+    identity::{AccountStatus, NormalizedEmail, SessionRevocationReason, TokenHash},
     time::OffsetDateTime,
 };
 use thiserror::Error;
@@ -87,7 +87,7 @@ pub trait IdentityRepository: Send + Sync {
         &self,
         token_hash: TokenHash,
         now: OffsetDateTime,
-        reason: &'static str,
+        reason: SessionRevocationReason,
     ) -> Result<(), IdentityRepositoryError>;
 
     /// Atomically creates a reset token only if the normalized account exists.

@@ -1,4 +1,4 @@
-use folioharbor_domain::identity::SessionToken;
+use folioharbor_domain::identity::{SessionRevocationReason, SessionToken};
 use secrecy::SecretString;
 
 use crate::{
@@ -34,7 +34,7 @@ impl<R: IdentityRepository, C: Clock> Logout<'_, R, C> {
             .revoke_session(
                 SessionToken::parse(command.session_token).hash_for_storage(),
                 self.clock.now(),
-                "logout",
+                SessionRevocationReason::Logout,
             )
             .await
             .map_err(|_| internal_error())

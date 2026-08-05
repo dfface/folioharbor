@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use folioharbor_application::{
     error::AppError,
     identity::{
-        Login, LoginCommand, Logout, LogoutCommand, RegisterAccount, RegisterAccountCommand,
-        RequestPasswordReset, RequestPasswordResetCommand,
+        Login, LoginCommand, Logout, LogoutCommand, PasswordResetRequested, PendingAccount,
+        RegisterAccount, RegisterAccountCommand, RequestPasswordReset, RequestPasswordResetCommand,
     },
     ports::{
         Argon2PasswordHasher, IdentityRepository, IdentityRepositoryError, LoginIdentity,
@@ -18,7 +18,7 @@ use folioharbor_application::{
 };
 use folioharbor_domain::{
     id::UserId,
-    identity::{AccountStatus, NormalizedEmail, SessionToken, TokenHash},
+    identity::{AccountStatus, NormalizedEmail, SessionRevocationReason, SessionToken, TokenHash},
     time::OffsetDateTime,
 };
 use folioharbor_test_support::{clock::FakeClock, random::FixedRandom};
@@ -50,7 +50,7 @@ struct FakeRepository {
     login: Mutex<Option<LoginIdentity>>,
     reset_exists: bool,
     created_session: Mutex<Option<NewSession>>,
-    revocations: AtomicUsize,
+    revocations: Mutex<Vec<SessionRevocationReason>>,
 }
 
 impl FakeRepository {
@@ -60,7 +60,7 @@ impl FakeRepository {
             login: Mutex::new(None),
             reset_exists: false,
             created_session: Mutex::new(None),
-            revocations: AtomicUsize::new(0),
+            revocations: Mutex::new(Vec::new()),
         }
     }
 }
@@ -106,9 +106,12 @@ impl IdentityRepository for FakeRepository {
         &self,
         _: TokenHash,
         _: OffsetDateTime,
-        _: &'static str,
+        reason: SessionRevocationReason,
     ) -> Result<(), IdentityRepositoryError> {
-        self.revocations.fetch_add(1, Ordering::SeqCst);
+        self.revocations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(reason);
         Ok(())
     }
     async fn issue_password_reset(
@@ -150,6 +153,7 @@ impl PasswordHasher for SpyHasher {
 struct SpyMailer {
     verification: AtomicUsize,
     resets: AtomicUsize,
+    fail: bool,
 }
 #[async_trait]
 impl Mailer for SpyMailer {
@@ -159,7 +163,7 @@ impl Mailer for SpyMailer {
         _: SecretString,
     ) -> Result<(), MailError> {
         self.verification.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        if self.fail { Err(MailError) } else { Ok(()) }
     }
     async fn send_password_reset(
         &self,
@@ -167,8 +171,59 @@ impl Mailer for SpyMailer {
         _: SecretString,
     ) -> Result<(), MailError> {
         self.resets.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        if self.fail { Err(MailError) } else { Ok(()) }
     }
+}
+
+#[tokio::test]
+async fn failing_mail_delivery_cannot_enumerate_registration_or_reset_accounts() {
+    let known = FakeRepository {
+        register_outcome: RegisterOutcome::Created,
+        reset_exists: true,
+        ..FakeRepository::empty()
+    };
+    let unknown = FakeRepository::empty();
+    let hasher = SpyHasher {
+        valid: true,
+        dummy_calls: AtomicUsize::new(0),
+    };
+    let mailer = SpyMailer {
+        verification: AtomicUsize::new(0),
+        resets: AtomicUsize::new(0),
+        fail: true,
+    };
+    let clock = fixture_clock();
+    let random = FixedRandom::new(11);
+
+    let known_registration = RegisterAccount::new(&known, &hasher, &mailer, &clock, &random)
+        .execute(RegisterAccountCommand {
+            email: "known@example.com".to_owned(),
+            password: SecretString::from("password".to_owned()),
+        })
+        .await;
+    let unknown_registration = RegisterAccount::new(&unknown, &hasher, &mailer, &clock, &random)
+        .execute(RegisterAccountCommand {
+            email: "unknown@example.com".to_owned(),
+            password: SecretString::from("password".to_owned()),
+        })
+        .await;
+    assert!(matches!(known_registration, Ok(PendingAccount)));
+    assert!(matches!(unknown_registration, Ok(PendingAccount)));
+    assert_eq!(mailer.verification.load(Ordering::SeqCst), 2);
+
+    let known_reset = RequestPasswordReset::new(&known, &mailer, &clock, &random)
+        .execute(RequestPasswordResetCommand {
+            email: "known@example.com".to_owned(),
+        })
+        .await;
+    let unknown_reset = RequestPasswordReset::new(&unknown, &mailer, &clock, &random)
+        .execute(RequestPasswordResetCommand {
+            email: "unknown@example.com".to_owned(),
+        })
+        .await;
+    assert!(matches!(known_reset, Ok(PasswordResetRequested)));
+    assert!(matches!(unknown_reset, Ok(PasswordResetRequested)));
+    assert_eq!(mailer.resets.load(Ordering::SeqCst), 2);
 }
 
 fn fixture_clock() -> FakeClock {
@@ -217,8 +272,8 @@ async fn registration_and_reset_have_fixed_public_results_for_known_and_unknown_
         })
         .await?;
     assert_eq!(known, unknown);
-    assert_eq!(mailer.verification.load(Ordering::SeqCst), 1);
-    assert_eq!(mailer.resets.load(Ordering::SeqCst), 1);
+    assert_eq!(mailer.verification.load(Ordering::SeqCst), 2);
+    assert_eq!(mailer.resets.load(Ordering::SeqCst), 2);
     Ok(())
 }
 
@@ -310,6 +365,16 @@ async fn logout_is_idempotent_at_the_use_case_boundary() -> Result<(), AppError>
             })
             .await?;
     }
-    assert_eq!(repository.revocations.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        repository
+            .revocations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_slice(),
+        [
+            SessionRevocationReason::Logout,
+            SessionRevocationReason::Logout
+        ]
+    );
     Ok(())
 }
