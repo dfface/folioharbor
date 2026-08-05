@@ -1,0 +1,55 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH candidates AS (SELECT job_id,state,attempt_count FROM folioharbor.background_jobs WHERE next_run_at <= $1 AND (state IN ('pending','retry_wait') OR (state='leased' AND lease_expires_at <= $1)) ORDER BY next_run_at,created_at FOR UPDATE SKIP LOCKED LIMIT $2), expired AS (UPDATE folioharbor.job_attempts a SET finished_at=$1,outcome='lease_expired' FROM candidates c WHERE c.state='leased' AND a.job_id=c.job_id AND a.attempt=c.attempt_count), leased AS (UPDATE folioharbor.background_jobs j SET state='leased',lease_owner=$3,lease_expires_at=$4,attempt_count=j.attempt_count+1,error_code=NULL,error_summary=NULL,updated_at=$1 FROM candidates c WHERE j.job_id=c.job_id RETURNING j.job_id,j.library_id,j.kind,j.input,j.attempt_count,j.lease_expires_at), attempts AS (INSERT INTO folioharbor.job_attempts(job_id,attempt,lease_owner,started_at) SELECT job_id,attempt_count,$3,$1 FROM leased) SELECT job_id AS \"job_id!\",library_id AS \"library_id!\",kind AS \"kind!\",input AS \"input!\",attempt_count AS \"attempt_count!\",lease_expires_at AS \"lease_expires_at!\" FROM leased",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "job_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "library_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "kind!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "input!",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "attempt_count!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "lease_expires_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "ff737a2bd9a1e3d94c40c22022ebc77809b21b39fa00542c688039e7c4669066"
+}

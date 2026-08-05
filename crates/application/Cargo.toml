@@ -8,8 +8,10 @@ version.workspace = true
 [dependencies]
 argon2.workspace = true
 async-trait.workspace = true
+bytes.workspace = true
 folioharbor-domain = { path = "../domain", version = "0.1.0" }
 hmac.workspace = true
+futures-util.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_path_to_error.workspace = true

@@ -3,6 +3,7 @@ mod authorization_repository;
 mod blob_store;
 mod clock;
 mod identity_repository;
+mod job_repository;
 mod library_query_repository;
 mod library_repository;
 mod mailer;
@@ -10,12 +11,14 @@ mod password_hasher;
 mod quota_repository;
 mod random;
 mod rate_limit_repository;
+mod upload_repository;
 
 pub use audit_repository::*;
 pub use authorization_repository::*;
 pub use blob_store::*;
 pub use clock::Clock;
 pub use identity_repository::*;
+pub use job_repository::*;
 pub use library_query_repository::*;
 pub use library_repository::*;
 pub use mailer::{LibraryInvitationContext, MailError, Mailer};
@@ -23,3 +26,4 @@ pub use password_hasher::{Argon2PasswordHasher, PasswordHashError, PasswordHashe
 pub use quota_repository::*;
 pub use random::RandomSource;
 pub use rate_limit_repository::*;
+pub use upload_repository::*;

@@ -169,6 +169,56 @@ paths:
             application/problem+json:
               schema: {$ref: '#/components/schemas/ProblemDetails'}
               example: {type: 'https://library.example/problems/mail-delivery-unavailable', title: Dependency unavailable, status: 503, detail: A required service is temporarily unavailable., instance: /problems/01JREQ00000000000000000000, code: mail_delivery_unavailable, request_id: 01JREQ00000000000000000000}
+  /api/v1/libraries/{library_id}/uploads:
+    post:
+      operationId: createUpload
+      description: Reserves library quota atomically before any EPUB content is accepted. Requires holding.edit.
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: '#/components/parameters/LibraryId'}, {$ref: '#/components/parameters/CsrfToken'}]
+      requestBody: {$ref: '#/components/requestBodies/CreateUpload'}
+      responses:
+        '202': {$ref: '#/components/responses/UploadAccepted'}
+        '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '413': {description: Declared upload size exceeds 1 GiB, content must not be sent, content: {application/problem+json: {schema: {$ref: '#/components/schemas/ProblemDetails'}}}}
+        '422': {$ref: '#/components/responses/Problem'}
+        '507': {$ref: '#/components/responses/Problem'}
+  /api/v1/libraries/{library_id}/uploads/{upload_id}:
+    get:
+      operationId: getUploadStatus
+      description: Returns only uploads in the requested library; readers without holding.edit cannot inspect upload status.
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: '#/components/parameters/LibraryId'}, {$ref: '#/components/parameters/UploadId'}]
+      responses:
+        '200': {description: Current durable upload state, content: {application/json: {schema: {$ref: '#/components/schemas/UploadStatus'}}}}
+        '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+  /api/v1/libraries/{library_id}/uploads/{upload_id}/content:
+    put:
+      operationId: receiveUploadContent
+      description: Streams EPUB bytes into the existing reservation. Interrupted or oversized attempts become failed and can retry this same upload_id safely.
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: '#/components/parameters/LibraryId'}, {$ref: '#/components/parameters/UploadId'}, {$ref: '#/components/parameters/CsrfToken'}]
+      requestBody:
+        required: true
+        content:
+          application/epub+zip: {schema: {type: string, format: binary, maxLength: 1073741824}}
+          application/octet-stream: {schema: {type: string, format: binary, maxLength: 1073741824}}
+      responses:
+        '202': {$ref: '#/components/responses/UploadAccepted'}
+        '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {description: Upload is not in a receipt or retryable state, content: {application/problem+json: {schema: {$ref: '#/components/schemas/ProblemDetails'}}}}
+        '413': {$ref: '#/components/responses/Problem'}
+        '415': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+        '507': {$ref: '#/components/responses/Problem'}
 components:
   securitySchemes:
     cookieAuth: {type: apiKey, in: cookie, name: folioharbor_session}
@@ -187,6 +237,11 @@ components:
       schema: {type: string, format: uuid}
     UserId:
       name: user_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    UploadId:
+      name: upload_id
       in: path
       required: true
       schema: {type: string, format: uuid}
@@ -221,6 +276,12 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/ResetPasswordRequest'}
           example: {token: opaque-password-reset-token, new_password: a new correct horse battery staple}
+    CreateUpload:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/CreateUploadRequest'}
+          example: {file_name: book.epub, media_type: application/epub+zip, declared_bytes: 1048576}
   responses:
     Problem:
       description: RFC 9457 problem details
@@ -266,6 +327,13 @@ components:
         application/json:
           schema: {type: array, items: {$ref: '#/components/schemas/Session'}}
           example: [{session_id: 018f47b5-58b4-7ba6-9a3a-d9f41f17a26e, is_current: true, status: active}]
+    UploadAccepted:
+      description: Upload accepted; poll the Location status resource. Retrying content after failed/interrupted receipt reuses the same upload_id.
+      headers:
+        Location: {required: true, schema: {type: string}, description: Upload status resource}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/UploadStatus'}
   schemas:
     RegisterRequest:
       type: object
@@ -307,6 +375,28 @@ components:
         session_id: {type: string, format: uuid}
         is_current: {type: boolean}
         status: {type: string, enum: [active, idle_expired, absolute_expired, revoked]}
+    CreateUploadRequest:
+      type: object
+      additionalProperties: false
+      required: [file_name, media_type, declared_bytes]
+      properties:
+        file_name: {type: string, pattern: '(?i)\\.epub$', maxLength: 512}
+        media_type: {type: string, enum: [application/epub+zip, application/octet-stream]}
+        declared_bytes: {type: integer, minimum: 1, maximum: 1073741824}
+    UploadStatus:
+      type: object
+      additionalProperties: false
+      required: [upload_id, library_id, file_name, media_type, declared_bytes, received_bytes, state, status_url]
+      properties:
+        upload_id: {type: string, format: uuid}
+        library_id: {type: string, format: uuid}
+        file_name: {type: string}
+        media_type: {type: string, enum: [application/epub+zip, application/octet-stream]}
+        declared_bytes: {type: integer, minimum: 1, maximum: 1073741824}
+        received_bytes: {type: integer, minimum: 0, maximum: 1073741824}
+        state: {type: string, enum: [created, receiving, received, queued, validating, importing, ready, duplicate, failed, expired, retry_wait]}
+        status_url: {type: string}
+        error_code: {type: [string, 'null'], description: Stable safe code; implementation or storage details are never exposed}
     ProblemDetails:
       type: object
       required: [type, title, status, detail, instance, code, request_id]

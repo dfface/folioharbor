@@ -1,5 +1,6 @@
 mod auth;
 mod libraries;
+mod uploads;
 use crate::middleware;
 use axum::{Router, middleware as axum_middleware};
 use folioharbor_application::{
@@ -8,6 +9,7 @@ use folioharbor_application::{
         ListSessionsUseCase, LoginUseCase, LogoutUseCase, RegisterAccountUseCase,
         RequestPasswordResetUseCase, RevokeSessionUseCase, VerifyEmailUseCase,
     },
+    imports::{UnavailableUploadApi, UploadApi},
     libraries::{LibraryApi, UnavailableLibraryApi},
     rate_limit::RateLimitUseCase,
 };
@@ -29,6 +31,7 @@ pub struct AppState {
     pub revoke_session: Arc<dyn RevokeSessionUseCase>,
     pub rate_limit: Arc<dyn RateLimitUseCase>,
     pub library_api: Arc<dyn LibraryApi>,
+    pub upload_api: Arc<dyn UploadApi>,
 }
 impl AppState {
     #[allow(clippy::too_many_arguments)]
@@ -61,6 +64,7 @@ impl AppState {
             revoke_session,
             rate_limit,
             library_api: Arc::new(UnavailableLibraryApi),
+            upload_api: Arc::new(UnavailableUploadApi),
         }
     }
 
@@ -69,11 +73,20 @@ impl AppState {
         self.library_api = library_api;
         self
     }
+
+    #[must_use]
+    pub fn with_upload_api(mut self, upload_api: Arc<dyn UploadApi>) -> Self {
+        self.upload_api = upload_api;
+        self
+    }
 }
 pub fn router(state: AppState) -> Router {
     Router::new()
         .nest("/api/v1/auth", auth::router())
-        .nest("/api/v1/libraries", libraries::router())
+        .nest(
+            "/api/v1/libraries",
+            libraries::router().merge(uploads::router()),
+        )
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),
             middleware::csrf::authenticate_and_protect,

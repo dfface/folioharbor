@@ -12,6 +12,8 @@ pub enum Action {
     InviteMember,
     ChangeMemberRole,
     RemoveMember,
+    CreateUpload,
+    InspectUpload,
 }
 
 impl Action {
@@ -23,6 +25,8 @@ impl Action {
             Self::InviteMember => "member.invite",
             Self::ChangeMemberRole => "member.role.change",
             Self::RemoveMember => "member.remove",
+            Self::CreateUpload => "upload.create",
+            Self::InspectUpload => "upload.inspect",
         }
     }
 
@@ -30,6 +34,7 @@ impl Action {
     pub const fn required_permission(self) -> PermissionCode {
         match self {
             Self::ViewLibrary => PermissionCode::HoldingView,
+            Self::CreateUpload | Self::InspectUpload => PermissionCode::HoldingEdit,
             Self::InviteMember => PermissionCode::MemberInvite,
             Self::ManageLibrary | Self::ChangeMemberRole | Self::RemoveMember => {
                 PermissionCode::LibraryManage
@@ -112,18 +117,18 @@ impl AuthorizationGrant {
     }
 }
 
-pub struct Authorization<'a, R> {
+pub struct Authorization<'a, R: ?Sized> {
     repository: &'a R,
 }
 
-impl<'a, R> Authorization<'a, R> {
+impl<'a, R: ?Sized> Authorization<'a, R> {
     #[must_use]
     pub const fn new(repository: &'a R) -> Self {
         Self { repository }
     }
 }
 
-impl<R: AuthorizationRepository> Authorization<'_, R> {
+impl<R: AuthorizationRepository + ?Sized> Authorization<'_, R> {
     /// Resolves an action through persisted role-permission mappings.
     ///
     /// # Errors
