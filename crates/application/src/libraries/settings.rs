@@ -1,24 +1,35 @@
 use crate::{
+    audit::AuditEvent,
+    authorization::{Action, Authorization, ResourceRef},
     error::{AppError, FieldViolation},
-    ports::{Clock, LibraryRepository},
+    ports::{AuthorizationRepository, Clock, LibraryRepository},
 };
-use folioharbor_domain::id::{LibraryId, UserId};
+use folioharbor_domain::id::{LibraryId, RequestId, UserId};
+
 pub struct UpdateLibrarySettingsCommand {
     pub actor: UserId,
     pub library_id: LibraryId,
     pub name: String,
+    pub request_id: RequestId,
 }
-pub struct UpdateLibrarySettings<'a, R, C> {
+pub struct UpdateLibrarySettings<'a, R, A, C> {
     repository: &'a R,
+    authorization: &'a A,
     clock: &'a C,
 }
-impl<'a, R, C> UpdateLibrarySettings<'a, R, C> {
+impl<'a, R, A, C> UpdateLibrarySettings<'a, R, A, C> {
     #[must_use]
-    pub const fn new(repository: &'a R, clock: &'a C) -> Self {
-        Self { repository, clock }
+    pub const fn new(repository: &'a R, authorization: &'a A, clock: &'a C) -> Self {
+        Self {
+            repository,
+            authorization,
+            clock,
+        }
     }
 }
-impl<R: LibraryRepository, C: Clock> UpdateLibrarySettings<'_, R, C> {
+impl<R: LibraryRepository, A: AuthorizationRepository, C: Clock>
+    UpdateLibrarySettings<'_, R, A, C>
+{
     /// Updates owner-managed library settings.
     ///
     /// # Errors
@@ -33,13 +44,20 @@ impl<R: LibraryRepository, C: Clock> UpdateLibrarySettings<'_, R, C> {
                 }],
             });
         }
-        let o = self
+        let resource = ResourceRef::Library(c.library_id);
+        let grant = Authorization::new(self.authorization)
+            .require(c.actor, Action::ManageLibrary, resource)
+            .await?;
+        let now = self.clock.now();
+        let audit =
+            AuditEvent::allowed(c.actor, Action::ManageLibrary, resource, c.request_id, now);
+        let outcome = self
             .repository
-            .update_library_settings(c.actor, c.library_id, &c.name, self.clock.now())
+            .update_library_settings(c.actor, c.library_id, &c.name, now, grant, audit)
             .await
             .map_err(|_| AppError::DependencyUnavailable {
                 code: "library_repository_unavailable",
             })?;
-        super::mutation_result(o)
+        super::mutation_result(outcome)
     }
 }

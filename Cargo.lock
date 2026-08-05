@@ -414,16 +414,20 @@ dependencies = [
 name = "folioharbor-http"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "axum",
  "folioharbor-application",
  "folioharbor-domain",
+ "folioharbor-postgres",
+ "folioharbor-test-support",
  "http",
  "http-body-util",
  "secrecy",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sqlx",
  "subtle",
  "time",
  "tokio",

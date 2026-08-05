@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod audit;
+mod authorization;
 mod context;
 pub mod identity;
 pub mod libraries;
@@ -7,6 +9,8 @@ mod migrate;
 mod pool;
 mod rate_limits;
 
+pub use audit::PgAuditRepository;
+pub use authorization::PgAuthorizationRepository;
 pub use context::{DatabaseContext, PgTransactionContext};
 pub use migrate::{MigrationError, MigrationReport, run_migrations};
 pub use pool::{PgPools, connect_api, connect_owner, connect_worker};

@@ -20,7 +20,11 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+anyhow.workspace = true
+folioharbor-postgres = { path = "../postgres", version = "0.1.0" }
+folioharbor-test-support = { path = "../test-support", version = "0.1.0" }
 http-body-util.workspace = true
+sqlx.workspace = true
 tokio.workspace = true
 tower.workspace = true
 uuid.workspace = true

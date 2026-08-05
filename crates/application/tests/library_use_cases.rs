@@ -6,10 +6,15 @@ use folioharbor_application::libraries::{
     RemoveMember, RemoveMemberCommand, UpdateLibrarySettings, UpdateLibrarySettingsCommand,
 };
 use folioharbor_application::ports::{
-    AcceptInvitationOutcome, LibraryInvitationContext, LibraryMutationOutcome, LibraryRepository,
-    LibraryRepositoryError, MailError, Mailer, NewLibraryInvitation,
+    AcceptInvitationOutcome, AuthorizationRepository, AuthorizationRepositoryError,
+    LibraryInvitationContext, LibraryMutationOutcome, LibraryRepository, LibraryRepositoryError,
+    MailError, Mailer, NewLibraryInvitation,
 };
-use folioharbor_domain::id::{LibraryId, UserId};
+use folioharbor_application::{
+    audit::AuditEvent,
+    authorization::{Action, AuthorizationFact, AuthorizationGrant, ResourceRef},
+};
+use folioharbor_domain::id::{LibraryId, RequestId, UserId};
 use folioharbor_domain::identity::{NormalizedEmail, SessionToken, TokenHash};
 use folioharbor_domain::libraries::Library;
 use folioharbor_domain::libraries::role::{PermissionCode, RoleCode};
@@ -123,6 +128,8 @@ impl LibraryRepository for CommandRepository {
     async fn create_invitation(
         &self,
         invitation: NewLibraryInvitation,
+        _: AuthorizationGrant,
+        _: AuditEvent,
     ) -> Result<LibraryMutationOutcome, LibraryRepositoryError> {
         *self
             .invitation
@@ -151,6 +158,8 @@ impl LibraryRepository for CommandRepository {
         _: UserId,
         _: RoleCode,
         _: OffsetDateTime,
+        _: AuthorizationGrant,
+        _: AuditEvent,
     ) -> Result<LibraryMutationOutcome, LibraryRepositoryError> {
         Ok(self.mutation_outcome)
     }
@@ -161,6 +170,8 @@ impl LibraryRepository for CommandRepository {
         _: LibraryId,
         _: UserId,
         _: OffsetDateTime,
+        _: AuthorizationGrant,
+        _: AuditEvent,
     ) -> Result<LibraryMutationOutcome, LibraryRepositoryError> {
         Ok(self.mutation_outcome)
     }
@@ -171,8 +182,28 @@ impl LibraryRepository for CommandRepository {
         _: LibraryId,
         _: &str,
         _: OffsetDateTime,
+        _: AuthorizationGrant,
+        _: AuditEvent,
     ) -> Result<LibraryMutationOutcome, LibraryRepositoryError> {
         Ok(self.mutation_outcome)
+    }
+}
+
+#[async_trait]
+impl AuthorizationRepository for CommandRepository {
+    async fn resolve(
+        &self,
+        _: UserId,
+        _: Action,
+        resource: ResourceRef,
+    ) -> Result<Option<AuthorizationFact>, AuthorizationRepositoryError> {
+        Ok(Some(AuthorizationFact {
+            library_id: resource.library_id(),
+            role: RoleCode::Owner,
+            membership_version: 1,
+            discoverable: true,
+            permitted: true,
+        }))
     }
 }
 
@@ -229,14 +260,21 @@ async fn invitation_plaintext_moves_directly_to_mailer_with_bound_context()
     let mailer = InvitationMailer::default();
     let library_id = LibraryId::new();
 
-    let result = InviteMember::new(&repository, &mailer, &clock(), &FixedRandom::new(91))
-        .execute(InviteMemberCommand {
-            actor: UserId::new(),
-            library_id,
-            email: "Reader@EXAMPLE.COM".to_owned(),
-            role: RoleCode::Reader,
-        })
-        .await;
+    let result = InviteMember::new(
+        &repository,
+        &repository,
+        &mailer,
+        &clock(),
+        &FixedRandom::new(91),
+    )
+    .execute(InviteMemberCommand {
+        actor: UserId::new(),
+        library_id,
+        email: "Reader@EXAMPLE.COM".to_owned(),
+        role: RoleCode::Reader,
+        request_id: RequestId::new(),
+    })
+    .await;
 
     assert!(result.is_ok());
     let (recipient, context, plaintext) = mailer
@@ -270,14 +308,21 @@ async fn invitation_delivery_failure_is_reported_without_returning_plaintext() {
         ..InvitationMailer::default()
     };
 
-    let result = InviteMember::new(&repository, &mailer, &clock(), &FixedRandom::new(92))
-        .execute(InviteMemberCommand {
-            actor: UserId::new(),
-            library_id: LibraryId::new(),
-            email: "reader@example.com".to_owned(),
-            role: RoleCode::Reader,
-        })
-        .await;
+    let result = InviteMember::new(
+        &repository,
+        &repository,
+        &mailer,
+        &clock(),
+        &FixedRandom::new(92),
+    )
+    .execute(InviteMemberCommand {
+        actor: UserId::new(),
+        library_id: LibraryId::new(),
+        email: "reader@example.com".to_owned(),
+        role: RoleCode::Reader,
+        request_id: RequestId::new(),
+    })
+    .await;
 
     assert!(matches!(
         result,
@@ -313,14 +358,21 @@ async fn library_commands_preserve_owner_only_denials() {
     };
 
     forbidden(
-        InviteMember::new(&repository, &mailer, &clock, &FixedRandom::new(1))
-            .execute(InviteMemberCommand {
-                actor,
-                library_id,
-                email: "member@example.com".to_owned(),
-                role: RoleCode::Editor,
-            })
-            .await,
+        InviteMember::new(
+            &repository,
+            &repository,
+            &mailer,
+            &clock,
+            &FixedRandom::new(1),
+        )
+        .execute(InviteMemberCommand {
+            actor,
+            library_id,
+            email: "member@example.com".to_owned(),
+            role: RoleCode::Editor,
+            request_id: RequestId::new(),
+        })
+        .await,
     );
     assert!(
         mailer
@@ -331,30 +383,33 @@ async fn library_commands_preserve_owner_only_denials() {
         "denied invitations must not disclose a token to the mailer"
     );
     forbidden(
-        ChangeMemberRole::new(&repository, &clock)
+        ChangeMemberRole::new(&repository, &repository, &clock)
             .execute(ChangeMemberRoleCommand {
                 actor,
                 library_id,
                 member,
                 role: RoleCode::Reader,
+                request_id: RequestId::new(),
             })
             .await,
     );
     forbidden(
-        RemoveMember::new(&repository, &clock)
+        RemoveMember::new(&repository, &repository, &clock)
             .execute(RemoveMemberCommand {
                 actor,
                 library_id,
                 member,
+                request_id: RequestId::new(),
             })
             .await,
     );
     forbidden(
-        UpdateLibrarySettings::new(&repository, &clock)
+        UpdateLibrarySettings::new(&repository, &repository, &clock)
             .execute(UpdateLibrarySettingsCommand {
                 actor,
                 library_id,
                 name: "Renamed".to_owned(),
+                request_id: RequestId::new(),
             })
             .await,
     );

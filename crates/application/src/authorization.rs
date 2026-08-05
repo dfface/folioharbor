@@ -1,0 +1,168 @@
+use folioharbor_domain::{
+    id::{InvitationId, LibraryId, UserId},
+    libraries::role::{PermissionCode, RoleCode},
+};
+
+use crate::{error::AppError, ports::AuthorizationRepository};
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Action {
+    ViewLibrary,
+    ManageLibrary,
+    InviteMember,
+    ChangeMemberRole,
+    RemoveMember,
+}
+
+impl Action {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ViewLibrary => "library.view",
+            Self::ManageLibrary => "library.manage",
+            Self::InviteMember => "member.invite",
+            Self::ChangeMemberRole => "member.role.change",
+            Self::RemoveMember => "member.remove",
+        }
+    }
+
+    #[must_use]
+    pub const fn required_permission(self) -> PermissionCode {
+        match self {
+            Self::ViewLibrary => PermissionCode::HoldingView,
+            Self::InviteMember => PermissionCode::MemberInvite,
+            Self::ManageLibrary | Self::ChangeMemberRole | Self::RemoveMember => {
+                PermissionCode::LibraryManage
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ResourceRef {
+    Library(LibraryId),
+    Membership {
+        library_id: LibraryId,
+        user_id: UserId,
+    },
+    Invitation {
+        library_id: LibraryId,
+        invitation_id: InvitationId,
+    },
+}
+
+impl ResourceRef {
+    #[must_use]
+    pub const fn library_id(self) -> LibraryId {
+        match self {
+            Self::Library(id)
+            | Self::Membership { library_id: id, .. }
+            | Self::Invitation { library_id: id, .. } => id,
+        }
+    }
+
+    #[must_use]
+    pub const fn resource_type(self) -> &'static str {
+        match self {
+            Self::Library(_) => "library",
+            Self::Membership { .. } => "membership",
+            Self::Invitation { .. } => "invitation",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthorizationFact {
+    pub library_id: LibraryId,
+    pub role: RoleCode,
+    pub membership_version: i64,
+    pub discoverable: bool,
+    pub permitted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthorizationGrant {
+    actor: UserId,
+    library_id: LibraryId,
+    action: Action,
+    resource: ResourceRef,
+    membership_version: i64,
+}
+
+impl AuthorizationGrant {
+    #[must_use]
+    pub const fn actor(self) -> UserId {
+        self.actor
+    }
+    #[must_use]
+    pub const fn library_id(self) -> LibraryId {
+        self.library_id
+    }
+    #[must_use]
+    pub const fn action(self) -> Action {
+        self.action
+    }
+    #[must_use]
+    pub const fn resource(self) -> ResourceRef {
+        self.resource
+    }
+    #[must_use]
+    pub const fn membership_version(self) -> i64 {
+        self.membership_version
+    }
+}
+
+pub struct Authorization<'a, R> {
+    repository: &'a R,
+}
+
+impl<'a, R> Authorization<'a, R> {
+    #[must_use]
+    pub const fn new(repository: &'a R) -> Self {
+        Self { repository }
+    }
+}
+
+impl<R: AuthorizationRepository> Authorization<'_, R> {
+    /// Resolves an action through persisted role-permission mappings.
+    ///
+    /// # Errors
+    /// Returns not-found for undiscoverable resources, forbidden for visible denied actions,
+    /// and dependency-unavailable when permission resolution fails.
+    pub async fn require(
+        &self,
+        actor: UserId,
+        action: Action,
+        resource: ResourceRef,
+    ) -> Result<AuthorizationGrant, AppError> {
+        let fact = self
+            .repository
+            .resolve(actor, action, resource)
+            .await
+            .map_err(|_| AppError::DependencyUnavailable {
+                code: "authorization_repository_unavailable",
+            })?;
+        let Some(fact) = fact else {
+            return Err(AppError::NotFound {
+                code: "library_not_found",
+            });
+        };
+        if !fact.discoverable || fact.library_id != resource.library_id() {
+            return Err(AppError::NotFound {
+                code: "library_not_found",
+            });
+        }
+        if !fact.permitted {
+            return Err(AppError::Forbidden {
+                code: "library_action_forbidden",
+            });
+        }
+        Ok(AuthorizationGrant {
+            actor,
+            library_id: fact.library_id,
+            action,
+            resource,
+            membership_version: fact.membership_version,
+        })
+    }
+}

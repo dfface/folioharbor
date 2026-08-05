@@ -96,6 +96,73 @@ paths:
         '401': {$ref: '#/components/responses/Problem'}
         '403': {$ref: '#/components/responses/Problem'}
         '404': {$ref: '#/components/responses/Problem'}
+  /api/v1/libraries:
+    get:
+      operationId: listLibraries
+      security: [{cookieAuth: []}]
+      responses:
+        '200': {description: Libraries visible to the authenticated member}
+        '401': {$ref: '#/components/responses/Problem'}
+  /api/v1/libraries/{library_id}:
+    get:
+      operationId: getLibrary
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: '#/components/parameters/LibraryId'}]
+      responses:
+        '200': {description: Authorized library detail}
+        '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+  /api/v1/libraries/{library_id}/settings:
+    patch:
+      operationId: updateLibrarySettings
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: '#/components/parameters/LibraryId'}, {$ref: '#/components/parameters/CsrfToken'}]
+      responses:
+        '204': {description: Settings updated and audited atomically}
+        '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+  /api/v1/libraries/{library_id}/members:
+    get:
+      operationId: listLibraryMembers
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: '#/components/parameters/LibraryId'}]
+      responses:
+        '200': {description: Library members visible to the authenticated member}
+        '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+  /api/v1/libraries/{library_id}/members/{user_id}:
+    patch:
+      operationId: changeLibraryMemberRole
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: '#/components/parameters/LibraryId'}, {$ref: '#/components/parameters/UserId'}, {$ref: '#/components/parameters/CsrfToken'}]
+      responses:
+        '204': {description: Role changed and audited atomically}
+        '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+    delete:
+      operationId: removeLibraryMember
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: '#/components/parameters/LibraryId'}, {$ref: '#/components/parameters/UserId'}, {$ref: '#/components/parameters/CsrfToken'}]
+      responses:
+        '204': {description: Member removed and audited atomically}
+        '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+  /api/v1/libraries/{library_id}/invitations:
+    post:
+      operationId: inviteLibraryMember
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: '#/components/parameters/LibraryId'}, {$ref: '#/components/parameters/CsrfToken'}]
+      responses:
+        '204': {description: Invitation created and audited atomically}
+        '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
 components:
   securitySchemes:
     cookieAuth: {type: apiKey, in: cookie, name: folioharbor_session}
@@ -107,6 +174,16 @@ components:
       schema: {type: string}
       example: opaque-csrf-token
       description: Opaque session-bound CSRF token for unsafe authenticated requests
+    LibraryId:
+      name: library_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    UserId:
+      name: user_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
   requestBodies:
     Register:
       required: true

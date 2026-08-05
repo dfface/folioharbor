@@ -1,3 +1,4 @@
+use crate::{audit::AuditEvent, authorization::AuthorizationGrant};
 use async_trait::async_trait;
 use folioharbor_domain::{
     id::{InvitationId, LibraryId, UserId},
@@ -48,6 +49,8 @@ pub trait LibraryRepository: Send + Sync {
     async fn create_invitation(
         &self,
         _: NewLibraryInvitation,
+        _: AuthorizationGrant,
+        _: AuditEvent,
     ) -> Result<LibraryMutationOutcome, LibraryRepositoryError> {
         Err(LibraryRepositoryError)
     }
@@ -59,6 +62,7 @@ pub trait LibraryRepository: Send + Sync {
     ) -> Result<AcceptInvitationOutcome, LibraryRepositoryError> {
         Err(LibraryRepositoryError)
     }
+    #[allow(clippy::too_many_arguments)]
     async fn change_member_role(
         &self,
         _: UserId,
@@ -66,6 +70,8 @@ pub trait LibraryRepository: Send + Sync {
         _: UserId,
         _: RoleCode,
         _: OffsetDateTime,
+        _: AuthorizationGrant,
+        _: AuditEvent,
     ) -> Result<LibraryMutationOutcome, LibraryRepositoryError> {
         Err(LibraryRepositoryError)
     }
@@ -75,6 +81,8 @@ pub trait LibraryRepository: Send + Sync {
         _: LibraryId,
         _: UserId,
         _: OffsetDateTime,
+        _: AuthorizationGrant,
+        _: AuditEvent,
     ) -> Result<LibraryMutationOutcome, LibraryRepositoryError> {
         Err(LibraryRepositoryError)
     }
@@ -84,6 +92,8 @@ pub trait LibraryRepository: Send + Sync {
         _: LibraryId,
         _: &str,
         _: OffsetDateTime,
+        _: AuthorizationGrant,
+        _: AuditEvent,
     ) -> Result<LibraryMutationOutcome, LibraryRepositoryError> {
         Err(LibraryRepositoryError)
     }

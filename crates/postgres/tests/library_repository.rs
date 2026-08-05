@@ -1,15 +1,37 @@
 use folioharbor_application::ports::{
     AcceptInvitationOutcome, LibraryMutationOutcome, LibraryRepository, NewLibraryInvitation,
 };
+use folioharbor_application::{
+    audit::AuditEvent,
+    authorization::{Action, Authorization, AuthorizationGrant, ResourceRef},
+};
 use folioharbor_domain::{
-    id::{InvitationId, UserId},
+    id::{InvitationId, RequestId, UserId},
     identity::{NormalizedEmail, TokenHash},
     libraries::role::RoleCode,
     time::OffsetDateTime,
 };
-use folioharbor_postgres::{libraries::PgLibraryRepository, run_migrations};
+use folioharbor_postgres::{
+    PgAuthorizationRepository, libraries::PgLibraryRepository, run_migrations,
+};
 use folioharbor_test_support::postgres::TestPostgres;
 use sqlx::PgPool;
+
+async fn authorized(
+    api: &PgPool,
+    actor: UserId,
+    action: Action,
+    resource: ResourceRef,
+    now: OffsetDateTime,
+) -> Result<(AuthorizationGrant, AuditEvent), folioharbor_application::error::AppError> {
+    let grant = Authorization::new(&PgAuthorizationRepository::new(api.clone()))
+        .require(actor, action, resource)
+        .await?;
+    Ok((
+        grant,
+        AuditEvent::allowed(actor, action, resource, RequestId::new(), now),
+    ))
+}
 
 #[tokio::test]
 async fn migrations_create_library_schema_and_seed_builtin_roles() -> anyhow::Result<()> {
@@ -33,6 +55,7 @@ async fn migrations_create_library_schema_and_seed_builtin_roles() -> anyhow::Re
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn invitations_are_email_bound_expiring_single_use_and_preserve_personal_libraries()
 -> anyhow::Result<()> {
     let database = TestPostgres::provision().await?;
@@ -55,19 +78,35 @@ async fn invitations_are_email_bound_expiring_single_use_and_preserve_personal_l
     let personal = repository.provision_personal_library(invitee, now).await?;
     let invitee_email = NormalizedEmail::parse("invitee@example.com")?;
     let token_hash = TokenHash::from_bytes([11; 32]);
+    let invitation_id = InvitationId::new();
+    let (grant, audit) = authorized(
+        &api,
+        owner,
+        Action::InviteMember,
+        ResourceRef::Invitation {
+            library_id: shared.library_id,
+            invitation_id,
+        },
+        now,
+    )
+    .await?;
     assert_eq!(
         repository
-            .create_invitation(NewLibraryInvitation {
-                invitation_id: InvitationId::new(),
-                library_id: shared.library_id,
-                invited_by: owner,
-                normalized_email: invitee_email.clone(),
-                display_email: "invitee@example.com".to_owned(),
-                role: RoleCode::Reader,
-                token_hash,
-                created_at: now,
-                expires_at: now + time::Duration::hours(1)
-            })
+            .create_invitation(
+                NewLibraryInvitation {
+                    invitation_id,
+                    library_id: shared.library_id,
+                    invited_by: owner,
+                    normalized_email: invitee_email.clone(),
+                    display_email: "invitee@example.com".to_owned(),
+                    role: RoleCode::Reader,
+                    token_hash,
+                    created_at: now,
+                    expires_at: now + time::Duration::hours(1)
+                },
+                grant,
+                audit
+            )
             .await?,
         LibraryMutationOutcome::Applied
     );
@@ -113,18 +152,34 @@ async fn invitations_are_email_bound_expiring_single_use_and_preserve_personal_l
     assert_eq!(personal_after, personal.library_id.as_uuid());
 
     let expired_hash = TokenHash::from_bytes([12; 32]);
-    repository
-        .create_invitation(NewLibraryInvitation {
-            invitation_id: InvitationId::new(),
+    let expired_id = InvitationId::new();
+    let (grant, audit) = authorized(
+        &api,
+        owner,
+        Action::InviteMember,
+        ResourceRef::Invitation {
             library_id: shared.library_id,
-            invited_by: owner,
-            normalized_email: invitee_email.clone(),
-            display_email: "invitee@example.com".to_owned(),
-            role: RoleCode::Editor,
-            token_hash: expired_hash,
-            created_at: now,
-            expires_at: now + time::Duration::minutes(1),
-        })
+            invitation_id: expired_id,
+        },
+        now,
+    )
+    .await?;
+    repository
+        .create_invitation(
+            NewLibraryInvitation {
+                invitation_id: expired_id,
+                library_id: shared.library_id,
+                invited_by: owner,
+                normalized_email: invitee_email.clone(),
+                display_email: "invitee@example.com".to_owned(),
+                role: RoleCode::Editor,
+                token_hash: expired_hash,
+                created_at: now,
+                expires_at: now + time::Duration::minutes(1),
+            },
+            grant,
+            audit,
+        )
         .await?;
     assert_eq!(
         repository
@@ -160,11 +215,41 @@ async fn concurrent_final_owner_changes_allow_at_most_one_commit() -> anyhow::Re
         .await?;
     sqlx::query("INSERT INTO folioharbor.library_memberships(library_id,user_id,role_code,status,joined_at) VALUES($1,$2,'owner','active',$3)").bind(library.library_id.as_uuid()).bind(second_owner.as_uuid()).bind(now).execute(&owner).await?;
 
+    let (remove_grant, remove_audit) = authorized(
+        &api,
+        first_owner,
+        Action::RemoveMember,
+        ResourceRef::Membership {
+            library_id: library.library_id,
+            user_id: second_owner,
+        },
+        now,
+    )
+    .await?;
+    let (change_grant, change_audit) = authorized(
+        &api,
+        second_owner,
+        Action::ChangeMemberRole,
+        ResourceRef::Membership {
+            library_id: library.library_id,
+            user_id: first_owner,
+        },
+        now,
+    )
+    .await?;
+
     let remove_repository = repository.clone();
     let change_repository = repository.clone();
     let remove = tokio::spawn(async move {
         remove_repository
-            .remove_member(first_owner, library.library_id, second_owner, now)
+            .remove_member(
+                first_owner,
+                library.library_id,
+                second_owner,
+                now,
+                remove_grant,
+                remove_audit,
+            )
             .await
     });
     let demote = tokio::spawn(async move {
@@ -175,6 +260,8 @@ async fn concurrent_final_owner_changes_allow_at_most_one_commit() -> anyhow::Re
                 first_owner,
                 RoleCode::Reader,
                 now,
+                change_grant,
+                change_audit,
             )
             .await
     });
@@ -217,40 +304,45 @@ async fn editors_and_readers_cannot_manage_memberships_or_library_settings() -> 
     for (user_id, role) in [(editor, "editor"), (reader, "reader")] {
         sqlx::query("INSERT INTO folioharbor.library_memberships(library_id,user_id,role_code,status,joined_at) VALUES($1,$2,$3,'active',$4)").bind(library.library_id.as_uuid()).bind(user_id.as_uuid()).bind(role).bind(now).execute(&owner_pool).await?;
     }
-    assert_eq!(
-        repository
-            .change_member_role(editor, library.library_id, reader, RoleCode::Editor, now)
-            .await?,
-        LibraryMutationOutcome::Forbidden
-    );
-    assert_eq!(
-        repository
-            .remove_member(reader, library.library_id, editor, now)
-            .await?,
-        LibraryMutationOutcome::Forbidden
-    );
-    assert_eq!(
-        repository
-            .update_library_settings(editor, library.library_id, "Nope", now)
-            .await?,
-        LibraryMutationOutcome::Forbidden
-    );
-    assert_eq!(
-        repository
-            .create_invitation(NewLibraryInvitation {
-                invitation_id: InvitationId::new(),
+    let authorization = PgAuthorizationRepository::new(api.clone());
+    for (actor, action, resource) in [
+        (
+            editor,
+            Action::ChangeMemberRole,
+            ResourceRef::Membership {
                 library_id: library.library_id,
-                invited_by: reader,
-                normalized_email: NormalizedEmail::parse("next@example.com")?,
-                display_email: "next@example.com".to_owned(),
-                role: RoleCode::Reader,
-                token_hash: TokenHash::from_bytes([33; 32]),
-                created_at: now,
-                expires_at: now + time::Duration::hours(1)
-            })
-            .await?,
-        LibraryMutationOutcome::Forbidden
-    );
+                user_id: reader,
+            },
+        ),
+        (
+            reader,
+            Action::RemoveMember,
+            ResourceRef::Membership {
+                library_id: library.library_id,
+                user_id: editor,
+            },
+        ),
+        (
+            editor,
+            Action::ManageLibrary,
+            ResourceRef::Library(library.library_id),
+        ),
+        (
+            reader,
+            Action::InviteMember,
+            ResourceRef::Invitation {
+                library_id: library.library_id,
+                invitation_id: InvitationId::new(),
+            },
+        ),
+    ] {
+        assert!(
+            Authorization::new(&authorization)
+                .require(actor, action, resource)
+                .await
+                .is_err()
+        );
+    }
     api.close().await;
     owner_pool.close().await;
     database.cleanup().await?;

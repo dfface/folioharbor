@@ -21,6 +21,16 @@ impl DatabaseContext {
     }
 
     #[must_use]
+    pub const fn api_without_library(user_id: UserId, request_id: RequestId) -> Self {
+        Self {
+            user_id: Some(user_id),
+            library_id: None,
+            request_id,
+            worker: false,
+        }
+    }
+
+    #[must_use]
     pub const fn worker(request_id: RequestId, library_id: Option<LibraryId>) -> Self {
         Self {
             user_id: None,

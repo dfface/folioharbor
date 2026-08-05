@@ -1,7 +1,12 @@
 use async_trait::async_trait;
 use folioharbor_application::ports::{
-    AcceptInvitationOutcome, LibraryMutationOutcome, LibraryRepository, LibraryRepositoryError,
-    NewLibraryInvitation,
+    AcceptInvitationOutcome, LibraryMutationOutcome, LibraryQueryRepository,
+    LibraryQueryRepositoryError, LibraryRepository, LibraryRepositoryError, NewLibraryInvitation,
+};
+use folioharbor_application::{
+    audit::{AuditDecision, AuditEvent, AuditSource},
+    authorization::{Action, AuthorizationGrant, ResourceRef},
+    libraries::{LibraryMemberView, LibraryView},
 };
 use folioharbor_domain::{
     id::{LibraryId, UserId},
@@ -10,10 +15,134 @@ use folioharbor_domain::{
     time::OffsetDateTime,
 };
 use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::{DatabaseContext, PgTransactionContext};
 
 #[derive(Clone, Debug)]
 pub struct PgLibraryRepository {
     pool: PgPool,
+}
+
+#[async_trait]
+impl LibraryQueryRepository for PgLibraryRepository {
+    async fn list_visible(
+        &self,
+        actor: UserId,
+    ) -> Result<Vec<LibraryView>, LibraryQueryRepositoryError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| LibraryQueryRepositoryError)?;
+        PgTransactionContext::apply(
+            &mut tx,
+            &DatabaseContext::api_without_library(actor, folioharbor_domain::id::RequestId::new()),
+        )
+        .await
+        .map_err(|_| LibraryQueryRepositoryError)?;
+        let rows: Vec<(Uuid, String)> =
+            sqlx::query_as("SELECT library_id,name FROM folioharbor.library_list_visible($1)")
+                .bind(actor.as_uuid())
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|_| LibraryQueryRepositoryError)?;
+        tx.commit().await.map_err(|_| LibraryQueryRepositoryError)?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, name)| LibraryView {
+                library_id: LibraryId::from_uuid(id),
+                name,
+            })
+            .collect())
+    }
+    async fn get_library(
+        &self,
+        grant: AuthorizationGrant,
+        library: LibraryId,
+    ) -> Result<Option<LibraryView>, LibraryQueryRepositoryError> {
+        if grant.library_id() != library
+            || grant.action() != Action::ViewLibrary
+            || grant.resource() != ResourceRef::Library(library)
+        {
+            return Err(LibraryQueryRepositoryError);
+        }
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| LibraryQueryRepositoryError)?;
+        PgTransactionContext::apply(
+            &mut tx,
+            &DatabaseContext::api(
+                grant.actor(),
+                library,
+                folioharbor_domain::id::RequestId::new(),
+            ),
+        )
+        .await
+        .map_err(|_| LibraryQueryRepositoryError)?;
+        let row: Option<(Uuid, String)> =
+            sqlx::query_as("SELECT library_id,name FROM folioharbor.library_get_visible($1,$2,$3)")
+                .bind(grant.actor().as_uuid())
+                .bind(library.as_uuid())
+                .bind(grant.membership_version())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|_| LibraryQueryRepositoryError)?;
+        tx.commit().await.map_err(|_| LibraryQueryRepositoryError)?;
+        Ok(row.map(|(id, name)| LibraryView {
+            library_id: LibraryId::from_uuid(id),
+            name,
+        }))
+    }
+    async fn list_members(
+        &self,
+        grant: AuthorizationGrant,
+        library: LibraryId,
+    ) -> Result<Vec<LibraryMemberView>, LibraryQueryRepositoryError> {
+        if grant.library_id() != library
+            || grant.action() != Action::ViewLibrary
+            || grant.resource() != ResourceRef::Library(library)
+        {
+            return Err(LibraryQueryRepositoryError);
+        }
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| LibraryQueryRepositoryError)?;
+        PgTransactionContext::apply(
+            &mut tx,
+            &DatabaseContext::api(
+                grant.actor(),
+                library,
+                folioharbor_domain::id::RequestId::new(),
+            ),
+        )
+        .await
+        .map_err(|_| LibraryQueryRepositoryError)?;
+        let rows: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT user_id,role_code FROM folioharbor.library_members_visible($1,$2,$3)",
+        )
+        .bind(grant.actor().as_uuid())
+        .bind(library.as_uuid())
+        .bind(grant.membership_version())
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|_| LibraryQueryRepositoryError)?;
+        tx.commit().await.map_err(|_| LibraryQueryRepositoryError)?;
+        rows.into_iter()
+            .map(|(id, role)| {
+                RoleCode::parse(&role)
+                    .map(|role| LibraryMemberView {
+                        user_id: UserId::from_uuid(id),
+                        role,
+                    })
+                    .ok_or(LibraryQueryRepositoryError)
+            })
+            .collect()
+    }
 }
 impl PgLibraryRepository {
     #[must_use]
@@ -34,6 +163,41 @@ fn mutation(value: &str) -> Result<LibraryMutationOutcome, LibraryRepositoryErro
     }
 }
 
+fn resource_id(resource: ResourceRef) -> Uuid {
+    match resource {
+        ResourceRef::Library(id) => id.as_uuid(),
+        ResourceRef::Membership { user_id, .. } => user_id.as_uuid(),
+        ResourceRef::Invitation { invitation_id, .. } => invitation_id.as_uuid(),
+    }
+}
+
+fn validate_facts(
+    grant: AuthorizationGrant,
+    audit: &AuditEvent,
+    actor: UserId,
+    library: LibraryId,
+    action: Action,
+    resource: ResourceRef,
+) -> Result<(), LibraryRepositoryError> {
+    if grant.actor() == actor
+        && grant.library_id() == library
+        && grant.action() == action
+        && grant.resource() == resource
+        && audit.actor == Some(actor)
+        && audit.effective_actor == Some(actor)
+        && audit.library_id == library
+        && audit.action == action
+        && audit.resource == resource
+        && audit.decision == AuditDecision::Allowed
+        && audit.reason_code.is_none()
+        && audit.source == AuditSource::Api
+    {
+        Ok(())
+    } else {
+        Err(LibraryRepositoryError)
+    }
+}
+
 #[async_trait]
 impl LibraryRepository for PgLibraryRepository {
     async fn provision_personal_library(
@@ -50,8 +214,38 @@ impl LibraryRepository for PgLibraryRepository {
     async fn create_invitation(
         &self,
         i: NewLibraryInvitation,
+        grant: AuthorizationGrant,
+        audit: AuditEvent,
     ) -> Result<LibraryMutationOutcome, LibraryRepositoryError> {
-        let value=sqlx::query_scalar!(r#"SELECT folioharbor.library_create_invitation($1,$2,$3,$4,$5,$6,$7,$8,$9) AS "outcome!""#,i.invitation_id.as_uuid(),i.library_id.as_uuid(),i.invited_by.as_uuid(),i.normalized_email.as_str(),i.display_email,i.role.as_str(),i.token_hash.as_bytes().as_slice(),i.created_at,i.expires_at).fetch_one(&self.pool).await.map_err(persistence_error)?;
+        validate_facts(
+            grant,
+            &audit,
+            i.invited_by,
+            i.library_id,
+            Action::InviteMember,
+            ResourceRef::Invitation {
+                library_id: i.library_id,
+                invitation_id: i.invitation_id,
+            },
+        )?;
+        let mut tx = self.pool.begin().await.map_err(persistence_error)?;
+        PgTransactionContext::apply(
+            &mut tx,
+            &DatabaseContext::api(grant.actor(), grant.library_id(), audit.request_id),
+        )
+        .await
+        .map_err(persistence_error)?;
+        let value: String = sqlx::query_scalar("SELECT folioharbor.library_create_invitation_authorized($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)")
+            .bind(i.invitation_id.as_uuid()).bind(i.library_id.as_uuid()).bind(i.invited_by.as_uuid())
+            .bind(i.normalized_email.as_str()).bind(i.display_email).bind(i.role.as_str())
+            .bind(i.token_hash.as_bytes().as_slice()).bind(i.created_at).bind(i.expires_at)
+            .bind(grant.membership_version()).bind(Uuid::now_v7())
+            .bind(audit.effective_actor.map(UserId::as_uuid)).bind(audit.action.as_str())
+            .bind(audit.resource.resource_type()).bind(resource_id(audit.resource))
+            .bind(audit.decision.as_str()).bind(audit.reason_code).bind(audit.request_id.as_ulid().to_string())
+            .bind(audit.source.as_str()).bind(audit.occurred_at).bind(audit.network_hmac.map(|v| v.to_vec()))
+            .fetch_one(&mut *tx).await.map_err(persistence_error)?;
+        tx.commit().await.map_err(persistence_error)?;
         mutation(&value)
     }
     async fn accept_invitation(
@@ -76,18 +270,35 @@ impl LibraryRepository for PgLibraryRepository {
         target: UserId,
         role: RoleCode,
         now: OffsetDateTime,
+        grant: AuthorizationGrant,
+        audit: AuditEvent,
     ) -> Result<LibraryMutationOutcome, LibraryRepositoryError> {
-        let value = sqlx::query_scalar!(
-            r#"SELECT folioharbor.library_change_role($1,$2,$3,$4,$5) AS "outcome!""#,
-            actor.as_uuid(),
-            library.as_uuid(),
-            target.as_uuid(),
-            role.as_str(),
-            now
+        validate_facts(
+            grant,
+            &audit,
+            actor,
+            library,
+            Action::ChangeMemberRole,
+            ResourceRef::Membership {
+                library_id: library,
+                user_id: target,
+            },
+        )?;
+        let mut tx = self.pool.begin().await.map_err(persistence_error)?;
+        PgTransactionContext::apply(
+            &mut tx,
+            &DatabaseContext::api(grant.actor(), grant.library_id(), audit.request_id),
         )
-        .fetch_one(&self.pool)
         .await
         .map_err(persistence_error)?;
+        let value: String = sqlx::query_scalar("SELECT folioharbor.library_change_role_authorized($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)")
+            .bind(actor.as_uuid()).bind(library.as_uuid()).bind(target.as_uuid()).bind(role.as_str()).bind(now)
+            .bind(grant.membership_version()).bind(Uuid::now_v7()).bind(audit.effective_actor.map(UserId::as_uuid))
+            .bind(audit.action.as_str()).bind(audit.resource.resource_type()).bind(resource_id(audit.resource))
+            .bind(audit.decision.as_str()).bind(audit.reason_code).bind(audit.request_id.as_ulid().to_string())
+            .bind(audit.source.as_str()).bind(audit.occurred_at).bind(audit.network_hmac.map(|v| v.to_vec()))
+            .fetch_one(&mut *tx).await.map_err(persistence_error)?;
+        tx.commit().await.map_err(persistence_error)?;
         mutation(&value)
     }
     async fn remove_member(
@@ -96,17 +307,35 @@ impl LibraryRepository for PgLibraryRepository {
         library: LibraryId,
         target: UserId,
         now: OffsetDateTime,
+        grant: AuthorizationGrant,
+        audit: AuditEvent,
     ) -> Result<LibraryMutationOutcome, LibraryRepositoryError> {
-        let value = sqlx::query_scalar!(
-            r#"SELECT folioharbor.library_remove_member($1,$2,$3,$4) AS "outcome!""#,
-            actor.as_uuid(),
-            library.as_uuid(),
-            target.as_uuid(),
-            now
+        validate_facts(
+            grant,
+            &audit,
+            actor,
+            library,
+            Action::RemoveMember,
+            ResourceRef::Membership {
+                library_id: library,
+                user_id: target,
+            },
+        )?;
+        let mut tx = self.pool.begin().await.map_err(persistence_error)?;
+        PgTransactionContext::apply(
+            &mut tx,
+            &DatabaseContext::api(grant.actor(), grant.library_id(), audit.request_id),
         )
-        .fetch_one(&self.pool)
         .await
         .map_err(persistence_error)?;
+        let value: String = sqlx::query_scalar("SELECT folioharbor.library_remove_member_authorized($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)")
+            .bind(actor.as_uuid()).bind(library.as_uuid()).bind(target.as_uuid()).bind(now)
+            .bind(grant.membership_version()).bind(Uuid::now_v7()).bind(audit.effective_actor.map(UserId::as_uuid))
+            .bind(audit.action.as_str()).bind(audit.resource.resource_type()).bind(resource_id(audit.resource))
+            .bind(audit.decision.as_str()).bind(audit.reason_code).bind(audit.request_id.as_ulid().to_string())
+            .bind(audit.source.as_str()).bind(audit.occurred_at).bind(audit.network_hmac.map(|v| v.to_vec()))
+            .fetch_one(&mut *tx).await.map_err(persistence_error)?;
+        tx.commit().await.map_err(persistence_error)?;
         mutation(&value)
     }
     async fn update_library_settings(
@@ -115,17 +344,32 @@ impl LibraryRepository for PgLibraryRepository {
         library: LibraryId,
         name: &str,
         now: OffsetDateTime,
+        grant: AuthorizationGrant,
+        audit: AuditEvent,
     ) -> Result<LibraryMutationOutcome, LibraryRepositoryError> {
-        let value = sqlx::query_scalar!(
-            r#"SELECT folioharbor.library_update_settings($1,$2,$3,$4) AS "outcome!""#,
-            actor.as_uuid(),
-            library.as_uuid(),
-            name,
-            now
+        validate_facts(
+            grant,
+            &audit,
+            actor,
+            library,
+            Action::ManageLibrary,
+            ResourceRef::Library(library),
+        )?;
+        let mut tx = self.pool.begin().await.map_err(persistence_error)?;
+        PgTransactionContext::apply(
+            &mut tx,
+            &DatabaseContext::api(grant.actor(), grant.library_id(), audit.request_id),
         )
-        .fetch_one(&self.pool)
         .await
         .map_err(persistence_error)?;
+        let value: String = sqlx::query_scalar("SELECT folioharbor.library_update_settings_authorized($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)")
+            .bind(actor.as_uuid()).bind(library.as_uuid()).bind(name).bind(now)
+            .bind(grant.membership_version()).bind(Uuid::now_v7()).bind(audit.effective_actor.map(UserId::as_uuid))
+            .bind(audit.action.as_str()).bind(audit.resource.resource_type()).bind(resource_id(audit.resource))
+            .bind(audit.decision.as_str()).bind(audit.reason_code).bind(audit.request_id.as_ulid().to_string())
+            .bind(audit.source.as_str()).bind(audit.occurred_at).bind(audit.network_hmac.map(|v| v.to_vec()))
+            .fetch_one(&mut *tx).await.map_err(persistence_error)?;
+        tx.commit().await.map_err(persistence_error)?;
         mutation(&value)
     }
 }

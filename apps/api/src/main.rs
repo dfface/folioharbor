@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use folioharbor_application::{
     config::{ConfigSources, Settings},
     identity::IdentityApi,
+    libraries::LibraryService,
     ports::{
         Argon2PasswordHasher, Clock, LibraryInvitationContext, MailError, Mailer, RandomSource,
     },
@@ -12,8 +13,8 @@ use folioharbor_application::{
 use folioharbor_domain::identity::NormalizedEmail;
 use folioharbor_http::AppState;
 use folioharbor_postgres::{
-    PgRateLimitRepository, connect_api, identity::PgIdentityRepository,
-    libraries::PgLibraryRepository,
+    PgAuditRepository, PgAuthorizationRepository, PgRateLimitRepository, connect_api,
+    identity::PgIdentityRepository, libraries::PgLibraryRepository,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
@@ -34,6 +35,7 @@ impl RandomSource for SystemRandom {
         }
     }
 }
+#[derive(Clone, Copy)]
 struct DeferredMailer;
 #[async_trait]
 impl Mailer for DeferredMailer {
@@ -74,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("FOLIOHARBOR_DATABASE_URL is required"))?;
     let pool = connect_api(database_url).await?;
+    let library_repository = PgLibraryRepository::new(pool.clone());
     let identity = Arc::new(IdentityApi::new_configured(
         PgIdentityRepository::new(pool.clone()),
         Argon2PasswordHasher::new(SystemRandom),
@@ -81,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
         SystemClock,
         SystemRandom,
         settings.auth.personal_library_enabled,
-        PgLibraryRepository::new(pool.clone()),
+        library_repository.clone(),
     ));
     let secret = SecretString::from(
         settings
@@ -93,9 +96,17 @@ async fn main() -> anyhow::Result<()> {
             .to_owned(),
     );
     let limiter = Arc::new(DurableRateLimiter::new(
-        PgRateLimitRepository::new(pool),
+        PgRateLimitRepository::new(pool.clone()),
         secret,
         SystemClock,
+    ));
+    let library_api = Arc::new(LibraryService::new(
+        library_repository,
+        PgAuthorizationRepository::new(pool.clone()),
+        PgAuditRepository::new(pool),
+        DeferredMailer,
+        SystemClock,
+        SystemRandom,
     ));
     let state = AppState::new(
         settings.server.public_base_url.as_url().clone(),
@@ -110,7 +121,8 @@ async fn main() -> anyhow::Result<()> {
         identity.clone(),
         identity,
         limiter,
-    );
+    )
+    .with_library_api(library_api);
     let listener = tokio::net::TcpListener::bind(&settings.server.bind_address).await?;
     axum::serve(
         listener,

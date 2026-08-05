@@ -1,4 +1,5 @@
 mod auth;
+mod libraries;
 use crate::middleware;
 use axum::{Router, middleware as axum_middleware};
 use folioharbor_application::{
@@ -7,6 +8,7 @@ use folioharbor_application::{
         ListSessionsUseCase, LoginUseCase, LogoutUseCase, RegisterAccountUseCase,
         RequestPasswordResetUseCase, RevokeSessionUseCase, VerifyEmailUseCase,
     },
+    libraries::{LibraryApi, UnavailableLibraryApi},
     rate_limit::RateLimitUseCase,
 };
 use std::sync::Arc;
@@ -26,6 +28,7 @@ pub struct AppState {
     pub list_sessions: Arc<dyn ListSessionsUseCase>,
     pub revoke_session: Arc<dyn RevokeSessionUseCase>,
     pub rate_limit: Arc<dyn RateLimitUseCase>,
+    pub library_api: Arc<dyn LibraryApi>,
 }
 impl AppState {
     #[allow(clippy::too_many_arguments)]
@@ -57,12 +60,20 @@ impl AppState {
             list_sessions,
             revoke_session,
             rate_limit,
+            library_api: Arc::new(UnavailableLibraryApi),
         }
+    }
+
+    #[must_use]
+    pub fn with_library_api(mut self, library_api: Arc<dyn LibraryApi>) -> Self {
+        self.library_api = library_api;
+        self
     }
 }
 pub fn router(state: AppState) -> Router {
     Router::new()
         .nest("/api/v1/auth", auth::router())
+        .nest("/api/v1/libraries", libraries::router())
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),
             middleware::csrf::authenticate_and_protect,
