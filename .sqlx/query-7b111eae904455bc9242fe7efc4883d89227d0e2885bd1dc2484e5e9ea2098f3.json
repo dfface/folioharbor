@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.role_code AS \"role_code!\",m.version AS \"version!\",\n               (p.permission_code IS NOT NULL) AS \"permitted!\"\n               FROM folioharbor.library_memberships m\n               LEFT JOIN folioharbor.role_permissions p ON p.role_code=m.role_code AND p.permission_code=$3\n               WHERE m.library_id=$1 AND m.user_id=$2 AND m.status='active'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "role_code!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "version!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "permitted!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "7b111eae904455bc9242fe7efc4883d89227d0e2885bd1dc2484e5e9ea2098f3"
+}

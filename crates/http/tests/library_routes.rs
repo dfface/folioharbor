@@ -140,6 +140,10 @@ impl RateLimitUseCase for RouteAuth {
 struct NoopMailer;
 #[async_trait]
 impl Mailer for NoopMailer {
+    async fn preflight_library_invitation(&self) -> Result<(), MailError> {
+        Ok(())
+    }
+
     async fn send_verification(
         &self,
         _: &NormalizedEmail,
@@ -161,6 +165,38 @@ impl Mailer for NoopMailer {
         _: SecretString,
     ) -> Result<(), MailError> {
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct UnavailableMailer;
+#[async_trait]
+impl Mailer for UnavailableMailer {
+    async fn preflight_library_invitation(&self) -> Result<(), MailError> {
+        Err(MailError)
+    }
+
+    async fn send_verification(
+        &self,
+        _: &NormalizedEmail,
+        _: SecretString,
+    ) -> Result<(), MailError> {
+        Err(MailError)
+    }
+    async fn send_password_reset(
+        &self,
+        _: &NormalizedEmail,
+        _: SecretString,
+    ) -> Result<(), MailError> {
+        Err(MailError)
+    }
+    async fn send_library_invitation(
+        &self,
+        _: &NormalizedEmail,
+        _: LibraryInvitationContext,
+        _: SecretString,
+    ) -> Result<(), MailError> {
+        Err(MailError)
     }
 }
 
@@ -213,6 +249,105 @@ fn openapi_exposes_the_complete_library_authorization_surface()
             "missing {path}"
         );
     }
+    let unavailable = &document["paths"]["/api/v1/libraries/{library_id}/invitations"]["post"]["responses"]
+        ["503"];
+    assert_eq!(
+        unavailable["content"]["application/problem+json"]["schema"]["$ref"],
+        "#/components/schemas/ProblemDetails"
+    );
+    assert_eq!(
+        unavailable["content"]["application/problem+json"]["example"]["code"],
+        "mail_delivery_unavailable"
+    );
+    assert_eq!(
+        unavailable["content"]["application/problem+json"]["example"]["status"],
+        503
+    );
+    assert!(
+        unavailable["content"]["application/problem+json"]["example"]["request_id"]
+            .as_str()
+            .is_some()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unavailable_invitation_delivery_returns_correlated_503_without_persistence_or_allowed_audit()
+-> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let now = OffsetDateTime::now_utc();
+    let library = LibraryId::new();
+    let owner = UserId::new();
+    sqlx::query("INSERT INTO folioharbor.user_accounts(user_id,normalized_email,display_email,status,created_at,verified_at) VALUES($1,'owner@unavailable.test','owner@unavailable.test','verified',$2,$2)")
+        .bind(owner.as_uuid()).bind(now).execute(&pools.owner).await?;
+    sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,created_at,updated_at) VALUES($1,'Unavailable Mail',$2,$2)")
+        .bind(library.as_uuid()).bind(now).execute(&pools.owner).await?;
+    sqlx::query("INSERT INTO folioharbor.library_memberships(library_id,user_id,role_code,status,joined_at) VALUES($1,$2,'owner','active',$3)")
+        .bind(library.as_uuid()).bind(owner.as_uuid()).bind(now).execute(&pools.owner).await?;
+
+    let auth = Arc::new(RouteAuth(HashMap::from([("owner".to_owned(), owner)])));
+    let service = Arc::new(LibraryService::new(
+        PgLibraryRepository::new(pools.api.clone()),
+        PgAuthorizationRepository::new(pools.api.clone()),
+        PgAuditRepository::new(pools.api.clone()),
+        UnavailableMailer,
+        FixedClock::new(now),
+        FixedRandom::new(5),
+    ));
+    let state = AppState::new(
+        Url::parse("https://library.example")?,
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth,
+    )
+    .with_library_api(service);
+    let response = router(state)
+        .oneshot(request(
+            &Method::POST,
+            &format!("/api/v1/libraries/{}/invitations", library.as_uuid()),
+            "owner",
+            Body::from(r#"{"email":"reader@unavailable.test","role":"reader"}"#),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response.into_body().collect().await?.to_bytes();
+    let problem: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(problem["code"], "mail_delivery_unavailable");
+    assert_eq!(problem["status"], 503);
+    let request_id = problem["request_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("503 response must have a request ID"))?;
+    assert_eq!(
+        problem["instance"],
+        format!("/problems/{request_id}"),
+        "503 problem instance must correlate to its request ID"
+    );
+
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM folioharbor.library_invitations WHERE library_id=$1),(SELECT count(*) FROM folioharbor.audit_events WHERE decision='allowed')",
+    )
+    .bind(library.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_eq!(counts, (0, 0));
+
+    pools.close().await;
+    database.cleanup().await?;
     Ok(())
 }
 
@@ -232,18 +367,25 @@ async fn concrete_routes_enforce_role_matrix_and_correlate_denial_audits() -> an
     let editor = UserId::new();
     let reader = UserId::new();
     let unrelated = UserId::new();
+    let target = UserId::new();
     for (user, email) in [
         (owner, "owner@route.test"),
         (editor, "editor@route.test"),
         (reader, "reader@route.test"),
         (unrelated, "unrelated@route.test"),
+        (target, "target@route.test"),
     ] {
         sqlx::query("INSERT INTO folioharbor.user_accounts(user_id,normalized_email,display_email,status,created_at,verified_at) VALUES($1,$2,$2,'verified',$3,$3)")
             .bind(user.as_uuid()).bind(email).bind(now).execute(&pools.owner).await?;
     }
     sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,created_at,updated_at) VALUES($1,'HTTP Matrix',$2,$2)")
         .bind(library.as_uuid()).bind(now).execute(&pools.owner).await?;
-    for (user, role) in [(owner, "owner"), (editor, "editor"), (reader, "reader")] {
+    for (user, role) in [
+        (owner, "owner"),
+        (editor, "editor"),
+        (reader, "reader"),
+        (target, "reader"),
+    ] {
         sqlx::query("INSERT INTO folioharbor.library_memberships(library_id,user_id,role_code,status,joined_at) VALUES($1,$2,$3,'active',$4)")
             .bind(library.as_uuid()).bind(user.as_uuid()).bind(role).bind(now).execute(&pools.owner).await?;
     }
@@ -278,6 +420,20 @@ async fn concrete_routes_enforce_role_matrix_and_correlate_denial_audits() -> an
     )
     .with_library_api(service);
     let app = router(state);
+
+    for actor in ["owner", "editor", "reader", "unrelated"] {
+        let response = app
+            .clone()
+            .oneshot(request(
+                &Method::GET,
+                "/api/v1/libraries",
+                actor,
+                Body::empty(),
+            ))
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK, "list as {actor}");
+    }
+
     let detail = format!("/api/v1/libraries/{}", library.as_uuid());
     for actor in ["owner", "editor", "reader"] {
         let response = app
@@ -293,43 +449,111 @@ async fn concrete_routes_enforce_role_matrix_and_correlate_denial_audits() -> an
     assert_eq!(unrelated_response.status(), StatusCode::NOT_FOUND);
     let mut denial_ids = vec![problem_request_id(unrelated_response).await];
 
-    let settings = format!("/api/v1/libraries/{}/settings", library.as_uuid());
-    let owner_response = app
-        .clone()
-        .oneshot(request(
-            &Method::PATCH,
-            &settings,
-            "owner",
-            Body::from(r#"{"name":"HTTP Updated"}"#),
-        ))
-        .await?;
-    assert_eq!(owner_response.status(), StatusCode::NO_CONTENT);
-    for actor in ["editor", "reader"] {
+    let members = format!("/api/v1/libraries/{}/members", library.as_uuid());
+    for actor in ["owner", "editor", "reader"] {
         let response = app
             .clone()
-            .oneshot(request(
-                &Method::PATCH,
-                &settings,
-                actor,
-                Body::from(r#"{"name":"Denied"}"#),
-            ))
+            .oneshot(request(&Method::GET, &members, actor, Body::empty()))
             .await?;
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        denial_ids.push(problem_request_id(response).await);
+        assert_eq!(response.status(), StatusCode::OK, "member list as {actor}");
     }
+    let response = app
+        .clone()
+        .oneshot(request(&Method::GET, &members, "unrelated", Body::empty()))
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    denial_ids.push(problem_request_id(response).await);
+
+    let operations = [
+        (
+            Method::PATCH,
+            format!("/api/v1/libraries/{}/settings", library.as_uuid()),
+            r#"{"name":"HTTP Updated"}"#,
+        ),
+        (
+            Method::POST,
+            format!("/api/v1/libraries/{}/invitations", library.as_uuid()),
+            r#"{"email":"invited@route.test","role":"reader"}"#,
+        ),
+        (
+            Method::PATCH,
+            format!(
+                "/api/v1/libraries/{}/members/{}",
+                library.as_uuid(),
+                target.as_uuid()
+            ),
+            r#"{"role":"editor"}"#,
+        ),
+        (
+            Method::DELETE,
+            format!(
+                "/api/v1/libraries/{}/members/{}",
+                library.as_uuid(),
+                target.as_uuid()
+            ),
+            "",
+        ),
+    ];
+    for (operation_index, (method, uri, body)) in operations.iter().enumerate() {
+        let response = app
+            .clone()
+            .oneshot(request(method, uri, "owner", Body::from(*body)))
+            .await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::NO_CONTENT,
+            "owner operation {uri}"
+        );
+        let allowed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM folioharbor.audit_events WHERE decision='allowed'",
+        )
+        .fetch_one(&pools.owner)
+        .await?;
+        assert_eq!(allowed, i64::try_from(operation_index + 1)?);
+
+        for (actor, status) in [
+            ("editor", StatusCode::FORBIDDEN),
+            ("reader", StatusCode::FORBIDDEN),
+            ("unrelated", StatusCode::NOT_FOUND),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request(method, uri, actor, Body::from(*body)))
+                .await?;
+            assert_eq!(response.status(), status, "{uri} as {actor}");
+            denial_ids.push(problem_request_id(response).await);
+        }
+    }
+
+    let mutation_state: (String, i64, String, String) = sqlx::query_as(
+        "SELECT l.name,(SELECT count(*) FROM folioharbor.library_invitations i WHERE i.library_id=l.library_id),(SELECT role_code FROM folioharbor.library_memberships WHERE library_id=l.library_id AND user_id=$2),(SELECT status FROM folioharbor.library_memberships WHERE library_id=l.library_id AND user_id=$2) FROM folioharbor.libraries l WHERE l.library_id=$1",
+    )
+    .bind(library.as_uuid())
+    .bind(target.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_eq!(
+        mutation_state,
+        (
+            "HTTP Updated".to_owned(),
+            1,
+            "editor".to_owned(),
+            "removed".to_owned()
+        )
+    );
 
     let audits: Vec<(String, String)> = sqlx::query_as(
         "SELECT decision,request_id FROM folioharbor.audit_events ORDER BY occurred_at,audit_event_id",
     )
     .fetch_all(&pools.owner)
     .await?;
-    assert_eq!(audits.iter().filter(|(d, _)| d == "allowed").count(), 1);
+    assert_eq!(audits.iter().filter(|(d, _)| d == "allowed").count(), 4);
     let persisted_denials = audits
         .iter()
         .filter(|(d, _)| d == "denied")
         .map(|(_, request_id)| request_id)
         .collect::<Vec<_>>();
-    assert_eq!(persisted_denials.len(), 3);
+    assert_eq!(persisted_denials.len(), 14);
     assert!(denial_ids.iter().all(|id| persisted_denials.contains(&id)));
 
     pools.close().await;

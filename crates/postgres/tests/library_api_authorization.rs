@@ -26,6 +26,10 @@ struct NoopMailer;
 
 #[async_trait]
 impl Mailer for NoopMailer {
+    async fn preflight_library_invitation(&self) -> Result<(), MailError> {
+        Ok(())
+    }
+
     async fn send_verification(
         &self,
         _: &NormalizedEmail,

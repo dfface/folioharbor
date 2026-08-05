@@ -5,6 +5,11 @@ ALTER TABLE folioharbor.library_memberships FORCE ROW LEVEL SECURITY;
 ALTER TABLE folioharbor.library_invitations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE folioharbor.library_invitations FORCE ROW LEVEL SECURITY;
 
+CREATE OR REPLACE FUNCTION folioharbor.is_worker()
+RETURNS boolean LANGUAGE sql STABLE SET search_path TO ''
+RETURN session_user='folioharbor_worker' AND
+ COALESCE(NULLIF(current_setting('app.is_worker',true),'')::boolean,false);
+
 CREATE POLICY libraries_owner_access ON folioharbor.libraries USING (current_user='folioharbor_owner') WITH CHECK (current_user='folioharbor_owner');
 CREATE POLICY memberships_owner_access ON folioharbor.library_memberships USING (current_user='folioharbor_owner') WITH CHECK (current_user='folioharbor_owner');
 CREATE POLICY invitations_owner_access ON folioharbor.library_invitations USING (current_user='folioharbor_owner') WITH CHECK (current_user='folioharbor_owner');
@@ -25,24 +30,26 @@ GRANT SELECT ON folioharbor.libraries,folioharbor.library_memberships,folioharbo
 
 CREATE TABLE folioharbor.audit_events (
  audit_event_id uuid NOT NULL, actor_id uuid, effective_actor_id uuid, library_id uuid NOT NULL,
- action_code text NOT NULL, resource_type text NOT NULL CHECK(resource_type IN('library','membership','invitation')),
+ action_code text NOT NULL CHECK(action_code IN('library.view','library.manage','member.invite','member.role.change','member.remove')),
+ resource_type text NOT NULL CHECK(resource_type IN('library','membership','invitation')),
  resource_id uuid NOT NULL, decision text NOT NULL CHECK(decision IN('allowed','denied')), reason_code text,
- request_id text NOT NULL, source text NOT NULL CHECK(source IN('api','worker')), occurred_at timestamptz NOT NULL,
+ request_id text NOT NULL CHECK(char_length(request_id) BETWEEN 1 AND 128),
+ source text NOT NULL CHECK(source IN('api','worker')), occurred_at timestamptz NOT NULL,
  network_hmac bytea CHECK(network_hmac IS NULL OR octet_length(network_hmac)=32),
+ CHECK((decision='allowed' AND reason_code IS NULL) OR
+       (decision='denied' AND reason_code IN('library_action_forbidden','library_not_found'))),
+ CHECK((source='api' AND actor_id IS NOT NULL AND effective_actor_id IS NOT DISTINCT FROM actor_id) OR
+       (source='worker' AND effective_actor_id IS NOT DISTINCT FROM actor_id)),
  PRIMARY KEY(occurred_at,audit_event_id)
 ) PARTITION BY RANGE(occurred_at);
 CREATE TABLE folioharbor.audit_events_default PARTITION OF folioharbor.audit_events DEFAULT;
 ALTER TABLE folioharbor.audit_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE folioharbor.audit_events FORCE ROW LEVEL SECURITY;
 CREATE POLICY audit_owner_access ON folioharbor.audit_events USING(current_user='folioharbor_owner') WITH CHECK(current_user='folioharbor_owner');
-CREATE POLICY audit_runtime_insert ON folioharbor.audit_events FOR INSERT WITH CHECK(
- library_id=folioharbor.current_library_id() AND request_id=folioharbor.current_request_id()
- AND ((source='worker')=folioharbor.is_worker())
- AND (folioharbor.is_worker() OR actor_id=folioharbor.current_user_id()));
 CREATE POLICY audit_runtime_read ON folioharbor.audit_events FOR SELECT USING(
  library_id=folioharbor.current_library_id() AND (folioharbor.is_worker() OR actor_id=folioharbor.current_user_id()));
 REVOKE ALL ON folioharbor.audit_events,folioharbor.audit_events_default FROM PUBLIC;
-GRANT SELECT,INSERT ON folioharbor.audit_events TO folioharbor_api,folioharbor_worker;
+GRANT SELECT ON folioharbor.audit_events TO folioharbor_api,folioharbor_worker;
 
 CREATE FUNCTION folioharbor.audit_record_denial(
  p_id uuid,p_actor uuid,p_effective uuid,p_library uuid,p_action text,p_type text,p_resource uuid,
@@ -51,9 +58,17 @@ CREATE FUNCTION folioharbor.audit_record_denial(
 BEGIN
  IF p_library IS DISTINCT FROM folioharbor.current_library_id()
  OR p_request IS DISTINCT FROM folioharbor.current_request_id()
- OR (p_source='worker') IS DISTINCT FROM folioharbor.is_worker()
- OR (NOT folioharbor.is_worker() AND p_actor IS DISTINCT FROM folioharbor.current_user_id())
- OR p_type NOT IN('library','membership','invitation') OR p_reason IS NULL THEN
+ OR p_source NOT IN('api','worker') OR (p_source='worker') IS DISTINCT FROM folioharbor.is_worker()
+ OR p_source IS DISTINCT FROM (CASE
+      WHEN session_user='folioharbor_api' THEN 'api'
+      WHEN session_user='folioharbor_worker' THEN 'worker' ELSE '' END)
+ OR (p_source='api' AND (p_actor IS NULL OR p_actor IS DISTINCT FROM p_effective
+     OR p_actor IS DISTINCT FROM folioharbor.current_user_id()))
+ OR (p_source='worker' AND p_effective IS DISTINCT FROM p_actor)
+ OR p_action NOT IN('library.view','library.manage','member.invite','member.role.change','member.remove')
+ OR p_type NOT IN('library','membership','invitation')
+ OR p_reason NOT IN('library_action_forbidden','library_not_found')
+ OR char_length(p_request) NOT BETWEEN 1 AND 128 THEN
   RAISE EXCEPTION 'invalid audit denial facts' USING ERRCODE='22023';
  END IF;
  INSERT INTO folioharbor.audit_events VALUES
@@ -89,7 +104,8 @@ BEGIN
  OR p_request IS DISTINCT FROM folioharbor.current_request_id()
  OR p_action IS DISTINCT FROM p_expected_action OR p_type IS DISTINCT FROM p_expected_type
  OR p_resource IS DISTINCT FROM p_expected_resource OR p_decision IS DISTINCT FROM 'allowed'
- OR p_reason IS NOT NULL OR p_source IS DISTINCT FROM 'api' OR folioharbor.is_worker() THEN
+ OR p_reason IS NOT NULL OR p_source IS DISTINCT FROM 'api' OR folioharbor.is_worker()
+ OR session_user<>'folioharbor_api' THEN
   RAISE EXCEPTION 'audit event does not match grant' USING ERRCODE='22023';
  END IF;
  INSERT INTO folioharbor.audit_events VALUES

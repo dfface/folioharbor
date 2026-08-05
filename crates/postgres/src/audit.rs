@@ -44,25 +44,23 @@ impl AuditSink for PgAuditRepository {
         PgTransactionContext::apply(&mut tx, &context)
             .await
             .map_err(|_| AuditRepositoryError)?;
-        sqlx::query(
+        sqlx::query!(
             "SELECT folioharbor.audit_record_denial($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
-        )
-        .bind(Uuid::now_v7())
-        .bind(event.actor.map(folioharbor_domain::id::UserId::as_uuid))
-        .bind(
+            Uuid::now_v7(),
+            event.actor.map(folioharbor_domain::id::UserId::as_uuid),
             event
                 .effective_actor
                 .map(folioharbor_domain::id::UserId::as_uuid),
+            event.library_id.as_uuid(),
+            event.action.as_str(),
+            event.resource.resource_type(),
+            resource_id(event.resource),
+            event.reason_code,
+            event.request_id.as_ulid().to_string(),
+            event.source.as_str(),
+            event.occurred_at,
+            event.network_hmac.as_ref().map(<[u8; 32]>::as_slice),
         )
-        .bind(event.library_id.as_uuid())
-        .bind(event.action.as_str())
-        .bind(event.resource.resource_type())
-        .bind(resource_id(event.resource))
-        .bind(event.reason_code)
-        .bind(event.request_id.as_ulid().to_string())
-        .bind(event.source.as_str())
-        .bind(event.occurred_at)
-        .bind(event.network_hmac.map(|x| x.to_vec()))
         .execute(&mut *tx)
         .await
         .map_err(|_| AuditRepositoryError)?;

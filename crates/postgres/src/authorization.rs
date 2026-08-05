@@ -40,18 +40,29 @@ impl AuthorizationRepository for PgAuthorizationRepository {
         )
         .await
         .map_err(|_| AuthorizationRepositoryError)?;
-        let row:Option<(String,i64,bool)>=sqlx::query_as("SELECT m.role_code,m.version,(p.permission_code IS NOT NULL) FROM folioharbor.library_memberships m LEFT JOIN folioharbor.role_permissions p ON p.role_code=m.role_code AND p.permission_code=$3 WHERE m.library_id=$1 AND m.user_id=$2 AND m.status='active'")
-   .bind(library.as_uuid()).bind(actor.as_uuid()).bind(action.required_permission().as_str()).fetch_optional(&mut *tx).await.map_err(|_|AuthorizationRepositoryError)?;
+        let row = sqlx::query!(
+            r#"SELECT m.role_code AS "role_code!",m.version AS "version!",
+               (p.permission_code IS NOT NULL) AS "permitted!"
+               FROM folioharbor.library_memberships m
+               LEFT JOIN folioharbor.role_permissions p ON p.role_code=m.role_code AND p.permission_code=$3
+               WHERE m.library_id=$1 AND m.user_id=$2 AND m.status='active'"#,
+            library.as_uuid(),
+            actor.as_uuid(),
+            action.required_permission().as_str(),
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| AuthorizationRepositoryError)?;
         tx.commit()
             .await
             .map_err(|_| AuthorizationRepositoryError)?;
         match row {
-            Some((role, version, permitted)) => Ok(Some(AuthorizationFact {
+            Some(row) => Ok(Some(AuthorizationFact {
                 library_id: library,
-                role: RoleCode::parse(&role).ok_or(AuthorizationRepositoryError)?,
-                membership_version: version,
+                role: RoleCode::parse(&row.role_code).ok_or(AuthorizationRepositoryError)?,
+                membership_version: row.version,
                 discoverable: true,
-                permitted,
+                permitted: row.permitted,
             })),
             None => Ok(None),
         }

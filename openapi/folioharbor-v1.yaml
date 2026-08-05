@@ -163,6 +163,12 @@ paths:
         '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
         '403': {$ref: '#/components/responses/Problem'}
         '404': {$ref: '#/components/responses/Problem'}
+        '503':
+          description: Invitation delivery is unavailable; no invitation or allowed audit is persisted
+          content:
+            application/problem+json:
+              schema: {$ref: '#/components/schemas/ProblemDetails'}
+              example: {type: 'https://library.example/problems/mail-delivery-unavailable', title: Dependency unavailable, status: 503, detail: A required service is temporarily unavailable., instance: /problems/01JREQ00000000000000000000, code: mail_delivery_unavailable, request_id: 01JREQ00000000000000000000}
 components:
   securitySchemes:
     cookieAuth: {type: apiKey, in: cookie, name: folioharbor_session}

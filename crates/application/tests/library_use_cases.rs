@@ -8,7 +8,7 @@ use folioharbor_application::libraries::{
 use folioharbor_application::ports::{
     AcceptInvitationOutcome, AuthorizationRepository, AuthorizationRepositoryError,
     LibraryInvitationContext, LibraryMutationOutcome, LibraryRepository, LibraryRepositoryError,
-    MailError, Mailer, NewLibraryInvitation,
+    MailError, Mailer, NewLibraryInvitation, RandomSource,
 };
 use folioharbor_application::{
     audit::AuditEvent,
@@ -213,8 +213,27 @@ struct InvitationMailer {
     fail: bool,
 }
 
+#[derive(Default)]
+struct CountingRandom {
+    fills: Mutex<usize>,
+}
+
+impl RandomSource for CountingRandom {
+    fn fill(&self, destination: &mut [u8]) {
+        *self
+            .fills
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+        destination.fill(92);
+    }
+}
+
 #[async_trait]
 impl Mailer for InvitationMailer {
+    async fn preflight_library_invitation(&self) -> Result<(), MailError> {
+        if self.fail { Err(MailError) } else { Ok(()) }
+    }
+
     async fn send_verification(
         &self,
         _: &NormalizedEmail,
@@ -301,28 +320,23 @@ async fn invitation_plaintext_moves_directly_to_mailer_with_bound_context()
 }
 
 #[tokio::test]
-async fn invitation_delivery_failure_is_reported_without_returning_plaintext() {
+async fn unavailable_invitation_delivery_prevents_token_generation_and_persistence() {
     let repository = CommandRepository::new(LibraryMutationOutcome::Applied);
     let mailer = InvitationMailer {
         fail: true,
         ..InvitationMailer::default()
     };
+    let random = CountingRandom::default();
 
-    let result = InviteMember::new(
-        &repository,
-        &repository,
-        &mailer,
-        &clock(),
-        &FixedRandom::new(92),
-    )
-    .execute(InviteMemberCommand {
-        actor: UserId::new(),
-        library_id: LibraryId::new(),
-        email: "reader@example.com".to_owned(),
-        role: RoleCode::Reader,
-        request_id: RequestId::new(),
-    })
-    .await;
+    let result = InviteMember::new(&repository, &repository, &mailer, &clock(), &random)
+        .execute(InviteMemberCommand {
+            actor: UserId::new(),
+            library_id: LibraryId::new(),
+            email: "reader@example.com".to_owned(),
+            role: RoleCode::Reader,
+            request_id: RequestId::new(),
+        })
+        .await;
 
     assert!(matches!(
         result,
@@ -335,8 +349,24 @@ async fn invitation_delivery_failure_is_reported_without_returning_plaintext() {
             .invitation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_some(),
-        "the token hash must be persisted before delivery"
+            .is_none(),
+        "an unavailable mailer must prevent invitation persistence"
+    );
+    assert_eq!(
+        *random
+            .fills
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        0,
+        "an unavailable mailer must prevent token generation"
+    );
+    assert!(
+        mailer
+            .delivery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none(),
+        "an unavailable mailer must not receive invitation plaintext"
     );
 }
 

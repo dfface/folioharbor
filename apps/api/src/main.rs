@@ -39,6 +39,10 @@ impl RandomSource for SystemRandom {
 struct DeferredMailer;
 #[async_trait]
 impl Mailer for DeferredMailer {
+    async fn preflight_library_invitation(&self) -> Result<(), MailError> {
+        Err(MailError)
+    }
+
     async fn send_verification(
         &self,
         _: &NormalizedEmail,

@@ -15,6 +15,8 @@ pub struct LibraryInvitationContext {
 
 #[async_trait]
 pub trait Mailer: Send + Sync {
+    async fn preflight_library_invitation(&self) -> Result<(), MailError>;
+
     async fn send_verification(
         &self,
         email: &NormalizedEmail,

@@ -73,10 +73,6 @@ impl<R: LibraryRepository, A: AuthorizationRepository, M: Mailer, C: Clock, N: R
                 code: "invalid_email",
             }],
         })?;
-        let mut bytes = [0; 32];
-        self.random.fill(&mut bytes);
-        let token = SessionToken::from_random_bytes(bytes);
-        let now = self.clock.now();
         let invitation_id = InvitationId::new();
         let resource = ResourceRef::Invitation {
             library_id: command.library_id,
@@ -85,6 +81,16 @@ impl<R: LibraryRepository, A: AuthorizationRepository, M: Mailer, C: Clock, N: R
         let grant = Authorization::new(self.authorization)
             .require(command.actor, Action::InviteMember, resource)
             .await?;
+        self.mailer
+            .preflight_library_invitation()
+            .await
+            .map_err(|_| AppError::DependencyUnavailable {
+                code: "mail_delivery_unavailable",
+            })?;
+        let mut bytes = [0; 32];
+        self.random.fill(&mut bytes);
+        let token = SessionToken::from_random_bytes(bytes);
+        let now = self.clock.now();
         let audit = AuditEvent::allowed(
             command.actor,
             Action::InviteMember,
