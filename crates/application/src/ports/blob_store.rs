@@ -18,6 +18,7 @@ pub enum BlobStoreError {
 
 #[async_trait]
 pub trait BlobStore: Send + Sync {
+    fn candidate_key(&self, identity: &BlobIdentity) -> StorageKey;
     async fn create_staging(&self) -> Result<StorageKey, BlobStoreError>;
     async fn append(&self, key: &StorageKey, bytes: &[u8]) -> Result<(), BlobStoreError>;
     async fn read_range(

@@ -58,6 +58,27 @@ impl PgJobRepository {
         transaction.commit().await.map_err(persistence_error)?;
         Ok(changed)
     }
+
+    async fn quarantine_invalid(&self, now: OffsetDateTime) -> Result<(), JobRepositoryError> {
+        let mut transaction = self.transaction(RequestId::new(), None).await?;
+        sqlx::query(
+            r"UPDATE folioharbor.background_jobs
+               SET state='failed', lease_owner=NULL, lease_expires_at=NULL,
+                   error_code='invalid_job_input',
+                   error_summary='job payload failed validation', updated_at=$1
+               WHERE state IN ('pending','retry_wait')
+                 AND (kind <> 'import_epub'
+                   OR jsonb_typeof(input) IS DISTINCT FROM 'object'
+                   OR input->'version' IS DISTINCT FROM '1'::jsonb
+                   OR jsonb_typeof(input->'upload_id') IS DISTINCT FROM 'string'
+                   OR COALESCE(input->>'upload_id','') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')",
+        )
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(persistence_error)?;
+        transaction.commit().await.map_err(persistence_error)
+    }
 }
 
 #[async_trait]
@@ -82,8 +103,8 @@ impl JobRepository for PgJobRepository {
         let mut transaction = self.transaction(request.request_id, None).await?;
         let expires = request.now + request.lease_for;
         let rows = sqlx::query!(r#"WITH candidates AS (SELECT job_id,state,attempt_count FROM folioharbor.background_jobs WHERE next_run_at <= $1 AND (state IN ('pending','retry_wait') OR (state='leased' AND lease_expires_at <= $1)) ORDER BY next_run_at,created_at FOR UPDATE SKIP LOCKED LIMIT $2), expired AS (UPDATE folioharbor.job_attempts a SET finished_at=$1,outcome='lease_expired' FROM candidates c WHERE c.state='leased' AND a.job_id=c.job_id AND a.attempt=c.attempt_count), leased AS (UPDATE folioharbor.background_jobs j SET state='leased',lease_owner=$3,lease_expires_at=$4,attempt_count=j.attempt_count+1,error_code=NULL,error_summary=NULL,updated_at=$1 FROM candidates c WHERE j.job_id=c.job_id RETURNING j.job_id,j.library_id,j.kind,j.input,j.attempt_count,j.lease_expires_at), attempts AS (INSERT INTO folioharbor.job_attempts(job_id,attempt,lease_owner,started_at) SELECT job_id,attempt_count,$3,$1 FROM leased) SELECT job_id AS "job_id!",library_id AS "library_id!",kind AS "kind!",input AS "input!",attempt_count AS "attempt_count!",lease_expires_at AS "lease_expires_at!" FROM leased"#,request.now,i64::from(request.limit),&request.owner,expires).fetch_all(&mut *transaction).await.map_err(persistence_error)?;
-        transaction.commit().await.map_err(persistence_error)?;
-        rows.into_iter()
+        let parsed: Result<Vec<_>, _> = rows
+            .into_iter()
             .map(|row| {
                 let kind = row.kind;
                 let input = row.input;
@@ -97,6 +118,9 @@ impl JobRepository for PgJobRepository {
                     .and_then(serde_json::Value::as_str)
                     .ok_or(JobRepositoryError)?
                     .to_owned();
+                if version != 1 || uuid::Uuid::parse_str(&upload_id).is_err() {
+                    return Err(JobRepositoryError);
+                }
                 Ok(LeasedJob {
                     job_id: JobId::from_uuid(row.job_id),
                     library_id: LibraryId::from_uuid(row.library_id),
@@ -106,7 +130,18 @@ impl JobRepository for PgJobRepository {
                     lease_expires_at: row.lease_expires_at,
                 })
             })
-            .collect()
+            .collect();
+        match parsed {
+            Ok(jobs) => {
+                transaction.commit().await.map_err(persistence_error)?;
+                Ok(jobs)
+            }
+            Err(error) => {
+                transaction.rollback().await.map_err(persistence_error)?;
+                self.quarantine_invalid(request.now).await?;
+                Err(error)
+            }
+        }
     }
 
     async fn heartbeat(

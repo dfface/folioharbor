@@ -5,17 +5,20 @@ use bytes::Bytes;
 use folioharbor_application::{
     authorization::{Action, AuthorizationFact, ResourceRef},
     error::AppError,
-    imports::{ReceiveUploadRequest, UploadApi, UploadService, UploadStreamError},
+    imports::{
+        ReceiveUploadRequest, UploadApi, UploadRecoveryService, UploadService, UploadStreamError,
+    },
     ports::{
         AuthorizationRepository, AuthorizationRepositoryError, AuthorizedUploadTransition,
         BlobStore, BlobStoreError, CreateUploadRecord, ExpireUploads, FinalizeUploadReceipt,
-        UploadRepository, UploadRepositoryError, WorkerUploadTransition,
+        HeartbeatUploadReceipt, LeaseUploadCleanups, MarkUploadReceived, PrepareUploadPromotion,
+        UploadCleanup, UploadRepository, UploadRepositoryError, WorkerUploadTransition,
     },
 };
 use folioharbor_domain::{
     id::{LibraryId, RequestId, UploadId, UserId},
     imports::{
-        blob::{BlobIdentity, StorageKey},
+        blob::{BlobIdentity, DedupScope, StorageKey},
         quota::ByteCount,
         upload::{UploadSession, UploadState},
     },
@@ -53,6 +56,8 @@ struct Uploads {
     session: Mutex<UploadSession>,
     transitions: Mutex<Vec<(UploadState, UploadState)>>,
     fail_finalize: Mutex<bool>,
+    heartbeats: Mutex<u32>,
+    cleanup_leased: Mutex<bool>,
 }
 #[async_trait]
 impl UploadRepository for Uploads {
@@ -117,6 +122,36 @@ impl UploadRepository for Uploads {
         session.storage_key = Some(StorageKey::from_opaque(receipt.storage_key));
         Ok(true)
     }
+    async fn heartbeat_receipt(
+        &self,
+        _: HeartbeatUploadReceipt,
+    ) -> Result<bool, UploadRepositoryError> {
+        *self.heartbeats.lock().expect("heartbeats") += 1;
+        Ok(true)
+    }
+    async fn prepare_promotion(
+        &self,
+        _: PrepareUploadPromotion,
+    ) -> Result<bool, UploadRepositoryError> {
+        Ok(true)
+    }
+    async fn mark_received(
+        &self,
+        receipt: MarkUploadReceived,
+    ) -> Result<bool, UploadRepositoryError> {
+        let mut session = self.session.lock().expect("session");
+        if session.state != UploadState::Receiving {
+            return Ok(false);
+        }
+        self.transitions
+            .lock()
+            .expect("transitions")
+            .push((UploadState::Receiving, UploadState::Received));
+        session.state = UploadState::Received;
+        session.received_bytes = receipt.received;
+        session.storage_key = Some(StorageKey::from_opaque(receipt.final_key));
+        Ok(true)
+    }
     async fn transition_worker(
         &self,
         _: WorkerUploadTransition,
@@ -124,16 +159,48 @@ impl UploadRepository for Uploads {
         unreachable!()
     }
     async fn expire_worker(&self, _: ExpireUploads) -> Result<u64, UploadRepositoryError> {
-        unreachable!()
+        Ok(0)
+    }
+    async fn lease_cleanups(
+        &self,
+        _: LeaseUploadCleanups,
+    ) -> Result<Vec<UploadCleanup>, UploadRepositoryError> {
+        let mut leased = self.cleanup_leased.lock().expect("cleanup lease");
+        if *leased {
+            return Ok(Vec::new());
+        }
+        *leased = true;
+        let session = self.session.lock().expect("session");
+        Ok(vec![UploadCleanup {
+            upload_id: session.upload_id,
+            attempt_token: UploadId::new().as_uuid().to_string(),
+            staging_key: "staging:test".into(),
+            final_key: Some("blob:owned:test:4".into()),
+            final_owned: true,
+        }])
+    }
+    async fn complete_cleanup(
+        &self,
+        _: UploadId,
+        _: &str,
+        _: &str,
+        _: OffsetDateTime,
+        _: RequestId,
+    ) -> Result<bool, UploadRepositoryError> {
+        Ok(true)
     }
 }
 #[derive(Default)]
 struct Blobs {
     deleted: Mutex<u32>,
     appended: Mutex<Vec<usize>>,
+    promoted_namespaces: Mutex<Vec<String>>,
 }
 #[async_trait]
 impl BlobStore for Blobs {
+    fn candidate_key(&self, identity: &BlobIdentity) -> StorageKey {
+        StorageKey::from_opaque(format!("blobs:{}", identity.namespace().as_str()))
+    }
     async fn create_staging(&self) -> Result<StorageKey, BlobStoreError> {
         Ok(StorageKey::from_opaque("staging:test".into()))
     }
@@ -147,9 +214,13 @@ impl BlobStore for Blobs {
     async fn promote(
         &self,
         _: &StorageKey,
-        _: &BlobIdentity,
+        identity: &BlobIdentity,
     ) -> Result<StorageKey, BlobStoreError> {
-        Ok(StorageKey::from_opaque("blobs:test".into()))
+        self.promoted_namespaces
+            .lock()
+            .expect("namespaces")
+            .push(identity.namespace().as_str().to_owned());
+        Ok(self.candidate_key(identity))
     }
     async fn delete(&self, _: &StorageKey) -> Result<(), BlobStoreError> {
         *self.deleted.lock().expect("deleted") += 1;
@@ -161,6 +232,20 @@ impl BlobStore for Blobs {
 }
 fn fixture(
     declared: u64,
+) -> (
+    UploadService,
+    Arc<Uploads>,
+    Arc<Blobs>,
+    UserId,
+    LibraryId,
+    UploadId,
+) {
+    fixture_scope(declared, DedupScope::Instance)
+}
+
+fn fixture_scope(
+    declared: u64,
+    scope: DedupScope,
 ) -> (
     UploadService,
     Arc<Uploads>,
@@ -186,6 +271,8 @@ fn fixture(
         }),
         transitions: Mutex::new(Vec::new()),
         fail_finalize: Mutex::new(false),
+        heartbeats: Mutex::new(0),
+        cleanup_leased: Mutex::new(false),
     });
     let blobs = Arc::new(Blobs::default());
     let service = UploadService::new(
@@ -193,8 +280,56 @@ fn fixture(
         Arc::new(Allow),
         blobs.clone(),
         Arc::new(FixedClock(OffsetDateTime::UNIX_EPOCH)),
+        scope,
     );
     (service, uploads, blobs, actor, library, upload)
+}
+
+#[tokio::test]
+async fn recovery_deletes_staging_and_only_owned_final_before_acknowledging_cleanup() {
+    let (_service, uploads, blobs, _actor, _library, _upload) = fixture(4);
+    let recovery = UploadRecoveryService::new(uploads, blobs.clone());
+    assert_eq!(
+        recovery
+            .reconcile("recovery-a", OffsetDateTime::UNIX_EPOCH, 10)
+            .await
+            .expect("reconcile"),
+        1
+    );
+    assert_eq!(*blobs.deleted.lock().expect("deleted"), 2);
+}
+
+#[tokio::test]
+async fn configured_dedup_scope_selects_instance_library_and_upload_namespaces() {
+    for scope in [
+        DedupScope::Instance,
+        DedupScope::Library,
+        DedupScope::Disabled,
+    ] {
+        let (service, _uploads, blobs, actor, library, upload) = fixture_scope(4, scope);
+        service
+            .receive_upload(request(
+                actor,
+                library,
+                upload,
+                vec![Ok(Bytes::from_static(b"book"))],
+            ))
+            .await
+            .expect("queued");
+        let expected = match scope {
+            DedupScope::Instance => "instance-v1".to_owned(),
+            DedupScope::Library => format!("library-{}", library.as_uuid().simple()),
+            DedupScope::Disabled => format!("upload-{}", upload.as_uuid().simple()),
+        };
+        assert_eq!(
+            blobs
+                .promoted_namespaces
+                .lock()
+                .expect("namespaces")
+                .as_slice(),
+            &[expected]
+        );
+    }
 }
 fn request(
     actor: UserId,
@@ -247,7 +382,7 @@ async fn oversized_and_interrupted_streams_fail_recoverably_and_release_once() {
 #[tokio::test]
 async fn large_body_frames_are_split_into_bounded_blob_appends() {
     let size = 1024 * 1024 + 7;
-    let (service, _uploads, blobs, actor, library, upload) = fixture(size as u64);
+    let (service, uploads, blobs, actor, library, upload) = fixture(size as u64);
     service
         .receive_upload(request(
             actor,
@@ -261,6 +396,7 @@ async fn large_body_frames_are_split_into_bounded_blob_appends() {
         blobs.appended.lock().expect("appended").as_slice(),
         &[1024 * 1024, 7]
     );
+    assert_eq!(*uploads.heartbeats.lock().expect("heartbeats"), 2);
 }
 
 #[tokio::test]

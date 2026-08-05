@@ -244,3 +244,78 @@ async fn stale_leases_cannot_heartbeat_succeed_retry_or_fail() -> anyhow::Result
     database.cleanup().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn malformed_job_input_rolls_back_batch_and_is_quarantined_once() -> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let now = OffsetDateTime::now_utc();
+    let library = LibraryId::new();
+    let user = UserId::new();
+    sqlx::query("INSERT INTO folioharbor.user_accounts(user_id,normalized_email,display_email,status,created_at,verified_at) VALUES($1,$2,$2,'verified',$3,$3)").bind(user.as_uuid()).bind("poison@test.invalid").bind(now).execute(&pools.owner).await?;
+    sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,created_at,updated_at) VALUES($1,'Poison',$2,$2)").bind(library.as_uuid()).bind(now).execute(&pools.owner).await?;
+    sqlx::query(
+        "ALTER TABLE folioharbor.background_jobs DROP CONSTRAINT background_jobs_input_check",
+    )
+    .execute(&pools.owner)
+    .await?;
+    let poison = JobId::new();
+    sqlx::query("INSERT INTO folioharbor.background_jobs(job_id,library_id,kind,state,input,idempotency_key,next_run_at,created_at,updated_at) VALUES($1,$2,'import_epub','pending',$3,'poison', $4,$4,$4)")
+        .bind(poison.as_uuid())
+        .bind(library.as_uuid())
+        .bind(serde_json::json!({"version": 1}))
+        .bind(now)
+        .execute(&pools.owner)
+        .await?;
+    let valid = JobId::new();
+    let repository = PgJobRepository::new(pools.worker.clone());
+    repository
+        .enqueue(
+            valid,
+            library,
+            JobKind::ImportEpub,
+            JobInput::upload_v1(UploadId::new().as_uuid().to_string()),
+            "valid-after-poison",
+            now,
+        )
+        .await?;
+    assert!(
+        repository
+            .lease(LeaseJobs {
+                owner: "worker-poison".into(),
+                now,
+                lease_for: Duration::minutes(1),
+                limit: 2,
+                request_id: RequestId::new(),
+            })
+            .await
+            .is_err()
+    );
+    let states: Vec<(uuid::Uuid, String)> = sqlx::query_as("SELECT job_id,state FROM folioharbor.background_jobs WHERE job_id IN($1,$2) ORDER BY job_id")
+        .bind(poison.as_uuid())
+        .bind(valid.as_uuid())
+        .fetch_all(&pools.owner)
+        .await?;
+    assert!(states.contains(&(poison.as_uuid(), "failed".into())));
+    assert!(states.contains(&(valid.as_uuid(), "pending".into())));
+    let leased = repository
+        .lease(LeaseJobs {
+            owner: "worker-valid".into(),
+            now,
+            lease_for: Duration::minutes(1),
+            limit: 2,
+            request_id: RequestId::new(),
+        })
+        .await?;
+    assert_eq!(leased.len(), 1);
+    assert_eq!(leased[0].job_id, valid);
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}

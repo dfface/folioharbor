@@ -91,6 +91,10 @@ impl<P> LocalBlobStore<P> {
 
 #[async_trait]
 impl<P: CapacityProbe + 'static> BlobStore for LocalBlobStore<P> {
+    fn candidate_key(&self, identity: &BlobIdentity) -> StorageKey {
+        paths::final_key(identity)
+    }
+
     async fn create_staging(&self) -> Result<StorageKey, BlobStoreError> {
         let store = self.clone();
         run_blocking(move || store.create_staging_sync()).await

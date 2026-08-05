@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use folioharbor_domain::{
     id::{LibraryId, RequestId, UploadId, UserId},
-    imports::{quota::ByteCount, upload::UploadSession},
+    imports::{blob::DedupScope, quota::ByteCount, upload::UploadSession},
 };
 use futures_util::Stream;
 use time::Duration;
@@ -61,6 +61,7 @@ pub struct UploadService {
     pub(crate) authorization: Arc<dyn AuthorizationRepository>,
     pub(crate) blobs: Arc<dyn BlobStore>,
     pub(crate) clock: Arc<dyn Clock>,
+    pub(crate) dedup_scope: DedupScope,
 }
 
 impl UploadService {
@@ -70,12 +71,14 @@ impl UploadService {
         authorization: Arc<dyn AuthorizationRepository>,
         blobs: Arc<dyn BlobStore>,
         clock: Arc<dyn Clock>,
+        dedup_scope: DedupScope,
     ) -> Self {
         Self {
             uploads,
             authorization,
             blobs,
             clock,
+            dedup_scope,
         }
     }
 

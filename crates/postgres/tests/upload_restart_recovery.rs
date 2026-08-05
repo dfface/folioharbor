@@ -6,7 +6,8 @@ use folioharbor_application::{
     imports::{ReceiveUploadRequest, UploadApi, UploadService},
     ports::{
         AuthorizedUploadTransition, Clock, CreateUploadRecord, ExpireUploads,
-        FinalizeUploadReceipt, UploadRepository, UploadRepositoryError, WorkerUploadTransition,
+        FinalizeUploadReceipt, HeartbeatUploadReceipt, MarkUploadReceived, PrepareUploadPromotion,
+        UploadRepository, UploadRepositoryError, WorkerUploadTransition,
     },
 };
 use folioharbor_domain::{
@@ -74,6 +75,24 @@ impl UploadRepository for FailFirstFinalize {
         }
         self.inner.finalize_authorized(receipt).await
     }
+    async fn heartbeat_receipt(
+        &self,
+        receipt: HeartbeatUploadReceipt,
+    ) -> Result<bool, UploadRepositoryError> {
+        self.inner.heartbeat_receipt(receipt).await
+    }
+    async fn prepare_promotion(
+        &self,
+        promotion: PrepareUploadPromotion,
+    ) -> Result<bool, UploadRepositoryError> {
+        self.inner.prepare_promotion(promotion).await
+    }
+    async fn mark_received(
+        &self,
+        receipt: MarkUploadReceived,
+    ) -> Result<bool, UploadRepositoryError> {
+        self.inner.mark_received(receipt).await
+    }
     async fn transition_worker(
         &self,
         transition: WorkerUploadTransition,
@@ -127,6 +146,7 @@ async fn process_restart_recovers_promoted_receipt_with_same_upload_id() -> anyh
         Arc::new(PgAuthorizationRepository::new(pools.api.clone())),
         blobs.clone(),
         Arc::new(FixedClock(now)),
+        folioharbor_domain::imports::blob::DedupScope::Instance,
     );
     failing
         .receive_upload(request(actor, library, upload))
@@ -138,6 +158,7 @@ async fn process_restart_recovers_promoted_receipt_with_same_upload_id() -> anyh
         Arc::new(PgAuthorizationRepository::new(pools.api.clone())),
         blobs,
         Arc::new(FixedClock(now + Duration::seconds(1))),
+        folioharbor_domain::imports::blob::DedupScope::Instance,
     );
     let recovered = restarted
         .receive_upload(request(actor, library, upload))

@@ -47,9 +47,61 @@ pub struct FinalizeUploadReceipt {
     pub upload_id: UploadId,
     pub received: ByteCount,
     pub storage_key: String,
+    pub staging_key: Option<String>,
     pub job_id: JobId,
     pub request_id: RequestId,
     pub now: OffsetDateTime,
+}
+pub struct HeartbeatUploadReceipt {
+    pub actor: UserId,
+    pub library_id: LibraryId,
+    pub upload_id: UploadId,
+    pub staging_key: String,
+    pub request_id: RequestId,
+    pub now: OffsetDateTime,
+}
+pub struct PrepareUploadPromotion {
+    pub actor: UserId,
+    pub library_id: LibraryId,
+    pub upload_id: UploadId,
+    pub staging_key: String,
+    pub final_key: String,
+    pub final_owned: bool,
+    pub request_id: RequestId,
+    pub now: OffsetDateTime,
+}
+pub struct MarkUploadReceived {
+    pub actor: UserId,
+    pub library_id: LibraryId,
+    pub upload_id: UploadId,
+    pub staging_key: String,
+    pub final_key: String,
+    pub received: ByteCount,
+    pub request_id: RequestId,
+    pub now: OffsetDateTime,
+}
+pub struct RecordUploadCleanup {
+    pub actor: UserId,
+    pub library_id: LibraryId,
+    pub upload_id: UploadId,
+    pub staging_key: String,
+    pub request_id: RequestId,
+    pub now: OffsetDateTime,
+}
+pub struct LeaseUploadCleanups {
+    pub owner: String,
+    pub now: OffsetDateTime,
+    pub lease_for: time::Duration,
+    pub limit: u32,
+    pub request_id: RequestId,
+}
+#[derive(Clone, Debug)]
+pub struct UploadCleanup {
+    pub upload_id: UploadId,
+    pub attempt_token: String,
+    pub staging_key: String,
+    pub final_key: Option<String>,
+    pub final_owned: bool,
 }
 pub struct ExpireUploads {
     pub now: OffsetDateTime,
@@ -103,9 +155,46 @@ pub trait UploadRepository: Send + Sync {
         &self,
         receipt: FinalizeUploadReceipt,
     ) -> Result<bool, UploadRepositoryError>;
+    async fn heartbeat_receipt(
+        &self,
+        _: HeartbeatUploadReceipt,
+    ) -> Result<bool, UploadRepositoryError> {
+        Err(UploadRepositoryError::Persistence)
+    }
+    async fn prepare_promotion(
+        &self,
+        _: PrepareUploadPromotion,
+    ) -> Result<bool, UploadRepositoryError> {
+        Err(UploadRepositoryError::Persistence)
+    }
+    async fn mark_received(&self, _: MarkUploadReceived) -> Result<bool, UploadRepositoryError> {
+        Err(UploadRepositoryError::Persistence)
+    }
+    async fn record_orphan_cleanup(
+        &self,
+        _: RecordUploadCleanup,
+    ) -> Result<(), UploadRepositoryError> {
+        Err(UploadRepositoryError::Persistence)
+    }
     async fn transition_worker(
         &self,
         transition: WorkerUploadTransition,
     ) -> Result<bool, UploadRepositoryError>;
     async fn expire_worker(&self, request: ExpireUploads) -> Result<u64, UploadRepositoryError>;
+    async fn lease_cleanups(
+        &self,
+        _: LeaseUploadCleanups,
+    ) -> Result<Vec<UploadCleanup>, UploadRepositoryError> {
+        Err(UploadRepositoryError::Persistence)
+    }
+    async fn complete_cleanup(
+        &self,
+        _: UploadId,
+        _: &str,
+        _: &str,
+        _: OffsetDateTime,
+        _: RequestId,
+    ) -> Result<bool, UploadRepositoryError> {
+        Err(UploadRepositoryError::Persistence)
+    }
 }

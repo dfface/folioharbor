@@ -1,6 +1,9 @@
 use crate::{
     error::AppError,
-    ports::{AuthorizedUploadTransition, BlobStoreError, FinalizeUploadReceipt},
+    ports::{
+        AuthorizedUploadTransition, BlobStoreError, FinalizeUploadReceipt, HeartbeatUploadReceipt,
+        MarkUploadReceived, PrepareUploadPromotion, RecordUploadCleanup,
+    },
 };
 use async_trait::async_trait;
 use folioharbor_domain::{
@@ -53,7 +56,7 @@ impl UploadApi for UploadService {
         let from = match current.state {
             UploadState::Queued => return Ok(current),
             UploadState::Received => return self.finalize_received(&current, request).await,
-            UploadState::Created | UploadState::Failed | UploadState::Receiving => current.state,
+            UploadState::Created | UploadState::Failed => current.state,
             _ => {
                 return Err(AppError::Conflict {
                     code: "upload_state_conflict",
@@ -80,7 +83,19 @@ impl UploadApi for UploadService {
             })
             .await
         {
-            let _ = self.blobs.delete(&staging).await;
+            if self.blobs.delete(&staging).await.is_err() {
+                let _ = self
+                    .uploads
+                    .record_orphan_cleanup(RecordUploadCleanup {
+                        actor: request.actor,
+                        library_id: request.library_id,
+                        upload_id: request.upload_id,
+                        staging_key: staging.as_str().to_owned(),
+                        request_id: request.request_id,
+                        now: self.clock.now(),
+                    })
+                    .await;
+            }
             return Err(error);
         }
         let context = ReceiptContext {
@@ -93,7 +108,26 @@ impl UploadApi for UploadService {
             .stream_content(&mut request, context, &staging, current.declared_bytes)
             .await?;
         let stored = self.promote(context, &staging, received, digest).await?;
-        self.finalize(context, received, stored.as_str().to_owned())
+        let marked = self
+            .uploads
+            .mark_received(MarkUploadReceived {
+                actor: context.actor,
+                library_id: context.library_id,
+                upload_id: context.upload_id,
+                staging_key: staging.as_str().to_owned(),
+                final_key: stored.as_str().to_owned(),
+                received: ByteCount::new(received),
+                request_id: context.request_id,
+                now: self.clock.now(),
+            })
+            .await
+            .map_err(|_| dependency())?;
+        if !marked {
+            return Err(AppError::Conflict {
+                code: "upload_state_conflict",
+            });
+        }
+        self.finalize(context, received, stored.as_str().to_owned(), None)
             .await?;
         self.get_upload(GetUploadRequest {
             actor: request.actor,
@@ -121,6 +155,7 @@ impl UploadService {
             },
             current.received_bytes.get(),
             storage.as_str().to_owned(),
+            None,
         )
         .await?;
         self.get_upload(GetUploadRequest {
@@ -137,6 +172,7 @@ impl UploadService {
         context: ReceiptContext,
         received: u64,
         storage_key: String,
+        staging_key: Option<String>,
     ) -> Result<(), AppError> {
         match self
             .uploads
@@ -146,6 +182,7 @@ impl UploadService {
                 upload_id: context.upload_id,
                 received: ByteCount::new(received),
                 storage_key,
+                staging_key,
                 job_id: JobId::new(),
                 request_id: context.request_id,
                 now: self.clock.now(),
@@ -168,16 +205,38 @@ impl UploadService {
         digest: Sha256Digest,
     ) -> Result<folioharbor_domain::imports::blob::StorageKey, AppError> {
         let identity = BlobIdentity::new(
-            StorageNamespace::for_scope(
-                DedupScope::Instance,
-                context.library_id,
-                context.upload_id,
-            ),
+            StorageNamespace::for_scope(self.dedup_scope, context.library_id, context.upload_id),
             digest,
             ByteCount::new(received),
         );
+        let candidate = self.blobs.candidate_key(&identity);
+        let prepared = self
+            .uploads
+            .prepare_promotion(PrepareUploadPromotion {
+                actor: context.actor,
+                library_id: context.library_id,
+                upload_id: context.upload_id,
+                staging_key: staging.as_str().to_owned(),
+                final_key: candidate.as_str().to_owned(),
+                final_owned: self.dedup_scope == DedupScope::Disabled,
+                request_id: context.request_id,
+                now: self.clock.now(),
+            })
+            .await
+            .map_err(|_| dependency())?;
+        if !prepared {
+            return Err(AppError::Conflict {
+                code: "upload_state_conflict",
+            });
+        }
         match self.blobs.promote(staging, &identity).await {
-            Ok(value) => Ok(value),
+            Ok(value) if value == candidate => Ok(value),
+            Ok(_) => {
+                let _ = self
+                    .abort(context, staging, received, "upload_storage_failed")
+                    .await;
+                Err(dependency())
+            }
             Err(error) => {
                 let _ = self
                     .abort(context, staging, received, "upload_storage_failed")
@@ -235,6 +294,23 @@ impl UploadService {
                     return Err(storage_error(&error));
                 }
                 digest.update(chunk);
+                let alive = self
+                    .uploads
+                    .heartbeat_receipt(HeartbeatUploadReceipt {
+                        actor: context.actor,
+                        library_id: context.library_id,
+                        upload_id: context.upload_id,
+                        staging_key: staging.as_str().to_owned(),
+                        request_id: context.request_id,
+                        now: self.clock.now(),
+                    })
+                    .await
+                    .map_err(|_| dependency())?;
+                if !alive {
+                    return Err(AppError::Conflict {
+                        code: "upload_receipt_lease_lost",
+                    });
+                }
             }
         }
         Ok((received, Sha256Digest::from_bytes(digest.finalize().into())))
@@ -247,7 +323,9 @@ impl UploadService {
         received: u64,
         code: &'static str,
     ) -> AppError {
-        let _ = self.blobs.delete(staging).await;
+        if self.blobs.delete(staging).await.is_err() {
+            return dependency();
+        }
         let transition = self
             .uploads
             .transition_authorized(AuthorizedUploadTransition {
@@ -257,7 +335,7 @@ impl UploadService {
                 from: UploadState::Receiving,
                 to: UploadState::Failed,
                 received: ByteCount::new(received),
-                storage_key: None,
+                storage_key: Some(staging.as_str().to_owned()),
                 error_code: Some(code.to_owned()),
                 request_id: context.request_id,
                 now: self.clock.now(),

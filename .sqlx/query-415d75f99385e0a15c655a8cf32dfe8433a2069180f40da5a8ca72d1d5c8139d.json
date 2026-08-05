@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT folioharbor.upload_finalize_authorized($1,$2,$3,$4,$5,$6,$7) AS \"changed!\"",
+  "query": "SELECT folioharbor.upload_finalize_authorized($1,$2,$3,$4,$5,$6,$7,$8) AS \"changed!\"",
   "describe": {
     "columns": [
       {
@@ -16,6 +16,7 @@
         "Uuid",
         "Int8",
         "Text",
+        "Text",
         "Uuid",
         "Timestamptz"
       ]
@@ -24,5 +25,5 @@
       null
     ]
   },
-  "hash": "5b73890d23d92066b193b0d66d98337afe203a361555ee295284b1172f6b4e34"
+  "hash": "415d75f99385e0a15c655a8cf32dfe8433a2069180f40da5a8ca72d1d5c8139d"
 }
