@@ -72,18 +72,13 @@ BEGIN
  SELECT * INTO upload FROM folioharbor.upload_sessions WHERE upload_id=p_upload AND library_id=p_library FOR UPDATE;
  IF upload.upload_id IS NULL OR upload.state<>p_from OR p_received<0 OR p_received>upload.declared_bytes THEN RETURN false; END IF;
  IF NOT ((p_from='created' AND p_to='receiving') OR
-   (p_from='receiving' AND p_to IN('received','failed')) OR
-   (p_from='received' AND p_to='queued') OR
+   (p_from='receiving' AND p_to IN('receiving','failed')) OR
    (p_from='failed' AND p_to='receiving')) THEN RETURN false; END IF;
  SELECT * INTO reservation FROM folioharbor.quota_reservations WHERE upload_id=p_upload FOR UPDATE;
  IF p_from='failed' AND p_to='receiving' THEN
    IF reservation.state<>'released' OR upload.declared_bytes > (SELECT quota_limit_bytes-quota_used_bytes-quota_reserved_bytes FROM folioharbor.libraries WHERE library_id=p_library) THEN RETURN false; END IF;
    UPDATE folioharbor.quota_reservations SET state='active',reserved_bytes=upload.declared_bytes,updated_at=p_now WHERE upload_id=p_upload;
    UPDATE folioharbor.libraries SET quota_reserved_bytes=quota_reserved_bytes+upload.declared_bytes WHERE library_id=p_library;
- ELSIF p_from='receiving' AND p_to='received' THEN
-   IF reservation.state<>'active' THEN RETURN false; END IF;
-   UPDATE folioharbor.libraries SET quota_reserved_bytes=quota_reserved_bytes-reservation.reserved_bytes+p_received WHERE library_id=p_library;
-   UPDATE folioharbor.quota_reservations SET reserved_bytes=p_received,updated_at=p_now WHERE upload_id=p_upload;
  ELSIF p_to='failed' AND reservation.state='active' THEN
    UPDATE folioharbor.libraries SET quota_reserved_bytes=quota_reserved_bytes-reservation.reserved_bytes WHERE library_id=p_library;
    UPDATE folioharbor.quota_reservations SET state='released',updated_at=p_now WHERE upload_id=p_upload;
@@ -98,27 +93,15 @@ GRANT EXECUTE ON FUNCTION folioharbor.upload_transition_authorized(uuid,uuid,uui
 CREATE FUNCTION folioharbor.upload_transition_worker(
  p_upload uuid,p_library uuid,p_from text,p_to text,p_error text,p_now timestamptz
 ) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-DECLARE reservation folioharbor.quota_reservations%ROWTYPE;
 DECLARE upload folioharbor.upload_sessions%ROWTYPE;
 BEGIN
  IF NOT folioharbor.is_worker() OR p_library IS DISTINCT FROM folioharbor.current_library_id() THEN RETURN false; END IF;
- PERFORM 1 FROM folioharbor.libraries WHERE library_id=p_library FOR UPDATE;
  SELECT * INTO upload FROM folioharbor.upload_sessions WHERE upload_id=p_upload AND library_id=p_library FOR UPDATE;
  IF upload.upload_id IS NULL OR upload.state<>p_from THEN RETURN false; END IF;
  IF NOT ((p_from='queued' AND p_to='validating') OR
    (p_from='validating' AND p_to IN('importing','failed','retry_wait')) OR
    (p_from='importing' AND p_to IN('ready','duplicate','failed','retry_wait')) OR
    (p_from='retry_wait' AND p_to='queued')) THEN RETURN false; END IF;
- SELECT * INTO reservation FROM folioharbor.quota_reservations WHERE upload_id=p_upload FOR UPDATE;
- IF p_to IN('ready','duplicate') THEN
-   IF reservation.state<>'active' THEN RETURN false; END IF;
-   UPDATE folioharbor.libraries SET quota_reserved_bytes=quota_reserved_bytes-reservation.reserved_bytes,
-    quota_used_bytes=quota_used_bytes+reservation.reserved_bytes WHERE library_id=p_library;
-   UPDATE folioharbor.quota_reservations SET state='consumed',updated_at=p_now WHERE upload_id=p_upload;
- ELSIF p_to='failed' AND reservation.state='active' THEN
-   UPDATE folioharbor.libraries SET quota_reserved_bytes=quota_reserved_bytes-reservation.reserved_bytes WHERE library_id=p_library;
-   UPDATE folioharbor.quota_reservations SET state='released',updated_at=p_now WHERE upload_id=p_upload;
- END IF;
  UPDATE folioharbor.upload_sessions SET state=p_to,error_code=p_error,updated_at=p_now WHERE upload_id=p_upload;
  RETURN true;
 END $$;
@@ -142,6 +125,67 @@ CREATE TABLE folioharbor.job_attempts (
  lease_owner text NOT NULL,started_at timestamptz NOT NULL,finished_at timestamptz,outcome text CHECK(outcome IS NULL OR outcome IN('succeeded','retry','failed','lease_expired')),
  error_code text,error_summary text,PRIMARY KEY(job_id,attempt)
 );
+
+CREATE FUNCTION folioharbor.upload_finalize_authorized(
+ p_upload uuid,p_library uuid,p_actor uuid,p_received bigint,p_storage text,p_job uuid,p_now timestamptz
+) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE reservation folioharbor.quota_reservations%ROWTYPE;
+DECLARE upload folioharbor.upload_sessions%ROWTYPE;
+BEGIN
+ IF session_user <> 'folioharbor_api' OR p_actor IS DISTINCT FROM folioharbor.current_user_id()
+  OR p_library IS DISTINCT FROM folioharbor.current_library_id() THEN RETURN false; END IF;
+ IF NOT EXISTS(SELECT 1 FROM folioharbor.library_memberships m JOIN folioharbor.role_permissions p USING(role_code)
+  WHERE m.library_id=p_library AND m.user_id=p_actor AND m.status='active' AND p.permission_code='holding.edit') THEN RETURN false; END IF;
+ PERFORM 1 FROM folioharbor.libraries WHERE library_id=p_library FOR UPDATE;
+ SELECT * INTO upload FROM folioharbor.upload_sessions WHERE upload_id=p_upload AND library_id=p_library FOR UPDATE;
+ IF upload.upload_id IS NULL OR upload.state NOT IN('receiving','received','queued')
+  OR p_received<0 OR p_received>upload.declared_bytes OR length(p_storage)=0 THEN RETURN false; END IF;
+ IF upload.state<>'receiving' AND
+  (upload.received_bytes<>p_received OR upload.storage_key IS DISTINCT FROM p_storage) THEN RETURN false; END IF;
+ SELECT * INTO reservation FROM folioharbor.quota_reservations WHERE upload_id=p_upload FOR UPDATE;
+ IF reservation.state<>'active' THEN RETURN false; END IF;
+ IF EXISTS(SELECT 1 FROM folioharbor.background_jobs WHERE idempotency_key='import:'||p_upload::text) THEN
+   IF NOT EXISTS(SELECT 1 FROM folioharbor.background_jobs WHERE idempotency_key='import:'||p_upload::text
+    AND library_id=p_library AND kind='import_epub' AND input->>'upload_id'=p_upload::text) THEN RETURN false; END IF;
+ ELSE
+   INSERT INTO folioharbor.background_jobs(job_id,library_id,kind,state,input,idempotency_key,next_run_at,created_at,updated_at)
+   VALUES(p_job,p_library,'import_epub','pending',jsonb_build_object('version',1,'upload_id',p_upload::text),'import:'||p_upload::text,p_now,p_now,p_now);
+ END IF;
+ IF upload.state='receiving' THEN
+   UPDATE folioharbor.libraries SET quota_reserved_bytes=quota_reserved_bytes-reservation.reserved_bytes+p_received WHERE library_id=p_library;
+   UPDATE folioharbor.quota_reservations SET reserved_bytes=p_received,updated_at=p_now WHERE upload_id=p_upload;
+ END IF;
+ UPDATE folioharbor.upload_sessions SET state='queued',received_bytes=p_received,storage_key=p_storage,error_code=NULL,updated_at=p_now
+  WHERE upload_id=p_upload;
+ RETURN true;
+END $$;
+REVOKE ALL ON FUNCTION folioharbor.upload_finalize_authorized(uuid,uuid,uuid,bigint,text,uuid,timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION folioharbor.upload_finalize_authorized(uuid,uuid,uuid,bigint,text,uuid,timestamptz) TO folioharbor_api;
+
+CREATE FUNCTION folioharbor.upload_expire_worker(p_now timestamptz,p_limit bigint)
+RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE candidate record;
+DECLARE upload folioharbor.upload_sessions%ROWTYPE;
+DECLARE reservation folioharbor.quota_reservations%ROWTYPE;
+DECLARE expired bigint := 0;
+BEGIN
+ IF session_user <> 'folioharbor_worker' OR NOT folioharbor.is_worker() OR p_limit<1 THEN RETURN 0; END IF;
+ FOR candidate IN SELECT upload_id,library_id FROM folioharbor.upload_sessions
+  WHERE state='created' AND expires_at<=p_now ORDER BY expires_at LIMIT p_limit LOOP
+   PERFORM 1 FROM folioharbor.libraries WHERE library_id=candidate.library_id FOR UPDATE;
+   SELECT * INTO upload FROM folioharbor.upload_sessions WHERE upload_id=candidate.upload_id FOR UPDATE;
+   IF upload.state<>'created' OR upload.expires_at>p_now THEN CONTINUE; END IF;
+   SELECT * INTO reservation FROM folioharbor.quota_reservations WHERE upload_id=candidate.upload_id FOR UPDATE;
+   IF reservation.state<>'active' THEN CONTINUE; END IF;
+   UPDATE folioharbor.libraries SET quota_reserved_bytes=quota_reserved_bytes-reservation.reserved_bytes WHERE library_id=candidate.library_id;
+   UPDATE folioharbor.quota_reservations SET state='released',updated_at=p_now WHERE upload_id=candidate.upload_id;
+   UPDATE folioharbor.upload_sessions SET state='expired',error_code='upload_expired',updated_at=p_now WHERE upload_id=candidate.upload_id;
+   expired := expired+1;
+ END LOOP;
+ RETURN expired;
+END $$;
+REVOKE ALL ON FUNCTION folioharbor.upload_expire_worker(timestamptz,bigint) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION folioharbor.upload_expire_worker(timestamptz,bigint) TO folioharbor_worker;
 ALTER TABLE folioharbor.background_jobs ENABLE ROW LEVEL SECURITY; ALTER TABLE folioharbor.background_jobs FORCE ROW LEVEL SECURITY;
 ALTER TABLE folioharbor.job_attempts ENABLE ROW LEVEL SECURITY; ALTER TABLE folioharbor.job_attempts FORCE ROW LEVEL SECURITY;
 CREATE POLICY jobs_owner_access ON folioharbor.background_jobs USING(current_user='folioharbor_owner') WITH CHECK(current_user='folioharbor_owner');

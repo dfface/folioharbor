@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use folioharbor_domain::{
-    id::{LibraryId, RequestId, UploadId, UserId},
+    id::{JobId, LibraryId, RequestId, UploadId, UserId},
     imports::{
         quota::ByteCount,
         upload::{UploadSession, UploadState},
@@ -40,6 +40,21 @@ pub struct WorkerUploadTransition {
     pub error_code: Option<String>,
     pub request_id: RequestId,
     pub now: OffsetDateTime,
+}
+pub struct FinalizeUploadReceipt {
+    pub actor: UserId,
+    pub library_id: LibraryId,
+    pub upload_id: UploadId,
+    pub received: ByteCount,
+    pub storage_key: String,
+    pub job_id: JobId,
+    pub request_id: RequestId,
+    pub now: OffsetDateTime,
+}
+pub struct ExpireUploads {
+    pub now: OffsetDateTime,
+    pub limit: u32,
+    pub request_id: RequestId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,8 +99,13 @@ pub trait UploadRepository: Send + Sync {
         &self,
         transition: AuthorizedUploadTransition,
     ) -> Result<bool, UploadRepositoryError>;
+    async fn finalize_authorized(
+        &self,
+        receipt: FinalizeUploadReceipt,
+    ) -> Result<bool, UploadRepositoryError>;
     async fn transition_worker(
         &self,
         transition: WorkerUploadTransition,
     ) -> Result<bool, UploadRepositoryError>;
+    async fn expire_worker(&self, request: ExpireUploads) -> Result<u64, UploadRepositoryError>;
 }

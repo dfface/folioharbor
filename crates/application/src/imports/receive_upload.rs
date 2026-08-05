@@ -1,13 +1,12 @@
 use crate::{
     error::AppError,
-    ports::{AuthorizedUploadTransition, BlobStoreError, JobRepositoryError},
+    ports::{AuthorizedUploadTransition, BlobStoreError, FinalizeUploadReceipt},
 };
 use async_trait::async_trait;
 use folioharbor_domain::{
     id::{JobId, UploadId},
     imports::{
         blob::{BlobIdentity, DedupScope, Sha256Digest, StorageNamespace},
-        job::{JobInput, JobKind},
         quota::ByteCount,
         upload::{UploadSession, UploadState},
     },
@@ -52,7 +51,9 @@ impl UploadApi for UploadService {
             })
             .await?;
         let from = match current.state {
-            UploadState::Created | UploadState::Failed => current.state,
+            UploadState::Queued => return Ok(current),
+            UploadState::Received => return self.finalize_received(&current, request).await,
+            UploadState::Created | UploadState::Failed | UploadState::Receiving => current.state,
             _ => {
                 return Err(AppError::Conflict {
                     code: "upload_state_conflict",
@@ -92,43 +93,8 @@ impl UploadApi for UploadService {
             .stream_content(&mut request, context, &staging, current.declared_bytes)
             .await?;
         let stored = self.promote(context, &staging, received, digest).await?;
-        self.apply_transition(AuthorizedUploadTransition {
-            actor: request.actor,
-            library_id: request.library_id,
-            upload_id: request.upload_id,
-            from: UploadState::Receiving,
-            to: UploadState::Received,
-            received: ByteCount::new(received),
-            storage_key: Some(stored.as_str().to_owned()),
-            error_code: None,
-            request_id: request.request_id,
-            now: self.clock.now(),
-        })
-        .await?;
-        self.jobs
-            .enqueue(
-                JobId::new(),
-                request.library_id,
-                JobKind::ImportEpub,
-                JobInput::upload_v1(request.upload_id.as_uuid().to_string()),
-                &format!("import:{}", request.upload_id.as_uuid()),
-                self.clock.now(),
-            )
-            .await
-            .map_err(job_error)?;
-        self.apply_transition(AuthorizedUploadTransition {
-            actor: request.actor,
-            library_id: request.library_id,
-            upload_id: request.upload_id,
-            from: UploadState::Received,
-            to: UploadState::Queued,
-            received: ByteCount::new(received),
-            storage_key: Some(stored.as_str().to_owned()),
-            error_code: None,
-            request_id: request.request_id,
-            now: self.clock.now(),
-        })
-        .await?;
+        self.finalize(context, received, stored.as_str().to_owned())
+            .await?;
         self.get_upload(GetUploadRequest {
             actor: request.actor,
             request_id: request.request_id,
@@ -140,6 +106,60 @@ impl UploadApi for UploadService {
 }
 
 impl UploadService {
+    async fn finalize_received(
+        &self,
+        current: &UploadSession,
+        request: ReceiveUploadRequest,
+    ) -> Result<UploadSession, AppError> {
+        let storage = current.storage_key.as_ref().ok_or_else(dependency)?;
+        self.finalize(
+            ReceiptContext {
+                actor: request.actor,
+                library_id: request.library_id,
+                upload_id: request.upload_id,
+                request_id: request.request_id,
+            },
+            current.received_bytes.get(),
+            storage.as_str().to_owned(),
+        )
+        .await?;
+        self.get_upload(GetUploadRequest {
+            actor: request.actor,
+            request_id: request.request_id,
+            library_id: request.library_id,
+            upload_id: request.upload_id,
+        })
+        .await
+    }
+
+    async fn finalize(
+        &self,
+        context: ReceiptContext,
+        received: u64,
+        storage_key: String,
+    ) -> Result<(), AppError> {
+        match self
+            .uploads
+            .finalize_authorized(FinalizeUploadReceipt {
+                actor: context.actor,
+                library_id: context.library_id,
+                upload_id: context.upload_id,
+                received: ByteCount::new(received),
+                storage_key,
+                job_id: JobId::new(),
+                request_id: context.request_id,
+                now: self.clock.now(),
+            })
+            .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(AppError::Conflict {
+                code: "upload_state_conflict",
+            }),
+            Err(_) => Err(dependency()),
+        }
+    }
+
     async fn promote(
         &self,
         context: ReceiptContext,
@@ -257,11 +277,6 @@ impl UploadService {
 fn dependency() -> AppError {
     AppError::DependencyUnavailable {
         code: "upload_repository_unavailable",
-    }
-}
-fn job_error(_: JobRepositoryError) -> AppError {
-    AppError::DependencyUnavailable {
-        code: "job_repository_unavailable",
     }
 }
 fn storage_error(error: &BlobStoreError) -> AppError {

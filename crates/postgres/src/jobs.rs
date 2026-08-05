@@ -49,7 +49,12 @@ impl PgJobRepository {
 
     async fn finish(&self, job: FinishJob<'_>) -> Result<bool, JobRepositoryError> {
         let mut transaction = self.transaction(RequestId::new(), None).await?;
-        let changed = sqlx::query!("WITH changed AS (UPDATE folioharbor.background_jobs SET state=$4,next_run_at=COALESCE($5,next_run_at),lease_owner=NULL,lease_expires_at=NULL,error_code=$6,error_summary=$7,updated_at=$3 WHERE job_id=$1 AND state='leased' AND lease_owner=$2 RETURNING attempt_count) UPDATE folioharbor.job_attempts a SET finished_at=$3,outcome=$8,error_code=$6,error_summary=$7 FROM changed c WHERE a.job_id=$1 AND a.attempt=c.attempt_count",job.id.as_uuid(),job.owner,job.now,job.state,job.next,job.code,job.summary,job.outcome).execute(&mut *transaction).await.map_err(persistence_error)?.rows_affected() == 1;
+        let changed = sqlx::query!("WITH changed AS (UPDATE folioharbor.background_jobs SET state=$4,next_run_at=COALESCE($5,next_run_at),lease_owner=NULL,lease_expires_at=NULL,error_code=$6,error_summary=$7,updated_at=$3 WHERE job_id=$1 AND state='leased' AND lease_owner=$2 AND lease_expires_at>$3 RETURNING attempt_count) UPDATE folioharbor.job_attempts a SET finished_at=$3,outcome=$8,error_code=$6,error_summary=$7 FROM changed c WHERE a.job_id=$1 AND a.attempt=c.attempt_count",job.id.as_uuid(),job.owner,job.now,job.state,job.next,job.code,job.summary,job.outcome)
+            .execute(&mut *transaction)
+            .await
+            .map_err(persistence_error)?
+            .rows_affected()
+            == 1;
         transaction.commit().await.map_err(persistence_error)?;
         Ok(changed)
     }

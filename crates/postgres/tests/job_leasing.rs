@@ -167,3 +167,80 @@ async fn retry_schedule_and_heartbeat_survive_repository_restart() -> anyhow::Re
     database.cleanup().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn stale_leases_cannot_heartbeat_succeed_retry_or_fail() -> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let now = OffsetDateTime::now_utc();
+    let stale = now + Duration::minutes(2);
+    let library = LibraryId::new();
+    let user = UserId::new();
+    sqlx::query("INSERT INTO folioharbor.user_accounts(user_id,normalized_email,display_email,status,created_at,verified_at) VALUES($1,$2,$2,'verified',$3,$3)").bind(user.as_uuid()).bind("stale-jobs@test.invalid").bind(now).execute(&pools.owner).await?;
+    sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,created_at,updated_at) VALUES($1,'Stale jobs',$2,$2)").bind(library.as_uuid()).bind(now).execute(&pools.owner).await?;
+    let repository = PgJobRepository::new(pools.worker.clone());
+    let ids = [JobId::new(), JobId::new(), JobId::new()];
+    for (index, id) in ids.into_iter().enumerate() {
+        repository
+            .enqueue(
+                id,
+                library,
+                JobKind::ImportEpub,
+                JobInput::upload_v1(UploadId::new().as_uuid().to_string()),
+                &format!("stale:{index}"),
+                now,
+            )
+            .await?;
+    }
+    assert_eq!(
+        repository
+            .lease(LeaseJobs {
+                owner: "stale-worker".into(),
+                now,
+                lease_for: Duration::minutes(1),
+                limit: 3,
+                request_id: RequestId::new(),
+            })
+            .await?
+            .len(),
+        3
+    );
+    assert!(
+        !repository
+            .heartbeat(ids[0], "stale-worker", stale, Duration::minutes(1))
+            .await?
+    );
+    assert!(!repository.succeed(ids[0], "stale-worker", stale).await?);
+    assert!(
+        !repository
+            .retry(
+                ids[1],
+                "stale-worker",
+                stale,
+                stale + Duration::minutes(5),
+                "temporary_io",
+                "safe summary",
+            )
+            .await?
+    );
+    assert!(
+        !repository
+            .fail(
+                ids[2],
+                "stale-worker",
+                stale,
+                "invalid_epub",
+                "safe summary",
+            )
+            .await?
+    );
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}

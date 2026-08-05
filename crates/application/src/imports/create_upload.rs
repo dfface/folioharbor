@@ -13,8 +13,8 @@ use crate::{
     authorization::{Action, Authorization, ResourceRef},
     error::{AppError, FieldViolation},
     ports::{
-        AuthorizationRepository, BlobStore, Clock, CreateUploadRecord, JobRepository,
-        UploadRepository, UploadRepositoryError,
+        AuthorizationRepository, BlobStore, Clock, CreateUploadRecord, UploadRepository,
+        UploadRepositoryError,
     },
 };
 
@@ -60,7 +60,6 @@ pub struct UploadService {
     pub(crate) uploads: Arc<dyn UploadRepository>,
     pub(crate) authorization: Arc<dyn AuthorizationRepository>,
     pub(crate) blobs: Arc<dyn BlobStore>,
-    pub(crate) jobs: Arc<dyn JobRepository>,
     pub(crate) clock: Arc<dyn Clock>,
 }
 
@@ -70,14 +69,12 @@ impl UploadService {
         uploads: Arc<dyn UploadRepository>,
         authorization: Arc<dyn AuthorizationRepository>,
         blobs: Arc<dyn BlobStore>,
-        jobs: Arc<dyn JobRepository>,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             uploads,
             authorization,
             blobs,
-            jobs,
             clock,
         }
     }

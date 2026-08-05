@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use folioharbor_application::ports::{
-    AuthorizedUploadTransition, CreateUploadRecord, UploadRepository, UploadRepositoryError,
-    WorkerUploadTransition,
+    AuthorizedUploadTransition, CreateUploadRecord, ExpireUploads, FinalizeUploadReceipt,
+    UploadRepository, UploadRepositoryError, WorkerUploadTransition,
 };
 use folioharbor_domain::{
     id::{LibraryId, RequestId, UploadId, UserId},
@@ -171,5 +171,52 @@ impl UploadRepository for PgUploadRepository {
         .map_err(persistence_error)?;
         transaction.commit().await.map_err(persistence_error)?;
         Ok(changed)
+    }
+
+    async fn finalize_authorized(
+        &self,
+        receipt: FinalizeUploadReceipt,
+    ) -> Result<bool, UploadRepositoryError> {
+        let mut transaction = self
+            .transaction(receipt.actor, receipt.library_id, receipt.request_id)
+            .await?;
+        let received =
+            i64::try_from(receipt.received.get()).map_err(|_| UploadRepositoryError::Invalid)?;
+        let changed = sqlx::query_scalar!(
+            r#"SELECT folioharbor.upload_finalize_authorized($1,$2,$3,$4,$5,$6,$7) AS "changed!""#,
+            receipt.upload_id.as_uuid(),
+            receipt.library_id.as_uuid(),
+            receipt.actor.as_uuid(),
+            received,
+            receipt.storage_key,
+            receipt.job_id.as_uuid(),
+            receipt.now,
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(persistence_error)?;
+        transaction.commit().await.map_err(persistence_error)?;
+        Ok(changed)
+    }
+
+    async fn expire_worker(&self, request: ExpireUploads) -> Result<u64, UploadRepositoryError> {
+        let mut transaction = self.pool.begin().await.map_err(persistence_error)?;
+        PgTransactionContext::apply(
+            &mut transaction,
+            &DatabaseContext::worker(request.request_id, None),
+        )
+        .await
+        .map_err(persistence_error)?;
+        let limit = i64::from(request.limit);
+        let expired = sqlx::query_scalar!(
+            r#"SELECT folioharbor.upload_expire_worker($1,$2) AS "expired!""#,
+            request.now,
+            limit,
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(persistence_error)?;
+        transaction.commit().await.map_err(persistence_error)?;
+        u64::try_from(expired).map_err(|_| UploadRepositoryError::Persistence)
     }
 }

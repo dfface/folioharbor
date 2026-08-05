@@ -8,15 +8,14 @@ use folioharbor_application::{
     imports::{ReceiveUploadRequest, UploadApi, UploadService, UploadStreamError},
     ports::{
         AuthorizationRepository, AuthorizationRepositoryError, AuthorizedUploadTransition,
-        BlobStore, BlobStoreError, CreateUploadRecord, JobRepository, JobRepositoryError,
-        LeaseJobs, UploadRepository, UploadRepositoryError, WorkerUploadTransition,
+        BlobStore, BlobStoreError, CreateUploadRecord, ExpireUploads, FinalizeUploadReceipt,
+        UploadRepository, UploadRepositoryError, WorkerUploadTransition,
     },
 };
 use folioharbor_domain::{
-    id::{JobId, LibraryId, RequestId, UploadId, UserId},
+    id::{LibraryId, RequestId, UploadId, UserId},
     imports::{
         blob::{BlobIdentity, StorageKey},
-        job::{JobInput, JobKind, LeasedJob},
         quota::ByteCount,
         upload::{UploadSession, UploadState},
     },
@@ -24,7 +23,6 @@ use folioharbor_domain::{
     time::OffsetDateTime,
 };
 use std::sync::{Arc, Mutex};
-use time::Duration;
 
 struct Allow;
 #[async_trait]
@@ -54,6 +52,7 @@ impl folioharbor_application::ports::Clock for FixedClock {
 struct Uploads {
     session: Mutex<UploadSession>,
     transitions: Mutex<Vec<(UploadState, UploadState)>>,
+    fail_finalize: Mutex<bool>,
 }
 #[async_trait]
 impl UploadRepository for Uploads {
@@ -90,10 +89,41 @@ impl UploadRepository for Uploads {
             .push((change.from, change.to));
         Ok(true)
     }
+    async fn finalize_authorized(
+        &self,
+        receipt: FinalizeUploadReceipt,
+    ) -> Result<bool, UploadRepositoryError> {
+        let mut fail = self.fail_finalize.lock().expect("failure injection");
+        if *fail {
+            *fail = false;
+            return Err(UploadRepositoryError::Persistence);
+        }
+        drop(fail);
+        let mut session = self.session.lock().expect("session");
+        if !matches!(
+            session.state,
+            UploadState::Receiving | UploadState::Received | UploadState::Queued
+        ) {
+            return Ok(false);
+        }
+        if session.state != UploadState::Queued {
+            self.transitions
+                .lock()
+                .expect("transitions")
+                .push((session.state, UploadState::Queued));
+        }
+        session.state = UploadState::Queued;
+        session.received_bytes = receipt.received;
+        session.storage_key = Some(StorageKey::from_opaque(receipt.storage_key));
+        Ok(true)
+    }
     async fn transition_worker(
         &self,
         _: WorkerUploadTransition,
     ) -> Result<bool, UploadRepositoryError> {
+        unreachable!()
+    }
+    async fn expire_worker(&self, _: ExpireUploads) -> Result<u64, UploadRepositoryError> {
         unreachable!()
     }
 }
@@ -129,63 +159,6 @@ impl BlobStore for Blobs {
         Ok(u64::MAX)
     }
 }
-struct Jobs;
-#[async_trait]
-impl JobRepository for Jobs {
-    async fn enqueue(
-        &self,
-        id: JobId,
-        _: LibraryId,
-        _: JobKind,
-        _: JobInput,
-        _: &str,
-        _: OffsetDateTime,
-    ) -> Result<JobId, JobRepositoryError> {
-        Ok(id)
-    }
-    async fn lease(&self, _: LeaseJobs) -> Result<Vec<LeasedJob>, JobRepositoryError> {
-        unreachable!()
-    }
-    async fn heartbeat(
-        &self,
-        _: JobId,
-        _: &str,
-        _: OffsetDateTime,
-        _: Duration,
-    ) -> Result<bool, JobRepositoryError> {
-        unreachable!()
-    }
-    async fn succeed(
-        &self,
-        _: JobId,
-        _: &str,
-        _: OffsetDateTime,
-    ) -> Result<bool, JobRepositoryError> {
-        unreachable!()
-    }
-    async fn retry(
-        &self,
-        _: JobId,
-        _: &str,
-        _: OffsetDateTime,
-        _: OffsetDateTime,
-        _: &str,
-        _: &str,
-    ) -> Result<bool, JobRepositoryError> {
-        unreachable!()
-    }
-    async fn fail(
-        &self,
-        _: JobId,
-        _: &str,
-        _: OffsetDateTime,
-        _: &str,
-        _: &str,
-    ) -> Result<bool, JobRepositoryError> {
-        unreachable!()
-    }
-}
-
 fn fixture(
     declared: u64,
 ) -> (
@@ -212,13 +185,13 @@ fn fixture(
             error_code: None,
         }),
         transitions: Mutex::new(Vec::new()),
+        fail_finalize: Mutex::new(false),
     });
     let blobs = Arc::new(Blobs::default());
     let service = UploadService::new(
         uploads.clone(),
         Arc::new(Allow),
         blobs.clone(),
-        Arc::new(Jobs),
         Arc::new(FixedClock(OffsetDateTime::UNIX_EPOCH)),
     );
     (service, uploads, blobs, actor, library, upload)
@@ -288,4 +261,32 @@ async fn large_body_frames_are_split_into_bounded_blob_appends() {
         blobs.appended.lock().expect("appended").as_slice(),
         &[1024 * 1024, 7]
     );
+}
+
+#[tokio::test]
+async fn same_upload_retries_every_post_promotion_persistence_cut() {
+    for _former_cut in ["receipt", "enqueue", "queue"] {
+        let (service, uploads, _blobs, actor, library, upload) = fixture(4);
+        *uploads.fail_finalize.lock().expect("failure injection") = true;
+        service
+            .receive_upload(request(
+                actor,
+                library,
+                upload,
+                vec![Ok(Bytes::from_static(b"book"))],
+            ))
+            .await
+            .expect_err("injected post-promotion cut");
+        let recovered = service
+            .receive_upload(request(
+                actor,
+                library,
+                upload,
+                vec![Ok(Bytes::from_static(b"book"))],
+            ))
+            .await
+            .expect("same upload id recovers");
+        assert_eq!(recovered.upload_id, upload);
+        assert_eq!(recovered.state, UploadState::Queued);
+    }
 }
