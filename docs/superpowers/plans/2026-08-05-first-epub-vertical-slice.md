@@ -378,6 +378,7 @@ git commit -m "feat: add secure local identity and sessions"
 **Files:**
 
 - Create: `migrations/0003_auth_rate_limits.sql`
+- Create: `migrations/0004_password_reset_rotation.sql`
 - Create: `crates/application/src/identity/rate_limit.rs`
 - Create: `crates/application/src/ports/rate_limit_repository.rs`
 - Create: `crates/postgres/src/rate_limits.rs`
@@ -418,7 +419,7 @@ Describe schemas, cookie auth, CSRF header, stable problem codes, examples, and 
 Run route tests, PostgreSQL rate-limit concurrency tests, OpenAPI parsing, and the workspace gate. Commit:
 
 ```bash
-git add migrations/0003_auth_rate_limits.sql crates/application crates/postgres crates/http apps/api openapi
+git add migrations/0003_auth_rate_limits.sql migrations/0004_password_reset_rotation.sql crates/application crates/postgres crates/http apps/api openapi
 git commit -m "feat: expose secure local authentication API"
 ```
 
@@ -426,8 +427,8 @@ git commit -m "feat: expose secure local authentication API"
 
 **Files:**
 
-- Create: `migrations/0004_libraries.sql`
-- Create: `migrations/0005_builtin_roles.sql`
+- Create: `migrations/0005_libraries.sql`
+- Create: `migrations/0006_builtin_roles.sql`
 - Create: `crates/domain/src/libraries/{mod,role,membership,invitation}.rs`
 - Create: `crates/application/src/libraries/{mod,provision_personal,invite_member,accept_invitation,change_role,remove_member,settings}.rs`
 - Create: `crates/application/src/ports/library_repository.rs`
@@ -466,7 +467,7 @@ After credential and verification checks but before issuing a successful login s
 Run focused tests, real-PostgreSQL race tests, and the workspace gate. Commit:
 
 ```bash
-git add migrations/0004_libraries.sql migrations/0005_builtin_roles.sql crates/domain crates/application crates/postgres
+git add migrations/0005_libraries.sql migrations/0006_builtin_roles.sql crates/domain crates/application crates/postgres
 git commit -m "feat: add collaborative libraries and memberships"
 ```
 
@@ -474,7 +475,7 @@ git commit -m "feat: add collaborative libraries and memberships"
 
 **Files:**
 
-- Create: `migrations/0006_audit_and_library_rls.sql`
+- Create: `migrations/0007_audit_and_library_rls.sql`
 - Create: `crates/application/src/{authorization,audit}.rs`
 - Create: `crates/application/src/ports/{authorization_repository,audit_repository}.rs`
 - Create: `crates/postgres/src/{authorization,audit}.rs`
@@ -510,7 +511,7 @@ Handlers parse transport data, invoke one use case, and map results; they contai
 Run the full RLS matrix twice with different pooled connection order, audit tests, route tests, and workspace gate. Commit:
 
 ```bash
-git add migrations/0006_audit_and_library_rls.sql crates/application crates/postgres crates/http openapi
+git add migrations/0007_audit_and_library_rls.sql crates/application crates/postgres crates/http openapi
 git commit -m "feat: enforce library authorization and audit"
 ```
 
@@ -518,7 +519,7 @@ git commit -m "feat: enforce library authorization and audit"
 
 **Files:**
 
-- Create: `migrations/0007_storage.sql`
+- Create: `migrations/0008_storage.sql`
 - Create: `crates/domain/src/imports/{mod,blob,quota}.rs`
 - Create: `crates/application/src/ports/{blob_store,quota_repository}.rs`
 - Create: `crates/storage-local/Cargo.toml`
@@ -554,7 +555,7 @@ Lock one library row for reserve/resize/consume/release. Reject when `used + res
 Run storage contracts on local filesystems, all three dedup-scope namespace tests, PostgreSQL quota races, RLS tests for quota reservations, and workspace gate. Commit:
 
 ```bash
-git add migrations/0007_storage.sql crates/domain crates/application crates/storage-local crates/postgres
+git add migrations/0008_storage.sql crates/domain crates/application crates/storage-local crates/postgres
 git commit -m "feat: add quota-aware local blob storage"
 ```
 
@@ -562,7 +563,7 @@ git commit -m "feat: add quota-aware local blob storage"
 
 **Files:**
 
-- Create: `migrations/0008_uploads_and_jobs.sql`
+- Create: `migrations/0009_uploads_and_jobs.sql`
 - Create: `crates/domain/src/imports/{upload,job}.rs`
 - Create: `crates/application/src/imports/{mod,create_upload,receive_upload,job_queue}.rs`
 - Create: `crates/application/src/ports/{upload_repository,job_repository}.rs`
@@ -599,7 +600,7 @@ Require `holding.edit`, accept only `application/epub+zip` or `application/octet
 Test abrupt body termination, oversized streams, concurrent job leases, expired lease recovery, retry scheduling, and process restart against real PostgreSQL/local storage. Run the workspace gate. Commit:
 
 ```bash
-git add migrations/0008_uploads_and_jobs.sql crates/domain crates/application crates/postgres crates/http openapi
+git add migrations/0009_uploads_and_jobs.sql crates/domain crates/application crates/postgres crates/http openapi
 git commit -m "feat: add resumable upload workflow and durable jobs"
 ```
 
@@ -648,7 +649,7 @@ git commit -m "feat: add bounded EPUB parsing and sanitization"
 
 **Files:**
 
-- Create: `migrations/0009_catalog.sql`
+- Create: `migrations/0010_catalog.sql`
 - Create: `crates/domain/src/catalog/{mod,wemi,holding,item,publication_package,content_unit}.rs`
 - Create: `crates/application/src/catalog/{mod,import_publication}.rs`
 - Create: `crates/application/src/ports/catalog_repository.rs`
@@ -683,7 +684,7 @@ Enable forced RLS on Holding/Item and library-owned relations. Global WEMI/packa
 Run constraint, duplicate-race, cross-library isolation, and global-catalog enumeration tests against PostgreSQL. Assert deleting one Item does not delete shared Blob/package rows. Run workspace gate. Commit:
 
 ```bash
-git add migrations/0009_catalog.sql crates/domain crates/application crates/postgres
+git add migrations/0010_catalog.sql crates/domain crates/application crates/postgres
 git commit -m "feat: persist WEMI catalog and logical library items"
 ```
 
@@ -818,7 +819,7 @@ git commit -m "feat: serve authorized EPUB reading resources"
 
 **Files:**
 
-- Create: `migrations/0010_reading_state.sql`
+- Create: `migrations/0011_reading_state.sql`
 - Create: `crates/domain/src/reader/{mod,locator,reading_state}.rs`
 - Create: `crates/application/src/reader/{get_progress,update_progress}.rs`
 - Create: `crates/application/src/ports/reading_repository.rs`
@@ -856,7 +857,7 @@ Return an ETag derived from state version; accept `If-Match` and require the JSO
 Run concurrent updates from two devices, offline retry order permutations, RLS privacy tests, HTTP ETag tests, and workspace gate. Commit:
 
 ```bash
-git add migrations/0010_reading_state.sql crates/domain crates/application crates/postgres crates/http openapi
+git add migrations/0011_reading_state.sql crates/domain crates/application crates/postgres crates/http openapi
 git commit -m "feat: synchronize versioned reading progress"
 ```
 
@@ -905,7 +906,7 @@ git commit -m "feat: stream authorized original EPUB downloads"
 
 **Files:**
 
-- Create: `migrations/0011_outbox.sql`
+- Create: `migrations/0012_outbox.sql`
 - Create: `crates/application/src/mail/{mod,enqueue,deliver}.rs`
 - Create: `crates/application/src/ports/mail_repository.rs`
 - Create: `crates/postgres/src/mail.rs`
@@ -941,7 +942,7 @@ Render one public, locale-negotiated explanation per stable problem code without
 Run against a local SMTP capture service in integration tests, inspect captured text/HTML, force retry/failure, scan logs for test token values, then run workspace gate. Commit:
 
 ```bash
-git add migrations/0011_outbox.sql crates/application crates/postgres crates/http apps/worker deploy
+git add migrations/0012_outbox.sql crates/application crates/postgres crates/http apps/worker deploy
 git commit -m "feat: deliver transactional account and invitation email"
 ```
 
@@ -949,7 +950,7 @@ git commit -m "feat: deliver transactional account and invitation email"
 
 **Files:**
 
-- Create: `migrations/0012_deletion_and_gc.sql`
+- Create: `migrations/0013_deletion_and_gc.sql`
 - Create: `crates/domain/src/catalog/lifecycle.rs`
 - Create: `crates/application/src/catalog/{delete_item,restore_item,garbage_collect}.rs`
 - Create: `crates/application/tests/item_lifecycle.rs`
@@ -985,7 +986,7 @@ Select a limited `SKIP LOCKED` batch, recheck authoritative references in the tr
 Run shared-Blob deletion, concurrent import-versus-GC, storage failure/retry, progress preservation, quota release, and audit retention tests. Run workspace gate. Commit:
 
 ```bash
-git add migrations/0012_deletion_and_gc.sql crates/domain crates/application crates/postgres crates/http apps/worker openapi
+git add migrations/0013_deletion_and_gc.sql crates/domain crates/application crates/postgres crates/http apps/worker openapi
 git commit -m "feat: add recoverable item deletion and safe blob GC"
 ```
 
@@ -1139,7 +1140,7 @@ git commit -m "feat: add secure EPUB reader and progress sync"
 
 **Files:**
 
-- Create: `migrations/0013_operations.sql`
+- Create: `migrations/0014_operations.sql`
 - Create: `crates/application/src/operations/{mod,health,bootstrap_admin,consistency_check}.rs`
 - Create: `crates/postgres/src/operations.rs`
 - Create: `crates/http/src/routes/health.rs`
@@ -1181,7 +1182,7 @@ Migration completes before API/Worker; runtime processes use distinct role secre
 Document PostgreSQL plus Blob volume as one business backup set, schema version and Blob watermark recording, restore ordering, and post-restore `storage check` for missing Blob, orphan location, and hash mismatch. Do not claim crash-consistent cross-volume snapshots unless the operator provides them. Run CLI/health/Compose config tests and workspace/Web gates. Commit:
 
 ```bash
-git add migrations/0013_operations.sql crates apps deploy docs/operations
+git add migrations/0014_operations.sql crates apps deploy docs/operations
 git commit -m "feat: add deployment operations and observability"
 ```
 
