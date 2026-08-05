@@ -1,0 +1,18 @@
+[package]
+name = "folioharbor-test-support"
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+folioharbor-application = { path = "../application", version = "0.1.0" }
+folioharbor-domain = { path = "../domain", version = "0.1.0" }
+sqlx.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+ulid.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

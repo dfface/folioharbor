@@ -6,6 +6,8 @@ members = [
     "crates/application",
     "crates/domain",
     "crates/http",
+    "crates/postgres",
+    "crates/test-support",
 ]
 resolver = "2"
 
@@ -22,8 +24,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_path_to_error = "0.1"
 thiserror = "2.0"
+sqlx = { version = "0.8", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio", "time", "uuid"] }
 time = { version = "0.3", features = ["serde"] }
 toml = "0.9"
+tokio = { version = "1.47", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 ulid = "1.2"

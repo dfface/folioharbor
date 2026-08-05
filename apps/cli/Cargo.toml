@@ -5,8 +5,15 @@ publish.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[[bin]]
+name = "folioharbor"
+path = "src/main.rs"
+
 [dependencies]
 anyhow.workspace = true
+folioharbor-postgres = { path = "../../crates/postgres", version = "0.1.0" }
+secrecy.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
