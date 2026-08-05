@@ -28,9 +28,11 @@ pub struct MigrationReport {
 ///
 /// Returns [`MigrationError`] for role, locking, migration, or reporting errors.
 pub async fn run_migrations(pool: &PgPool) -> Result<MigrationReport, MigrationError> {
-    let mut connection = pool.acquire().await?;
+    // Advisory locks are session-scoped. Detaching ensures every early return,
+    // cancellation, or unwind closes the locked backend instead of pooling it.
+    let mut connection = pool.acquire().await?.detach();
     let role: String = sqlx::query_scalar("SELECT current_user")
-        .fetch_one(&mut *connection)
+        .fetch_one(&mut connection)
         .await?;
     if role != "folioharbor_owner" {
         return Err(MigrationError::WrongRole(role));
@@ -38,12 +40,12 @@ pub async fn run_migrations(pool: &PgPool) -> Result<MigrationReport, MigrationE
 
     sqlx::query("SELECT pg_advisory_lock($1)")
         .bind(MIGRATION_LOCK_ID)
-        .execute(&mut *connection)
+        .execute(&mut connection)
         .await?;
-    let migration_result = MIGRATOR.run_direct(&mut *connection).await;
+    let migration_result = MIGRATOR.run_direct(&mut connection).await;
     let unlock_result = sqlx::query("SELECT pg_advisory_unlock($1)")
         .bind(MIGRATION_LOCK_ID)
-        .execute(&mut *connection)
+        .execute(&mut connection)
         .await;
 
     migration_result?;
@@ -51,7 +53,7 @@ pub async fn run_migrations(pool: &PgPool) -> Result<MigrationReport, MigrationE
 
     let versions =
         sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success ORDER BY version")
-            .fetch_all(&mut *connection)
+            .fetch_all(&mut connection)
             .await?;
     Ok(MigrationReport { versions })
 }
