@@ -2,6 +2,7 @@
 
 mod context;
 pub mod identity;
+pub mod libraries;
 mod migrate;
 mod pool;
 mod rate_limits;

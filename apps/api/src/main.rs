@@ -4,12 +4,17 @@ use async_trait::async_trait;
 use folioharbor_application::{
     config::{ConfigSources, Settings},
     identity::IdentityApi,
-    ports::{Argon2PasswordHasher, Clock, MailError, Mailer, RandomSource},
+    ports::{
+        Argon2PasswordHasher, Clock, LibraryInvitationContext, MailError, Mailer, RandomSource,
+    },
     rate_limit::DurableRateLimiter,
 };
 use folioharbor_domain::identity::NormalizedEmail;
 use folioharbor_http::AppState;
-use folioharbor_postgres::{PgRateLimitRepository, connect_api, identity::PgIdentityRepository};
+use folioharbor_postgres::{
+    PgRateLimitRepository, connect_api, identity::PgIdentityRepository,
+    libraries::PgLibraryRepository,
+};
 use secrecy::{ExposeSecret as _, SecretString};
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
@@ -46,6 +51,14 @@ impl Mailer for DeferredMailer {
     ) -> Result<(), MailError> {
         Err(MailError)
     }
+    async fn send_library_invitation(
+        &self,
+        _: &NormalizedEmail,
+        _: LibraryInvitationContext,
+        _: SecretString,
+    ) -> Result<(), MailError> {
+        Err(MailError)
+    }
 }
 
 #[tokio::main]
@@ -61,12 +74,14 @@ async fn main() -> anyhow::Result<()> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("FOLIOHARBOR_DATABASE_URL is required"))?;
     let pool = connect_api(database_url).await?;
-    let identity = Arc::new(IdentityApi::new(
+    let identity = Arc::new(IdentityApi::new_configured(
         PgIdentityRepository::new(pool.clone()),
         Argon2PasswordHasher::new(SystemRandom),
         DeferredMailer,
         SystemClock,
         SystemRandom,
+        settings.auth.personal_library_enabled,
+        PgLibraryRepository::new(pool.clone()),
     ));
     let secret = SecretString::from(
         settings

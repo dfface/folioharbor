@@ -6,7 +6,9 @@ use secrecy::SecretString;
 
 use crate::{
     error::AppError,
-    ports::{Clock, IdentityRepository, NewSession, PasswordHasher, RandomSource},
+    ports::{
+        Clock, IdentityRepository, LibraryRepository, NewSession, PasswordHasher, RandomSource,
+    },
 };
 
 use super::{SESSION_ABSOLUTE_LIFETIME, SESSION_IDLE_LIFETIME, internal_error};
@@ -24,14 +26,15 @@ pub struct IssuedSession {
     pub csrf_token: SecretString,
 }
 
-pub struct Login<'a, R, H, C, N> {
+pub struct Login<'a, R, H, C, N, L = ()> {
     repository: &'a R,
     password_hasher: &'a H,
     clock: &'a C,
     random: &'a N,
+    library_repository: Option<&'a L>,
 }
 
-impl<'a, R, H, C, N> Login<'a, R, H, C, N> {
+impl<'a, R, H, C, N> Login<'a, R, H, C, N, ()> {
     #[must_use]
     pub const fn new(
         repository: &'a R,
@@ -44,11 +47,33 @@ impl<'a, R, H, C, N> Login<'a, R, H, C, N> {
             password_hasher,
             clock,
             random,
+            library_repository: None,
         }
     }
 }
 
-impl<R: IdentityRepository, H: PasswordHasher, C: Clock, N: RandomSource> Login<'_, R, H, C, N> {
+impl<'a, R, H, C, N, L> Login<'a, R, H, C, N, L> {
+    #[must_use]
+    pub const fn new_with_personal_library(
+        repository: &'a R,
+        password_hasher: &'a H,
+        clock: &'a C,
+        random: &'a N,
+        library_repository: &'a L,
+    ) -> Self {
+        Self {
+            repository,
+            password_hasher,
+            clock,
+            random,
+            library_repository: Some(library_repository),
+        }
+    }
+}
+
+impl<R: IdentityRepository, H: PasswordHasher, C: Clock, N: RandomSource, L: LibraryRepository>
+    Login<'_, R, H, C, N, L>
+{
     /// Validates local credentials and issues a persisted opaque session.
     ///
     /// # Errors
@@ -78,6 +103,14 @@ impl<R: IdentityRepository, H: PasswordHasher, C: Clock, N: RandomSource> Login<
             return Err(AppError::Forbidden {
                 code: "email_verification_required",
             });
+        }
+        if let Some(library_repository) = self.library_repository {
+            library_repository
+                .provision_personal_library(identity.user_id, self.clock.now())
+                .await
+                .map_err(|_| AppError::DependencyUnavailable {
+                    code: "personal_library_provisioning_failed",
+                })?;
         }
         let mut session_bytes = [0_u8; 32];
         let mut csrf_bytes = [0_u8; 32];

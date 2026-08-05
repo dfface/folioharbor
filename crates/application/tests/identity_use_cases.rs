@@ -12,9 +12,10 @@ use folioharbor_application::{
         RegisterAccount, RegisterAccountCommand, RequestPasswordReset, RequestPasswordResetCommand,
     },
     ports::{
-        Argon2PasswordHasher, IdentityRepository, IdentityRepositoryError, LoginIdentity,
-        MailError, Mailer, NewAccount, NewSession, PasswordHashError, PasswordHasher,
-        PasswordResetSession, RandomSource, RegisterOutcome, SessionPrincipal, SessionRecord,
+        Argon2PasswordHasher, IdentityRepository, IdentityRepositoryError, LibraryRepository,
+        LibraryRepositoryError, LoginIdentity, MailError, Mailer, NewAccount, NewSession,
+        PasswordHashError, PasswordHasher, PasswordResetSession, RandomSource, RegisterOutcome,
+        SessionPrincipal, SessionRecord,
     },
 };
 use folioharbor_domain::{
@@ -23,6 +24,7 @@ use folioharbor_domain::{
         AccountStatus, CsrfToken, NormalizedEmail, SessionRevocationReason, SessionStatus,
         SessionToken, TokenHash,
     },
+    libraries::Library,
     time::OffsetDateTime,
 };
 use folioharbor_test_support::{clock::FakeClock, random::FixedRandom};
@@ -35,6 +37,59 @@ fn normalized_email_trims_unicode_whitespace_and_lowercases_ascii_domain()
 
     assert_eq!(email.as_str(), "Alice@example.com");
     Ok(())
+}
+
+struct FailingLibraries;
+#[async_trait]
+impl LibraryRepository for FailingLibraries {
+    async fn provision_personal_library(
+        &self,
+        _: UserId,
+        _: OffsetDateTime,
+    ) -> Result<Library, LibraryRepositoryError> {
+        Err(LibraryRepositoryError)
+    }
+}
+
+#[tokio::test]
+async fn login_does_not_issue_session_when_personal_library_provisioning_fails() {
+    let repository = FakeRepository::empty();
+    *repository
+        .login
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(LoginIdentity {
+        user_id: UserId::new(),
+        password_hash: "phc".to_owned(),
+        status: AccountStatus::Verified,
+    });
+    let result = Login::new_with_personal_library(
+        &repository,
+        &SpyHasher {
+            valid: true,
+            dummy_calls: AtomicUsize::new(0),
+        },
+        &fixture_clock(),
+        &FixedRandom::new(4),
+        &FailingLibraries,
+    )
+    .execute(LoginCommand {
+        email: "reader@example.com".to_owned(),
+        password: SecretString::from("right".to_owned()),
+    })
+    .await;
+    assert!(matches!(
+        result,
+        Err(AppError::DependencyUnavailable {
+            code: "personal_library_provisioning_failed"
+        })
+    ));
+    assert!(
+        repository
+            .created_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+    );
 }
 
 #[test]
@@ -207,6 +262,14 @@ impl Mailer for SpyMailer {
         _: SecretString,
     ) -> Result<(), MailError> {
         self.resets.fetch_add(1, Ordering::SeqCst);
+        if self.fail { Err(MailError) } else { Ok(()) }
+    }
+    async fn send_library_invitation(
+        &self,
+        _: &NormalizedEmail,
+        _: folioharbor_application::ports::LibraryInvitationContext,
+        _: SecretString,
+    ) -> Result<(), MailError> {
         if self.fail { Err(MailError) } else { Ok(()) }
     }
 }

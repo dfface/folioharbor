@@ -30,6 +30,7 @@ macro_rules! uuid_id {
 uuid_id!(UserId);
 uuid_id!(SessionId);
 uuid_id!(LibraryId);
+uuid_id!(InvitationId);
 uuid_id!(ManifestationId);
 uuid_id!(ItemId);
 uuid_id!(BlobId);

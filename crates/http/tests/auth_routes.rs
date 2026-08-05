@@ -3,7 +3,7 @@
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -45,6 +45,7 @@ struct FakeAuth {
     recovery_emails: Mutex<Vec<String>>,
     rate_limited: Mutex<bool>,
     revoke_calls: AtomicUsize,
+    fail_login_dependency: AtomicBool,
 }
 
 fn actor() -> Actor {
@@ -75,12 +76,40 @@ impl VerifyEmailUseCase for FakeAuth {
 #[async_trait]
 impl LoginUseCase for FakeAuth {
     async fn login(&self, _: LoginCommand) -> Result<IssuedSession, AppError> {
+        if self.fail_login_dependency.load(Ordering::SeqCst) {
+            return Err(AppError::DependencyUnavailable {
+                code: "personal_library_provisioning_failed",
+            });
+        }
         Ok(IssuedSession {
             user_id: actor().user_id,
             session_id: actor().session_id,
             session_token: SecretString::from("opaque-session-secret".to_owned()),
             csrf_token: SecretString::from("csrf-secret".to_owned()),
         })
+    }
+}
+
+#[tokio::test]
+async fn local_and_invited_login_dependency_failures_never_issue_a_session_cookie() {
+    for email in ["local@example.com", "invited@example.com"] {
+        let fake = Arc::new(FakeAuth::default());
+        fake.fail_login_dependency.store(true, Ordering::SeqCst);
+        let response = app(fake)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/auth/login")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"email":"{email}","password":"secret"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(response.headers().get(SET_COOKIE).is_none());
     }
 }
 #[async_trait]
