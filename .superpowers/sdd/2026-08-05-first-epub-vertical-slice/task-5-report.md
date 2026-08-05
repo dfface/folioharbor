@@ -271,3 +271,132 @@ exit 0
 ```
 
 Only the repository's pre-existing duplicate-dependency and unmatched ISC allowance warnings were emitted. The scoped PostgreSQL 18 container was stopped and removed after verification.
+
+## Fix Round 2
+
+### Correlated malformed session path
+
+Test: `malformed_revoke_session_id_is_correlated_problem_without_use_case_invocation` in `crates/http/tests/auth_routes.rs`.
+
+RED command:
+
+```text
+cargo test -p folioharbor-http --test auth_routes malformed_revoke_session_id_is_correlated_problem_without_use_case_invocation -- --exact
+```
+
+Relevant raw failure from the prior manual `Path<String>` parsing branch:
+
+```text
+assertion `left == right` failed
+  left: 404
+ right: 400
+test result: FAILED. 0 passed; 1 failed
+```
+
+After introducing a pre-handler extractor that validates the UUID and emits a typed `SessionId`, GREEN used the identical command and returned:
+
+```text
+test malformed_revoke_session_id_is_correlated_problem_without_use_case_invocation ... ok
+test result: ok. 1 passed; 0 failed
+```
+
+The test additionally verifies `application/problem+json`, stable code `invalid_session_id`, a 26-character middleware request ID, the same ID in `instance`, and zero calls to the revoke use case.
+
+### OpenAPI-derived UUID path validation
+
+Test: `openapi_uuid_path_parameters_document_correlated_malformed_value_problems` in `crates/http/tests/openapi_contract.rs`.
+
+RED command:
+
+```text
+cargo test -p folioharbor-http --test openapi_contract openapi_uuid_path_parameters_document_correlated_malformed_value_problems -- --exact
+```
+
+Relevant raw failure:
+
+```text
+assertion `left == right` failed
+  left: Null
+ right: Mapping {"type": String("object"), ... ProblemDetails ...}
+test result: FAILED. 0 passed; 1 failed
+```
+
+The test derives the requirement by walking every required UUID-formatted path parameter rather than relying only on the manually maintained status matrix. Each such operation must document a `400` response that resolves to `ProblemDetails`, includes a correlated example with `status: 400` and `code: invalid_session_id`, and explains malformed UUID semantics.
+
+GREEN commands and output:
+
+```text
+cargo test -p folioharbor-http --test auth_routes malformed_revoke_session_id_is_correlated_problem_without_use_case_invocation -- --exact
+cargo test -p folioharbor-http --test openapi_contract
+test malformed_revoke_session_id_is_correlated_problem_without_use_case_invocation ... ok
+test result: ok. 1 passed; 0 failed
+test openapi_uuid_path_parameters_document_correlated_malformed_value_problems ... ok
+test openapi_auth_operations_have_resolved_bodies_success_examples_and_actual_statuses ... ok
+test result: ok. 2 passed; 0 failed
+```
+
+The exact revoke-session response matrix now includes `400`, and its dedicated response component documents the malformed UUID response and example.
+
+### Fix Round 2 gates
+
+Formatting and strict lint:
+
+```text
+cargo fmt --all
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+Finished `dev` profile
+exit 0
+```
+
+The PostgreSQL 18 gate used:
+
+```text
+docker run --rm -d --name folioharbor-task5-fix2-pg18 -e POSTGRES_HOST_AUTH_METHOD=trust -p 55435:5432 postgres:18-alpine
+docker exec folioharbor-task5-fix2-pg18 pg_isready -U postgres
+/var/run/postgresql:5432 - accepting connections
+```
+
+The first workspace attempt on the completely fresh cluster exposed the existing parallel role-bootstrap race in test support:
+
+```text
+FOLIOHARBOR_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55435/postgres cargo test --workspace
+duplicate key value violates unique constraint "pg_authid_rolname_index"
+identity_repository: 1 passed; 3 failed
+```
+
+No production or test code was changed for that unrelated race. Once the shared roles existed, the identical workspace command returned:
+
+```text
+identity_use_cases: 8 passed; 0 failed
+auth_routes: 8 passed; 0 failed
+openapi_contract: 2 passed; 0 failed
+problem_contract: 4 passed; 0 failed
+identity_repository: 4 passed; 0 failed
+migration_from_zero: 1 passed; 0 failed
+password_reset_rotation: 1 passed; 0 failed
+rate_limits: 1 passed; 0 failed
+all remaining unit, integration, and doc tests: 0 failed
+exit 0
+```
+
+No SQL or schema changed in this round, so SQLx metadata was intentionally unchanged.
+
+The online policy command failed only while reaching GitHub:
+
+```text
+cargo deny check
+failed to fetch advisory database https://github.com/RustSec/advisory-db
+fatal: unable to access 'https://github.com/RustSec/advisory-db/': Failed to connect to github.com port 443 after 75015 ms: Couldn't connect to server
+exit 1
+```
+
+The cached policy database passed:
+
+```text
+cargo deny --offline check
+advisories ok, bans ok, licenses ok, sources ok
+exit 0
+```
+
+Only the pre-existing duplicate-dependency and unmatched ISC allowance warnings were emitted. The scoped PostgreSQL container was stopped and removed, and build artifacts were cleaned after verification.

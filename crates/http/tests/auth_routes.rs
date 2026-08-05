@@ -1,7 +1,10 @@
 #![allow(clippy::expect_used)]
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -41,6 +44,7 @@ use url::Url;
 struct FakeAuth {
     recovery_emails: Mutex<Vec<String>>,
     rate_limited: Mutex<bool>,
+    revoke_calls: AtomicUsize,
 }
 
 fn actor() -> Actor {
@@ -147,6 +151,7 @@ impl RevokeSessionUseCase for FakeAuth {
         &self,
         command: RevokeSessionCommand,
     ) -> Result<RevokeSessionOutcome, AppError> {
+        self.revoke_calls.fetch_add(1, Ordering::SeqCst);
         if command.session_id != command.actor.session_id {
             return Err(AppError::NotFound {
                 code: "session_not_found",
@@ -479,4 +484,36 @@ async fn session_listing_contains_only_safe_metadata_and_revoke_is_owner_scoped(
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn malformed_revoke_session_id_is_correlated_problem_without_use_case_invocation() {
+    let fake = Arc::new(FakeAuth::default());
+    let response = app(fake.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/auth/sessions/not-a-uuid/revoke")
+                .header(COOKIE, "folioharbor_session=opaque-session-secret")
+                .header("X-CSRF-Token", "csrf-secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/problem+json")
+    );
+    let problem = response_json(response).await;
+    assert_eq!(problem["code"], "invalid_session_id");
+    let request_id = problem["request_id"].as_str().expect("request ID");
+    assert_eq!(request_id.len(), 26);
+    assert_eq!(problem["instance"], format!("/problems/{request_id}"));
+    assert_eq!(fake.revoke_calls.load(Ordering::SeqCst), 0);
 }

@@ -92,6 +92,7 @@ paths:
         - {$ref: '#/components/parameters/CsrfToken'}
       responses:
         '204': {description: Owned session revoked; current-session cookies are cleared}
+        '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
         '401': {$ref: '#/components/responses/Problem'}
         '403': {$ref: '#/components/responses/Problem'}
         '404': {$ref: '#/components/responses/Problem'}
@@ -144,6 +145,12 @@ components:
         application/problem+json:
           schema: {$ref: '#/components/schemas/ProblemDetails'}
           example: {type: 'https://library.example/problems/invalid-json-body', title: Invalid request body, status: 422, detail: The request body could not be accepted as JSON for this operation., instance: /problems/01JREQ00000000000000000000, code: invalid_json_body, request_id: 01JREQ00000000000000000000}
+    InvalidSessionIdProblem:
+      description: A malformed UUID was supplied for the session_id path parameter; the use case is not invoked
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/ProblemDetails'}
+          example: {type: 'https://library.example/problems/invalid-session-id', title: Invalid path parameter, status: 400, detail: The session_id path parameter must be a UUID., instance: /problems/01JREQ00000000000000000000, code: invalid_session_id, request_id: 01JREQ00000000000000000000}
     RegistrationAccepted:
       description: Registration accepted without account enumeration
       content:
@@ -226,5 +233,5 @@ components:
         status: {type: integer}
         detail: {type: string}
         instance: {type: string}
-        code: {type: string, examples: [malformed_json, invalid_json_body, unsupported_media_type, unauthenticated, csrf_failed, rate_limited, session_not_found]}
+        code: {type: string, examples: [malformed_json, invalid_json_body, unsupported_media_type, invalid_session_id, unauthenticated, csrf_failed, rate_limited, session_not_found]}
         request_id: {type: string, description: ULID request identifier}

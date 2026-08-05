@@ -60,7 +60,7 @@ fn openapi_auth_operations_have_resolved_bodies_success_examples_and_actual_stat
         (
             "/api/v1/auth/sessions/{session_id}/revoke",
             "post",
-            &["204", "401", "403", "404"],
+            &["204", "400", "401", "403", "404"],
         ),
     ];
     for (path, method, statuses) in expected {
@@ -123,4 +123,47 @@ fn openapi_auth_operations_have_resolved_bodies_success_examples_and_actual_stat
     let _mapping: &Mapping = document["components"]["securitySchemes"]
         .as_mapping()
         .expect("security schemes");
+}
+
+#[test]
+fn openapi_uuid_path_parameters_document_correlated_malformed_value_problems() {
+    let source = fs::read_to_string(format!(
+        "{}/../../openapi/folioharbor-v1.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("OpenAPI document");
+    let document: Value = serde_yaml::from_str(&source).expect("valid OpenAPI YAML");
+
+    for (path, item) in document["paths"].as_mapping().expect("paths") {
+        for (method, operation) in item.as_mapping().expect("path item") {
+            let has_uuid_path = operation["parameters"]
+                .as_sequence()
+                .into_iter()
+                .flatten()
+                .map(|parameter| resolve(&document, parameter))
+                .any(|parameter| {
+                    parameter["in"] == "path" && parameter["schema"]["format"] == "uuid"
+                });
+            if !has_uuid_path {
+                continue;
+            }
+            let response = resolve(&document, &operation["responses"]["400"]);
+            let media = &response["content"]["application/problem+json"];
+            assert_eq!(
+                resolve(&document, &media["schema"]),
+                &document["components"]["schemas"]["ProblemDetails"]
+            );
+            assert_eq!(media["example"]["status"], 400);
+            assert_eq!(media["example"]["code"], "invalid_session_id");
+            assert!(media["example"]["request_id"].as_str().is_some());
+            assert!(
+                response["description"]
+                    .as_str()
+                    .is_some_and(|description| description.contains("malformed UUID")),
+                "{} {} must explain malformed UUID semantics",
+                method.as_str().unwrap_or_default(),
+                path.as_str().unwrap_or_default()
+            );
+        }
+    }
 }

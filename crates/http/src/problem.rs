@@ -263,6 +263,26 @@ pub(crate) fn request_validation_response(
 }
 
 #[must_use]
+pub(crate) fn invalid_session_id_response(context: &ProblemContext) -> Response {
+    let request_id = context.request_id.to_public_string();
+    let problem = ProblemDetails {
+        type_uri: ProblemTypeUri(format!("{}invalid-session-id", context.problem_base)),
+        title: "Invalid path parameter",
+        status: StatusCode::BAD_REQUEST.as_u16(),
+        detail: "The session_id path parameter must be a UUID.",
+        instance: format!("/problems/{request_id}"),
+        code: "invalid_session_id",
+        request_id,
+        fields: Vec::new(),
+    };
+    let mut response = (StatusCode::BAD_REQUEST, axum::Json(problem)).into_response();
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(PROBLEM_CONTENT_TYPE));
+    response
+}
+
+#[must_use]
 pub fn response_from_extensions(
     extensions: &Extensions,
     public_base_url: &Url,
