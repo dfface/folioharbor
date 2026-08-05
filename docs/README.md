@@ -12,7 +12,8 @@
 | `decisions/` | 已作出的架构决策记录（ADR） | 持续维护 |
 | `research/` | 旧系统、真实数据、协议和竞品调研 | 持续维护 |
 | `migration/` | 旧数据治理、去重、验证和迁移方案 | 尚未展开 |
-| `superpowers/specs/` | 经过逐段确认和审阅的正式设计规格 | 首份规格等待用户复核 |
+| `superpowers/specs/` | 经过逐段确认和审阅的正式设计规格 | 首份规格已批准 |
+| `superpowers/plans/` | 从批准规格生成的可执行 TDD 实施计划 | 首份计划已形成 |
 
 ## 状态规则
 
@@ -25,9 +26,10 @@
 ## 当前阅读顺序
 
 1. [第一条 EPUB 端到端纵切设计](superpowers/specs/2026-08-05-first-epub-vertical-slice-design.md)
-2. [全量 Brainstorm 纪要](research/2026-08-04-to-2026-08-05-full-brainstorm.md)
-3. [产品愿景与范围](requirements/product-vision.md)
-4. [核心领域模型](architecture/core-domain-model.md)
-5. [标准应用规范草案](standards/application-profile.md)
-6. [旧系统数据调研摘要](research/legacy-ebooks-audit.md)
-7. `decisions/` 中的架构决策记录
+2. [第一条 EPUB 端到端纵切实施计划](superpowers/plans/2026-08-05-first-epub-vertical-slice.md)
+3. [全量 Brainstorm 纪要](research/2026-08-04-to-2026-08-05-full-brainstorm.md)
+4. [产品愿景与范围](requirements/product-vision.md)
+5. [核心领域模型](architecture/core-domain-model.md)
+6. [标准应用规范草案](standards/application-profile.md)
+7. [旧系统数据调研摘要](research/legacy-ebooks-audit.md)
+8. `decisions/` 中的架构决策记录

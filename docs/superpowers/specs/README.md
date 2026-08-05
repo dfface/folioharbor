@@ -10,6 +10,6 @@
 
 ## 当前规格
 
-- [第一条 EPUB 端到端纵切设计](2026-08-05-first-epub-vertical-slice-design.md) — 已完成逐节确认和自审，等待用户复核书面规格。
+- [第一条 EPUB 端到端纵切设计](2026-08-05-first-epub-vertical-slice-design.md) — 已批准；实施计划见 [`../plans/2026-08-05-first-epub-vertical-slice.md`](../plans/2026-08-05-first-epub-vertical-slice.md)。
 
 规格进入本目录不代表可以立即实施；只有用户明确批准书面规格后，才能生成实施计划。
