@@ -65,14 +65,14 @@ async fn migrations_from_zero_preserve_least_privilege_roles_and_are_idempotent(
         sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success ORDER BY version")
             .fetch_all(&pools.owner)
             .await?;
-    assert_eq!(first_versions, vec![1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(first_versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 
     run_migrations(&pools.owner).await?;
     let second_versions: Vec<i64> =
         sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success ORDER BY version")
             .fetch_all(&pools.owner)
             .await?;
-    assert_eq!(second_versions, vec![1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(second_versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 
     pools.close().await;
     database.cleanup().await?;

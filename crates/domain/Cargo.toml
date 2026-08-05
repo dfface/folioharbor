@@ -11,6 +11,7 @@ secrecy.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 time.workspace = true
+thiserror.workspace = true
 ulid.workspace = true
 uuid.workspace = true
 
