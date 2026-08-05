@@ -3,7 +3,7 @@ use std::{
     path::Path,
 };
 
-use folioharbor_application::ports::BlobStoreError;
+use folioharbor_application::ports::{BlobDisposition, BlobStoreError, PromotedBlob};
 use folioharbor_domain::imports::blob::{BlobIdentity, StorageKey};
 
 use super::{
@@ -99,7 +99,7 @@ impl<P: CapacityProbe> LocalBlobStore<P> {
         &self,
         staging: &StorageKey,
         identity: &BlobIdentity,
-    ) -> Result<StorageKey, BlobStoreError> {
+    ) -> Result<PromotedBlob, BlobStoreError> {
         let root = self.secure_root()?;
         self.require_capacity(0)?;
         let source_relative = paths::staging_relative(staging)?;
@@ -111,7 +111,10 @@ impl<P: CapacityProbe> LocalBlobStore<P> {
             existing.sync_all()?;
             sync_dir(&destination_dir)?;
             remove_source_if_present(&root, &source_relative)?;
-            return Ok(final_key);
+            return Ok(PromotedBlob {
+                key: final_key,
+                disposition: BlobDisposition::Reused,
+            });
         }
         #[cfg(test)]
         self.run_test_hook(HookPoint::PromoteSourceOpen);
@@ -126,7 +129,10 @@ impl<P: CapacityProbe> LocalBlobStore<P> {
                 sync_dir(&destination_dir)?;
                 #[cfg(test)]
                 self.run_test_hook(HookPoint::PromoteRecoveryParentSynced);
-                return Ok(final_key);
+                return Ok(PromotedBlob {
+                    key: final_key,
+                    disposition: BlobDisposition::Reused,
+                });
             }
             Err(error) => return Err(error.into()),
         };
@@ -155,7 +161,14 @@ impl<P: CapacityProbe> LocalBlobStore<P> {
         sync_dir(&destination_dir)?;
         remove_named_file_if_present(&source_dir, &source_name)?;
         sync_dir(&source_dir)?;
-        Ok(final_key)
+        Ok(PromotedBlob {
+            key: final_key,
+            disposition: if installed {
+                BlobDisposition::Installed
+            } else {
+                BlobDisposition::Reused
+            },
+        })
     }
 
     pub(super) fn delete_sync(&self, key: &StorageKey) -> Result<(), BlobStoreError> {

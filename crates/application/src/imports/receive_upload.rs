@@ -2,14 +2,15 @@ use crate::{
     error::AppError,
     ports::{
         AuthorizedUploadTransition, BlobStoreError, FinalizeUploadReceipt, HeartbeatUploadReceipt,
-        MarkUploadReceived, PrepareUploadPromotion, RecordUploadCleanup,
+        MarkUploadReceived, PrepareUploadPromotion, RecordPromotionDisposition,
+        RecordUploadCleanup,
     },
 };
 use async_trait::async_trait;
 use folioharbor_domain::{
     id::{JobId, UploadId},
     imports::{
-        blob::{BlobIdentity, DedupScope, Sha256Digest, StorageNamespace},
+        blob::{BlobIdentity, Sha256Digest, StorageNamespace},
         quota::ByteCount,
         upload::{UploadSession, UploadState},
     },
@@ -218,7 +219,8 @@ impl UploadService {
                 upload_id: context.upload_id,
                 staging_key: staging.as_str().to_owned(),
                 final_key: candidate.as_str().to_owned(),
-                final_owned: self.dedup_scope == DedupScope::Disabled,
+                digest,
+                received: ByteCount::new(received),
                 request_id: context.request_id,
                 now: self.clock.now(),
             })
@@ -230,7 +232,28 @@ impl UploadService {
             });
         }
         match self.blobs.promote(staging, &identity).await {
-            Ok(value) if value == candidate => Ok(value),
+            Ok(promoted) if promoted.key == candidate => {
+                let recorded = self
+                    .uploads
+                    .record_promotion_disposition(RecordPromotionDisposition {
+                        actor: context.actor,
+                        library_id: context.library_id,
+                        upload_id: context.upload_id,
+                        staging_key: staging.as_str().to_owned(),
+                        final_key: promoted.key.as_str().to_owned(),
+                        disposition: promoted.disposition,
+                        request_id: context.request_id,
+                        now: self.clock.now(),
+                    })
+                    .await
+                    .map_err(|_| dependency())?;
+                if !recorded {
+                    return Err(AppError::Conflict {
+                        code: "upload_state_conflict",
+                    });
+                }
+                Ok(promoted.key)
+            }
             Ok(_) => {
                 let _ = self
                     .abort(context, staging, received, "upload_storage_failed")
@@ -267,7 +290,20 @@ impl UploadService {
     ) -> Result<(u64, Sha256Digest), AppError> {
         let mut received = 0_u64;
         let mut digest = Sha256::new();
-        while let Some(next) = request.bytes.next().await {
+        let mut heartbeat = tokio::time::interval(self.receipt_heartbeat_interval);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        heartbeat.tick().await;
+        loop {
+            let next = tokio::select! {
+                next = request.bytes.next() => next,
+                _ = heartbeat.tick() => {
+                    self.heartbeat(context, staging).await?;
+                    continue;
+                }
+            };
+            let Some(next) = next else {
+                break;
+            };
             let Ok(bytes) = next else {
                 return Err(self
                     .abort(context, staging, received, "upload_interrupted")
@@ -294,26 +330,35 @@ impl UploadService {
                     return Err(storage_error(&error));
                 }
                 digest.update(chunk);
-                let alive = self
-                    .uploads
-                    .heartbeat_receipt(HeartbeatUploadReceipt {
-                        actor: context.actor,
-                        library_id: context.library_id,
-                        upload_id: context.upload_id,
-                        staging_key: staging.as_str().to_owned(),
-                        request_id: context.request_id,
-                        now: self.clock.now(),
-                    })
-                    .await
-                    .map_err(|_| dependency())?;
-                if !alive {
-                    return Err(AppError::Conflict {
-                        code: "upload_receipt_lease_lost",
-                    });
-                }
             }
         }
         Ok((received, Sha256Digest::from_bytes(digest.finalize().into())))
+    }
+
+    async fn heartbeat(
+        &self,
+        context: ReceiptContext,
+        staging: &folioharbor_domain::imports::blob::StorageKey,
+    ) -> Result<(), AppError> {
+        let alive = self
+            .uploads
+            .heartbeat_receipt(HeartbeatUploadReceipt {
+                actor: context.actor,
+                library_id: context.library_id,
+                upload_id: context.upload_id,
+                staging_key: staging.as_str().to_owned(),
+                request_id: context.request_id,
+                now: self.clock.now(),
+            })
+            .await
+            .map_err(|_| dependency())?;
+        if alive {
+            Ok(())
+        } else {
+            Err(AppError::Conflict {
+                code: "upload_receipt_lease_lost",
+            })
+        }
     }
 
     async fn abort(

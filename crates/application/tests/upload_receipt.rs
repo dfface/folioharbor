@@ -10,9 +10,10 @@ use folioharbor_application::{
     },
     ports::{
         AuthorizationRepository, AuthorizationRepositoryError, AuthorizedUploadTransition,
-        BlobStore, BlobStoreError, CreateUploadRecord, ExpireUploads, FinalizeUploadReceipt,
-        HeartbeatUploadReceipt, LeaseUploadCleanups, MarkUploadReceived, PrepareUploadPromotion,
-        UploadCleanup, UploadRepository, UploadRepositoryError, WorkerUploadTransition,
+        BlobDisposition, BlobStore, BlobStoreError, ClaimUploadCleanup, CreateUploadRecord,
+        ExpireUploads, FinalizeUploadReceipt, HeartbeatUploadReceipt, MarkUploadReceived,
+        PrepareUploadPromotion, RecordPromotionDisposition, UploadCleanup, UploadCleanupGuard,
+        UploadRepository, UploadRepositoryError, WorkerUploadTransition,
     },
 };
 use folioharbor_domain::{
@@ -58,6 +59,20 @@ struct Uploads {
     fail_finalize: Mutex<bool>,
     heartbeats: Mutex<u32>,
     cleanup_leased: Mutex<bool>,
+    heartbeat_alive: Mutex<bool>,
+}
+struct FakeCleanupGuard(UploadCleanup);
+#[async_trait]
+impl UploadCleanupGuard for FakeCleanupGuard {
+    fn cleanup(&self) -> &UploadCleanup {
+        &self.0
+    }
+    async fn complete(self: Box<Self>, _: OffsetDateTime) -> Result<bool, UploadRepositoryError> {
+        Ok(true)
+    }
+    async fn abandon(self: Box<Self>) -> Result<(), UploadRepositoryError> {
+        Ok(())
+    }
 }
 #[async_trait]
 impl UploadRepository for Uploads {
@@ -127,11 +142,17 @@ impl UploadRepository for Uploads {
         _: HeartbeatUploadReceipt,
     ) -> Result<bool, UploadRepositoryError> {
         *self.heartbeats.lock().expect("heartbeats") += 1;
-        Ok(true)
+        Ok(*self.heartbeat_alive.lock().expect("heartbeat alive"))
     }
     async fn prepare_promotion(
         &self,
         _: PrepareUploadPromotion,
+    ) -> Result<bool, UploadRepositoryError> {
+        Ok(true)
+    }
+    async fn record_promotion_disposition(
+        &self,
+        _: RecordPromotionDisposition,
     ) -> Result<bool, UploadRepositoryError> {
         Ok(true)
     }
@@ -161,33 +182,23 @@ impl UploadRepository for Uploads {
     async fn expire_worker(&self, _: ExpireUploads) -> Result<u64, UploadRepositoryError> {
         Ok(0)
     }
-    async fn lease_cleanups(
+    async fn claim_cleanup(
         &self,
-        _: LeaseUploadCleanups,
-    ) -> Result<Vec<UploadCleanup>, UploadRepositoryError> {
+        _: ClaimUploadCleanup,
+    ) -> Result<Option<Box<dyn UploadCleanupGuard>>, UploadRepositoryError> {
         let mut leased = self.cleanup_leased.lock().expect("cleanup lease");
         if *leased {
-            return Ok(Vec::new());
+            return Ok(None);
         }
         *leased = true;
         let session = self.session.lock().expect("session");
-        Ok(vec![UploadCleanup {
+        Ok(Some(Box::new(FakeCleanupGuard(UploadCleanup {
             upload_id: session.upload_id,
             attempt_token: UploadId::new().as_uuid().to_string(),
             staging_key: "staging:test".into(),
             final_key: Some("blob:owned:test:4".into()),
             final_owned: true,
-        }])
-    }
-    async fn complete_cleanup(
-        &self,
-        _: UploadId,
-        _: &str,
-        _: &str,
-        _: OffsetDateTime,
-        _: RequestId,
-    ) -> Result<bool, UploadRepositoryError> {
-        Ok(true)
+        }))))
     }
 }
 #[derive(Default)]
@@ -215,12 +226,15 @@ impl BlobStore for Blobs {
         &self,
         _: &StorageKey,
         identity: &BlobIdentity,
-    ) -> Result<StorageKey, BlobStoreError> {
+    ) -> Result<folioharbor_application::ports::PromotedBlob, BlobStoreError> {
         self.promoted_namespaces
             .lock()
             .expect("namespaces")
             .push(identity.namespace().as_str().to_owned());
-        Ok(self.candidate_key(identity))
+        Ok(folioharbor_application::ports::PromotedBlob {
+            key: self.candidate_key(identity),
+            disposition: BlobDisposition::Installed,
+        })
     }
     async fn delete(&self, _: &StorageKey) -> Result<(), BlobStoreError> {
         *self.deleted.lock().expect("deleted") += 1;
@@ -273,6 +287,7 @@ fn fixture_scope(
         fail_finalize: Mutex::new(false),
         heartbeats: Mutex::new(0),
         cleanup_leased: Mutex::new(false),
+        heartbeat_alive: Mutex::new(true),
     });
     let blobs = Arc::new(Blobs::default());
     let service = UploadService::new(
@@ -396,7 +411,39 @@ async fn large_body_frames_are_split_into_bounded_blob_appends() {
         blobs.appended.lock().expect("appended").as_slice(),
         &[1024 * 1024, 7]
     );
-    assert_eq!(*uploads.heartbeats.lock().expect("heartbeats"), 2);
+    assert_eq!(*uploads.heartbeats.lock().expect("heartbeats"), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_body_is_heartbeated_and_lost_ownership_stops_without_deleting() {
+    let (service, uploads, blobs, actor, library, upload) = fixture(4);
+    *uploads.heartbeat_alive.lock().expect("heartbeat alive") = false;
+    let service = service.with_receipt_heartbeat_interval(std::time::Duration::from_secs(30));
+    let receive = tokio::spawn(async move {
+        service
+            .receive_upload(ReceiveUploadRequest {
+                actor,
+                request_id: RequestId::new(),
+                library_id: library,
+                upload_id: upload,
+                bytes: Box::pin(futures_util::stream::pending()),
+            })
+            .await
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    let error = receive
+        .await
+        .expect("receive task")
+        .expect_err("lease lost");
+    assert!(matches!(
+        error,
+        AppError::Conflict {
+            code: "upload_receipt_lease_lost"
+        }
+    ));
+    assert_eq!(*uploads.heartbeats.lock().expect("heartbeats"), 1);
+    assert_eq!(*blobs.deleted.lock().expect("deleted"), 0);
 }
 
 #[tokio::test]

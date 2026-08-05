@@ -9,7 +9,7 @@ mod secure_fs;
 use std::{fmt, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
-use folioharbor_application::ports::{BlobStore, BlobStoreError};
+use folioharbor_application::ports::{BlobStore, BlobStoreError, PromotedBlob};
 use folioharbor_domain::imports::blob::{BlobIdentity, StorageKey};
 
 pub use capacity::{CapacityProbe, SystemCapacityProbe};
@@ -128,7 +128,7 @@ impl<P: CapacityProbe + 'static> BlobStore for LocalBlobStore<P> {
         &self,
         staging: &StorageKey,
         identity: &BlobIdentity,
-    ) -> Result<StorageKey, BlobStoreError> {
+    ) -> Result<PromotedBlob, BlobStoreError> {
         let store = self.clone();
         let staging = staging.clone();
         let identity = identity.clone();

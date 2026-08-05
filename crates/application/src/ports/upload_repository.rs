@@ -1,3 +1,4 @@
+use crate::ports::BlobDisposition;
 use async_trait::async_trait;
 use folioharbor_domain::{
     id::{JobId, LibraryId, RequestId, UploadId, UserId},
@@ -17,6 +18,7 @@ pub struct CreateUploadRecord {
     pub file_name: String,
     pub media_type: String,
     pub declared_bytes: ByteCount,
+    pub dedup_scope: folioharbor_domain::imports::blob::DedupScope,
     pub expires_at: OffsetDateTime,
     pub now: OffsetDateTime,
 }
@@ -66,7 +68,18 @@ pub struct PrepareUploadPromotion {
     pub upload_id: UploadId,
     pub staging_key: String,
     pub final_key: String,
-    pub final_owned: bool,
+    pub digest: folioharbor_domain::imports::blob::Sha256Digest,
+    pub received: ByteCount,
+    pub request_id: RequestId,
+    pub now: OffsetDateTime,
+}
+pub struct RecordPromotionDisposition {
+    pub actor: UserId,
+    pub library_id: LibraryId,
+    pub upload_id: UploadId,
+    pub staging_key: String,
+    pub final_key: String,
+    pub disposition: BlobDisposition,
     pub request_id: RequestId,
     pub now: OffsetDateTime,
 }
@@ -88,11 +101,9 @@ pub struct RecordUploadCleanup {
     pub request_id: RequestId,
     pub now: OffsetDateTime,
 }
-pub struct LeaseUploadCleanups {
+pub struct ClaimUploadCleanup {
     pub owner: String,
     pub now: OffsetDateTime,
-    pub lease_for: time::Duration,
-    pub limit: u32,
     pub request_id: RequestId,
 }
 #[derive(Clone, Debug)]
@@ -102,6 +113,13 @@ pub struct UploadCleanup {
     pub staging_key: String,
     pub final_key: Option<String>,
     pub final_owned: bool,
+}
+
+#[async_trait]
+pub trait UploadCleanupGuard: Send {
+    fn cleanup(&self) -> &UploadCleanup;
+    async fn complete(self: Box<Self>, now: OffsetDateTime) -> Result<bool, UploadRepositoryError>;
+    async fn abandon(self: Box<Self>) -> Result<(), UploadRepositoryError>;
 }
 pub struct ExpireUploads {
     pub now: OffsetDateTime,
@@ -167,6 +185,12 @@ pub trait UploadRepository: Send + Sync {
     ) -> Result<bool, UploadRepositoryError> {
         Err(UploadRepositoryError::Persistence)
     }
+    async fn record_promotion_disposition(
+        &self,
+        _: RecordPromotionDisposition,
+    ) -> Result<bool, UploadRepositoryError> {
+        Err(UploadRepositoryError::Persistence)
+    }
     async fn mark_received(&self, _: MarkUploadReceived) -> Result<bool, UploadRepositoryError> {
         Err(UploadRepositoryError::Persistence)
     }
@@ -181,20 +205,10 @@ pub trait UploadRepository: Send + Sync {
         transition: WorkerUploadTransition,
     ) -> Result<bool, UploadRepositoryError>;
     async fn expire_worker(&self, request: ExpireUploads) -> Result<u64, UploadRepositoryError>;
-    async fn lease_cleanups(
+    async fn claim_cleanup(
         &self,
-        _: LeaseUploadCleanups,
-    ) -> Result<Vec<UploadCleanup>, UploadRepositoryError> {
-        Err(UploadRepositoryError::Persistence)
-    }
-    async fn complete_cleanup(
-        &self,
-        _: UploadId,
-        _: &str,
-        _: &str,
-        _: OffsetDateTime,
-        _: RequestId,
-    ) -> Result<bool, UploadRepositoryError> {
+        _: ClaimUploadCleanup,
+    ) -> Result<Option<Box<dyn UploadCleanupGuard>>, UploadRepositoryError> {
         Err(UploadRepositoryError::Persistence)
     }
 }

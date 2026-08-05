@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use folioharbor_application::ports::BlobStore;
+use folioharbor_application::ports::{BlobDisposition, BlobStore};
 use folioharbor_domain::{
     id::{LibraryId, UploadId},
     imports::blob::{BlobIdentity, ByteCount, DedupScope, Sha256Digest, StorageNamespace},
@@ -88,10 +88,12 @@ async fn append_is_bounded_ranges_are_exact_and_promotion_preserves_hash() {
         LibraryId::from_uuid(uuid::Uuid::from_u128(7)),
         UploadId::from_uuid(uuid::Uuid::from_u128(8)),
     );
-    let final_key = store
+    let installed = store
         .promote(&staging, &identity(namespace, b"hello world"))
         .await
         .expect("promotion");
+    assert_eq!(installed.disposition, BlobDisposition::Installed);
+    let final_key = installed.key;
     assert_eq!(
         store
             .read_range(&final_key, 0, 64)
@@ -99,23 +101,22 @@ async fn append_is_bounded_ranges_are_exact_and_promotion_preserves_hash() {
             .expect("full read"),
         b"hello world"
     );
-    assert_eq!(
-        store
-            .promote(
-                &staging,
-                &identity(
-                    StorageNamespace::for_scope(
-                        DedupScope::Library,
-                        LibraryId::from_uuid(uuid::Uuid::from_u128(7)),
-                        UploadId::from_uuid(uuid::Uuid::from_u128(8))
-                    ),
-                    b"hello world"
-                )
-            )
-            .await
-            .expect("idempotent promotion"),
-        final_key
-    );
+    let reused = store
+        .promote(
+            &staging,
+            &identity(
+                StorageNamespace::for_scope(
+                    DedupScope::Library,
+                    LibraryId::from_uuid(uuid::Uuid::from_u128(7)),
+                    UploadId::from_uuid(uuid::Uuid::from_u128(8)),
+                ),
+                b"hello world",
+            ),
+        )
+        .await
+        .expect("idempotent promotion");
+    assert_eq!(reused.key, final_key);
+    assert_eq!(reused.disposition, BlobDisposition::Reused);
     store.delete(&final_key).await.expect("delete");
     store.delete(&final_key).await.expect("idempotent delete");
 }

@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
-use folioharbor_domain::{imports::blob::StorageKey, time::OffsetDateTime};
-use time::Duration;
-
 use crate::ports::{
-    BlobStore, ExpireUploads, LeaseUploadCleanups, UploadRepository, UploadRepositoryError,
+    BlobStore, ClaimUploadCleanup, ExpireUploads, UploadCleanupGuard, UploadRepository,
+    UploadRepositoryError,
 };
+use folioharbor_domain::{imports::blob::StorageKey, time::OffsetDateTime};
 
 pub struct UploadRecoveryService {
     uploads: Arc<dyn UploadRepository>,
@@ -38,50 +37,54 @@ impl UploadRecoveryService {
                 request_id,
             })
             .await?;
-        let cleanups = self
-            .uploads
-            .lease_cleanups(LeaseUploadCleanups {
-                owner: owner.to_owned(),
-                now,
-                lease_for: Duration::minutes(5),
-                limit,
-                request_id,
-            })
-            .await?;
         let mut completed = 0_u64;
-        for cleanup in cleanups {
-            if self
-                .blobs
-                .delete(&StorageKey::from_opaque(cleanup.staging_key))
-                .await
-                .is_err()
-            {
-                continue;
-            }
-            if cleanup.final_owned
-                && let Some(final_key) = cleanup.final_key
-                && self
-                    .blobs
-                    .delete(&StorageKey::from_opaque(final_key))
-                    .await
-                    .is_err()
-            {
-                continue;
-            }
-            if self
+        for _ in 0..limit {
+            let Some(guard) = self
                 .uploads
-                .complete_cleanup(
-                    cleanup.upload_id,
-                    &cleanup.attempt_token,
-                    owner,
+                .claim_cleanup(ClaimUploadCleanup {
+                    owner: owner.to_owned(),
                     now,
                     request_id,
-                )
+                })
                 .await?
-            {
+            else {
+                break;
+            };
+            let blobs = Arc::clone(&self.blobs);
+            let changed = tokio::spawn(async move { clean_claim(blobs, guard, now).await })
+                .await
+                .map_err(|_| UploadRepositoryError::Persistence)??;
+            if changed {
                 completed += 1;
             }
         }
         Ok(completed)
     }
+}
+
+async fn clean_claim(
+    blobs: Arc<dyn BlobStore>,
+    guard: Box<dyn UploadCleanupGuard>,
+    now: OffsetDateTime,
+) -> Result<bool, UploadRepositoryError> {
+    let cleanup = guard.cleanup().clone();
+    if blobs
+        .delete(&StorageKey::from_opaque(cleanup.staging_key))
+        .await
+        .is_err()
+    {
+        guard.abandon().await?;
+        return Ok(false);
+    }
+    if cleanup.final_owned
+        && let Some(final_key) = cleanup.final_key
+        && blobs
+            .delete(&StorageKey::from_opaque(final_key))
+            .await
+            .is_err()
+    {
+        guard.abandon().await?;
+        return Ok(false);
+    }
+    guard.complete(now).await
 }

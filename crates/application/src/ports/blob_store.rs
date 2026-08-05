@@ -16,6 +16,18 @@ pub enum BlobStoreError {
     Io(#[from] std::io::Error),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlobDisposition {
+    Installed,
+    Reused,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PromotedBlob {
+    pub key: StorageKey,
+    pub disposition: BlobDisposition,
+}
+
 #[async_trait]
 pub trait BlobStore: Send + Sync {
     fn candidate_key(&self, identity: &BlobIdentity) -> StorageKey;
@@ -31,7 +43,7 @@ pub trait BlobStore: Send + Sync {
         &self,
         staging: &StorageKey,
         identity: &BlobIdentity,
-    ) -> Result<StorageKey, BlobStoreError>;
+    ) -> Result<PromotedBlob, BlobStoreError>;
     async fn delete(&self, key: &StorageKey) -> Result<(), BlobStoreError>;
     async fn free_bytes(&self) -> Result<u64, BlobStoreError>;
 }

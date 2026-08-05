@@ -62,6 +62,7 @@ pub struct UploadService {
     pub(crate) blobs: Arc<dyn BlobStore>,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) dedup_scope: DedupScope,
+    pub(crate) receipt_heartbeat_interval: std::time::Duration,
 }
 
 impl UploadService {
@@ -79,7 +80,23 @@ impl UploadService {
             blobs,
             clock,
             dedup_scope,
+            receipt_heartbeat_interval: std::time::Duration::from_secs(60),
         }
+    }
+
+    /// Overrides how often an active receipt lease is renewed while waiting for body data.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `interval` is zero because a zero-duration Tokio interval is invalid.
+    #[must_use]
+    pub fn with_receipt_heartbeat_interval(mut self, interval: std::time::Duration) -> Self {
+        assert!(
+            !interval.is_zero(),
+            "receipt heartbeat interval must be positive"
+        );
+        self.receipt_heartbeat_interval = interval;
+        self
     }
 
     pub(crate) async fn create(
@@ -113,6 +130,7 @@ impl UploadService {
                 file_name: request.file_name,
                 media_type: request.media_type,
                 declared_bytes: bytes,
+                dedup_scope: self.dedup_scope,
                 expires_at: now + Duration::hours(24),
                 now,
             })

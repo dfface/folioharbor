@@ -5,6 +5,7 @@ CREATE TABLE folioharbor.upload_sessions (
     file_name text NOT NULL CHECK (length(file_name) BETWEEN 1 AND 512),
     media_type text NOT NULL CHECK (media_type IN ('application/epub+zip','application/octet-stream')),
     declared_bytes bigint NOT NULL CHECK (declared_bytes BETWEEN 1 AND 1073741824),
+    dedup_scope text NOT NULL CHECK(dedup_scope IN('instance','library','disabled')),
     received_bytes bigint NOT NULL DEFAULT 0 CHECK (received_bytes >= 0 AND received_bytes <= declared_bytes),
     state text NOT NULL CHECK (state IN ('created','receiving','received','queued','validating','importing','ready','duplicate','failed','expired','retry_wait')),
     storage_key text CHECK (storage_key IS NULL OR length(storage_key) BETWEEN 1 AND 512),
@@ -12,6 +13,7 @@ CREATE TABLE folioharbor.upload_sessions (
     receipt_lease_expires_at timestamptz,
     promotion_key text CHECK (promotion_key IS NULL OR length(promotion_key) BETWEEN 1 AND 512),
     promotion_owned boolean NOT NULL DEFAULT false,
+    promotion_disposition text CHECK(promotion_disposition IS NULL OR promotion_disposition IN('installed','reused')),
     sha256 bytea CHECK (sha256 IS NULL OR octet_length(sha256)=32),
     error_code text CHECK (error_code IS NULL OR error_code ~ '^[a-z][a-z0-9_]{0,63}$'),
     error_summary text CHECK (error_summary IS NULL OR length(error_summary) <= 512),
@@ -24,12 +26,21 @@ CREATE INDEX upload_sessions_library_state_idx ON folioharbor.upload_sessions(li
 
 CREATE TABLE folioharbor.upload_cleanups (
  upload_id uuid NOT NULL REFERENCES folioharbor.upload_sessions(upload_id) ON DELETE CASCADE,
- attempt_token uuid NOT NULL, staging_key text NOT NULL CHECK(length(staging_key) BETWEEN 1 AND 512),
- final_key text CHECK(final_key IS NULL OR length(final_key) BETWEEN 1 AND 512),
+ attempt_token uuid NOT NULL, staging_key text NOT NULL CHECK(staging_key ~ '^staging:[0-9a-f]{64}$'),
+ final_key text CHECK(final_key IS NULL OR final_key ~ '^blob:[a-z0-9-]+:[0-9a-f]{64}:[0-9]+$'),
  final_owned boolean NOT NULL, state text NOT NULL DEFAULT 'pending' CHECK(state IN('pending','leased','completed')),
  lease_owner text, lease_expires_at timestamptz, created_at timestamptz NOT NULL, completed_at timestamptz,
  PRIMARY KEY(upload_id,attempt_token),
  CHECK((state='leased')=(lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL))
+);
+
+CREATE TABLE folioharbor.blob_reachability_candidates (
+ storage_key text NOT NULL CHECK(length(storage_key) BETWEEN 1 AND 512),
+ source_upload_id uuid NOT NULL REFERENCES folioharbor.upload_sessions(upload_id) ON DELETE CASCADE,
+ namespace text NOT NULL,sha256 bytea NOT NULL CHECK(octet_length(sha256)=32),byte_size bigint NOT NULL CHECK(byte_size>=0),
+ state text NOT NULL CHECK(state IN('promotion_unknown','installed_shared')),
+ created_at timestamptz NOT NULL,updated_at timestamptz NOT NULL,
+ PRIMARY KEY(storage_key,source_upload_id)
 );
 
 ALTER TABLE folioharbor.upload_sessions ENABLE ROW LEVEL SECURITY;
@@ -51,9 +62,17 @@ CREATE POLICY upload_cleanups_worker_access ON folioharbor.upload_cleanups
  USING (folioharbor.is_worker()) WITH CHECK (folioharbor.is_worker());
 REVOKE ALL ON folioharbor.upload_cleanups FROM PUBLIC;
 GRANT SELECT,INSERT,UPDATE ON folioharbor.upload_cleanups TO folioharbor_worker;
+ALTER TABLE folioharbor.blob_reachability_candidates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE folioharbor.blob_reachability_candidates FORCE ROW LEVEL SECURITY;
+CREATE POLICY blob_candidates_owner_access ON folioharbor.blob_reachability_candidates
+ USING (current_user='folioharbor_owner') WITH CHECK (current_user='folioharbor_owner');
+CREATE POLICY blob_candidates_worker_access ON folioharbor.blob_reachability_candidates
+ USING (folioharbor.is_worker()) WITH CHECK (folioharbor.is_worker());
+REVOKE ALL ON folioharbor.blob_reachability_candidates FROM PUBLIC;
+GRANT SELECT,UPDATE ON folioharbor.blob_reachability_candidates TO folioharbor_worker;
 
 CREATE FUNCTION folioharbor.upload_create_authorized(
- p_upload uuid,p_library uuid,p_actor uuid,p_file text,p_media text,p_declared bigint,
+ p_upload uuid,p_library uuid,p_actor uuid,p_file text,p_media text,p_declared bigint,p_scope text,
  p_expires timestamptz,p_now timestamptz
 ) RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 DECLARE library_row folioharbor.libraries%ROWTYPE;
@@ -61,7 +80,8 @@ BEGIN
  IF session_user <> 'folioharbor_api' OR p_actor IS DISTINCT FROM folioharbor.current_user_id()
     OR p_library IS DISTINCT FROM folioharbor.current_library_id() THEN RETURN 'not_found'; END IF;
  IF p_declared < 1 OR p_declared > 1073741824 OR p_file !~* '\.epub$'
-    OR p_media NOT IN ('application/epub+zip','application/octet-stream') THEN RETURN 'invalid'; END IF;
+    OR p_media NOT IN ('application/epub+zip','application/octet-stream')
+    OR p_scope NOT IN('instance','library','disabled') THEN RETURN 'invalid'; END IF;
  SELECT * INTO library_row FROM folioharbor.libraries WHERE library_id=p_library FOR UPDATE;
  IF library_row.library_id IS NULL THEN RETURN 'not_found'; END IF;
  IF NOT EXISTS(SELECT 1 FROM folioharbor.library_memberships m JOIN folioharbor.role_permissions p USING(role_code)
@@ -70,15 +90,15 @@ BEGIN
  IF EXISTS(SELECT 1 FROM folioharbor.upload_sessions WHERE upload_id=p_upload) THEN RETURN 'conflict'; END IF;
  IF p_declared > library_row.quota_limit_bytes-library_row.quota_used_bytes-library_row.quota_reserved_bytes
  THEN RETURN 'quota_exceeded'; END IF;
- INSERT INTO folioharbor.upload_sessions(upload_id,library_id,created_by,file_name,media_type,declared_bytes,state,expires_at,created_at,updated_at)
- VALUES(p_upload,p_library,p_actor,p_file,p_media,p_declared,'created',p_expires,p_now,p_now);
+ INSERT INTO folioharbor.upload_sessions(upload_id,library_id,created_by,file_name,media_type,declared_bytes,dedup_scope,state,expires_at,created_at,updated_at)
+ VALUES(p_upload,p_library,p_actor,p_file,p_media,p_declared,p_scope,'created',p_expires,p_now,p_now);
  INSERT INTO folioharbor.quota_reservations(upload_id,library_id,reserved_bytes,expires_at,state,created_at,updated_at)
  VALUES(p_upload,p_library,p_declared,p_expires,'active',p_now,p_now);
  UPDATE folioharbor.libraries SET quota_reserved_bytes=quota_reserved_bytes+p_declared WHERE library_id=p_library;
  RETURN 'created';
 END $$;
-REVOKE ALL ON FUNCTION folioharbor.upload_create_authorized(uuid,uuid,uuid,text,text,bigint,timestamptz,timestamptz) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION folioharbor.upload_create_authorized(uuid,uuid,uuid,text,text,bigint,timestamptz,timestamptz) TO folioharbor_api;
+REVOKE ALL ON FUNCTION folioharbor.upload_create_authorized(uuid,uuid,uuid,text,text,bigint,text,timestamptz,timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION folioharbor.upload_create_authorized(uuid,uuid,uuid,text,text,bigint,text,timestamptz,timestamptz) TO folioharbor_api;
 
 CREATE FUNCTION folioharbor.upload_transition_authorized(
  p_upload uuid,p_library uuid,p_actor uuid,p_from text,p_to text,p_received bigint,
@@ -97,6 +117,7 @@ BEGIN
  IF NOT ((p_from='created' AND p_to='receiving') OR
    (p_from='receiving' AND p_to='failed') OR
    (p_from='failed' AND p_to='receiving')) THEN RETURN false; END IF;
+ IF p_to='receiving' AND (p_storage IS NULL OR p_storage !~ '^staging:[0-9a-f]{64}$') THEN RETURN false; END IF;
  IF p_from='receiving' AND p_to='failed' AND p_storage IS DISTINCT FROM upload.storage_key THEN RETURN false; END IF;
  SELECT * INTO reservation FROM folioharbor.quota_reservations WHERE upload_id=p_upload FOR UPDATE;
  IF p_from='failed' AND p_to='receiving' THEN
@@ -113,10 +134,10 @@ BEGIN
   IF p_storage IS NULL THEN RETURN false; END IF;
   UPDATE folioharbor.upload_sessions SET state=p_to,received_bytes=p_received,storage_key=p_storage,
    receipt_token=gen_random_uuid(),receipt_lease_expires_at=p_now+interval '5 minutes',
-   promotion_key=NULL,promotion_owned=false,error_code=NULL,updated_at=p_now WHERE upload_id=p_upload;
+   promotion_key=NULL,promotion_owned=false,promotion_disposition=NULL,sha256=NULL,error_code=NULL,updated_at=p_now WHERE upload_id=p_upload;
  ELSE
   UPDATE folioharbor.upload_sessions SET state=p_to,received_bytes=p_received,storage_key=NULL,
-   receipt_token=NULL,receipt_lease_expires_at=NULL,promotion_key=NULL,promotion_owned=false,
+   receipt_token=NULL,receipt_lease_expires_at=NULL,promotion_key=NULL,promotion_owned=false,promotion_disposition=NULL,
    error_code=p_error,updated_at=p_now WHERE upload_id=p_upload;
  END IF;
  RETURN true;
@@ -180,18 +201,58 @@ REVOKE ALL ON FUNCTION folioharbor.upload_heartbeat_authorized(uuid,uuid,uuid,te
 GRANT EXECUTE ON FUNCTION folioharbor.upload_heartbeat_authorized(uuid,uuid,uuid,text,timestamptz) TO folioharbor_api;
 
 CREATE FUNCTION folioharbor.upload_prepare_promotion_authorized(
- p_upload uuid,p_library uuid,p_actor uuid,p_staging text,p_final text,p_owned boolean,p_now timestamptz
+ p_upload uuid,p_library uuid,p_actor uuid,p_staging text,p_final text,p_digest bytea,p_received bigint,p_now timestamptz
 ) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE upload folioharbor.upload_sessions%ROWTYPE;
+DECLARE namespace text;
+DECLARE expected_key text;
 BEGIN
  IF session_user <> 'folioharbor_api' OR p_actor IS DISTINCT FROM folioharbor.current_user_id()
-  OR p_library IS DISTINCT FROM folioharbor.current_library_id() OR length(p_final)=0 THEN RETURN false; END IF;
- UPDATE folioharbor.upload_sessions SET promotion_key=p_final,promotion_owned=p_owned,updated_at=p_now
-  WHERE upload_id=p_upload AND library_id=p_library AND state='receiving'
-   AND storage_key=p_staging AND receipt_lease_expires_at>p_now;
- RETURN FOUND;
+  OR p_library IS DISTINCT FROM folioharbor.current_library_id()
+  OR p_staging !~ '^staging:[0-9a-f]{64}$' OR octet_length(p_digest)<>32 THEN RETURN false; END IF;
+ SELECT * INTO upload FROM folioharbor.upload_sessions WHERE upload_id=p_upload AND library_id=p_library FOR UPDATE;
+ IF upload.state<>'receiving' OR upload.storage_key IS DISTINCT FROM p_staging
+  OR upload.receipt_lease_expires_at<=p_now OR p_received<0 OR p_received>upload.declared_bytes THEN RETURN false; END IF;
+ namespace := CASE upload.dedup_scope
+  WHEN 'instance' THEN 'instance-v1'
+  WHEN 'library' THEN 'library-'||replace(p_library::text,'-','')
+  WHEN 'disabled' THEN 'upload-'||replace(p_upload::text,'-','') END;
+ expected_key := 'blob:'||namespace||':'||encode(p_digest,'hex')||':'||p_received::text;
+ IF p_final IS DISTINCT FROM expected_key THEN RETURN false; END IF;
+ UPDATE folioharbor.upload_sessions SET promotion_key=p_final,promotion_owned=false,
+  promotion_disposition=NULL,sha256=p_digest,received_bytes=p_received,updated_at=p_now WHERE upload_id=p_upload;
+ INSERT INTO folioharbor.blob_reachability_candidates(storage_key,source_upload_id,namespace,sha256,byte_size,state,created_at,updated_at)
+  VALUES(p_final,p_upload,namespace,p_digest,p_received,'promotion_unknown',p_now,p_now)
+  ON CONFLICT(storage_key,source_upload_id) DO UPDATE SET state='promotion_unknown',updated_at=p_now;
+ RETURN true;
 END $$;
-REVOKE ALL ON FUNCTION folioharbor.upload_prepare_promotion_authorized(uuid,uuid,uuid,text,text,boolean,timestamptz) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION folioharbor.upload_prepare_promotion_authorized(uuid,uuid,uuid,text,text,boolean,timestamptz) TO folioharbor_api;
+REVOKE ALL ON FUNCTION folioharbor.upload_prepare_promotion_authorized(uuid,uuid,uuid,text,text,bytea,bigint,timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION folioharbor.upload_prepare_promotion_authorized(uuid,uuid,uuid,text,text,bytea,bigint,timestamptz) TO folioharbor_api;
+
+CREATE FUNCTION folioharbor.upload_record_promotion_disposition_authorized(
+ p_upload uuid,p_library uuid,p_actor uuid,p_staging text,p_final text,p_disposition text,p_now timestamptz
+) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE upload folioharbor.upload_sessions%ROWTYPE;
+BEGIN
+ IF session_user <> 'folioharbor_api' OR p_actor IS DISTINCT FROM folioharbor.current_user_id()
+  OR p_library IS DISTINCT FROM folioharbor.current_library_id()
+  OR p_disposition NOT IN('installed','reused') THEN RETURN false; END IF;
+ SELECT * INTO upload FROM folioharbor.upload_sessions WHERE upload_id=p_upload AND library_id=p_library FOR UPDATE;
+ IF upload.state<>'receiving' OR upload.storage_key IS DISTINCT FROM p_staging
+  OR upload.promotion_key IS DISTINCT FROM p_final OR upload.receipt_lease_expires_at<=p_now THEN RETURN false; END IF;
+ UPDATE folioharbor.upload_sessions SET promotion_disposition=p_disposition,
+  promotion_owned=(upload.dedup_scope='disabled' AND p_disposition='installed'),updated_at=p_now
+  WHERE upload_id=p_upload;
+ IF p_disposition='installed' AND upload.dedup_scope IN('instance','library') THEN
+  UPDATE folioharbor.blob_reachability_candidates SET state='installed_shared',updated_at=p_now
+   WHERE storage_key=p_final AND source_upload_id=p_upload;
+ ELSE
+  DELETE FROM folioharbor.blob_reachability_candidates WHERE storage_key=p_final AND source_upload_id=p_upload;
+ END IF;
+ RETURN true;
+END $$;
+REVOKE ALL ON FUNCTION folioharbor.upload_record_promotion_disposition_authorized(uuid,uuid,uuid,text,text,text,timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION folioharbor.upload_record_promotion_disposition_authorized(uuid,uuid,uuid,text,text,text,timestamptz) TO folioharbor_api;
 
 CREATE FUNCTION folioharbor.upload_mark_received_authorized(
  p_upload uuid,p_library uuid,p_actor uuid,p_staging text,p_final text,p_received bigint,p_now timestamptz
@@ -205,6 +266,7 @@ BEGIN
  SELECT * INTO upload FROM folioharbor.upload_sessions WHERE upload_id=p_upload AND library_id=p_library FOR UPDATE;
  IF upload.state<>'receiving' OR upload.storage_key IS DISTINCT FROM p_staging
   OR upload.promotion_key IS DISTINCT FROM p_final OR upload.receipt_lease_expires_at<=p_now
+  OR upload.promotion_disposition IS NULL OR upload.received_bytes<>p_received
   OR p_received<0 OR p_received>upload.declared_bytes THEN RETURN false; END IF;
  SELECT * INTO reservation FROM folioharbor.quota_reservations WHERE upload_id=p_upload FOR UPDATE;
  IF reservation.state<>'active' THEN RETURN false; END IF;
@@ -212,7 +274,7 @@ BEGIN
   WHERE library_id=p_library;
  UPDATE folioharbor.quota_reservations SET reserved_bytes=p_received,updated_at=p_now WHERE upload_id=p_upload;
  UPDATE folioharbor.upload_sessions SET state='received',received_bytes=p_received,storage_key=p_final,
-  receipt_token=NULL,receipt_lease_expires_at=NULL,promotion_key=NULL,promotion_owned=false,error_code=NULL,updated_at=p_now
+  receipt_token=NULL,receipt_lease_expires_at=NULL,promotion_key=NULL,promotion_owned=false,promotion_disposition=NULL,error_code=NULL,updated_at=p_now
   WHERE upload_id=p_upload;
  RETURN true;
 END $$;
@@ -224,7 +286,8 @@ CREATE FUNCTION folioharbor.upload_record_orphan_cleanup_authorized(
 ) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 BEGIN
  IF session_user <> 'folioharbor_api' OR p_actor IS DISTINCT FROM folioharbor.current_user_id()
-  OR p_library IS DISTINCT FROM folioharbor.current_library_id() OR length(p_staging)=0
+  OR p_library IS DISTINCT FROM folioharbor.current_library_id()
+  OR p_staging !~ '^staging:[0-9a-f]{64}$'
   OR NOT EXISTS(SELECT 1 FROM folioharbor.upload_sessions WHERE upload_id=p_upload AND library_id=p_library)
   OR NOT EXISTS(SELECT 1 FROM folioharbor.library_memberships m JOIN folioharbor.role_permissions p USING(role_code)
    WHERE m.library_id=p_library AND m.user_id=p_actor AND m.status='active' AND p.permission_code='holding.edit')
@@ -250,7 +313,8 @@ BEGIN
  IF upload.upload_id IS NULL OR upload.state NOT IN('receiving','received','queued')
   OR p_received<0 OR p_received>upload.declared_bytes OR length(p_storage)=0 THEN RETURN false; END IF;
  IF upload.state='receiving' AND (upload.storage_key IS DISTINCT FROM p_staging
-   OR upload.promotion_key IS DISTINCT FROM p_storage OR upload.receipt_lease_expires_at<=p_now) THEN RETURN false; END IF;
+   OR upload.promotion_key IS DISTINCT FROM p_storage OR upload.promotion_disposition IS NULL
+   OR upload.receipt_lease_expires_at<=p_now) THEN RETURN false; END IF;
  IF upload.state<>'receiving' AND
   (upload.received_bytes<>p_received OR upload.storage_key IS DISTINCT FROM p_storage) THEN RETURN false; END IF;
  SELECT * INTO reservation FROM folioharbor.quota_reservations WHERE upload_id=p_upload FOR UPDATE;
@@ -267,7 +331,8 @@ BEGIN
    UPDATE folioharbor.quota_reservations SET reserved_bytes=p_received,updated_at=p_now WHERE upload_id=p_upload;
  END IF;
  UPDATE folioharbor.upload_sessions SET state='queued',received_bytes=p_received,storage_key=p_storage,
-  receipt_token=NULL,receipt_lease_expires_at=NULL,promotion_key=NULL,promotion_owned=false,error_code=NULL,updated_at=p_now
+  receipt_token=NULL,receipt_lease_expires_at=NULL,promotion_key=NULL,promotion_owned=false,
+  promotion_disposition=NULL,error_code=NULL,updated_at=p_now
   WHERE upload_id=p_upload;
  RETURN true;
 END $$;
@@ -299,7 +364,7 @@ BEGIN
      VALUES(upload.upload_id,upload.receipt_token,upload.storage_key,upload.promotion_key,upload.promotion_owned,p_now)
      ON CONFLICT(upload_id,attempt_token) DO NOTHING;
     UPDATE folioharbor.upload_sessions SET state='failed',storage_key=NULL,receipt_token=NULL,
-     receipt_lease_expires_at=NULL,promotion_key=NULL,promotion_owned=false,error_code='receipt_expired',updated_at=p_now
+     receipt_lease_expires_at=NULL,promotion_key=NULL,promotion_owned=false,promotion_disposition=NULL,error_code='receipt_expired',updated_at=p_now
      WHERE upload_id=candidate.upload_id;
    ELSE
     UPDATE folioharbor.upload_sessions SET state='expired',error_code='upload_expired',updated_at=p_now WHERE upload_id=candidate.upload_id;

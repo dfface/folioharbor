@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use folioharbor_application::ports::{
-    AuthorizedUploadTransition, CreateUploadRecord, ExpireUploads, FinalizeUploadReceipt,
-    HeartbeatUploadReceipt, LeaseUploadCleanups, MarkUploadReceived, PrepareUploadPromotion,
-    RecordUploadCleanup, UploadCleanup, UploadRepository, UploadRepositoryError,
-    WorkerUploadTransition,
+    AuthorizedUploadTransition, BlobDisposition, ClaimUploadCleanup, CreateUploadRecord,
+    ExpireUploads, FinalizeUploadReceipt, HeartbeatUploadReceipt, MarkUploadReceived,
+    PrepareUploadPromotion, RecordPromotionDisposition, RecordUploadCleanup, UploadCleanup,
+    UploadCleanupGuard, UploadRepository, UploadRepositoryError, WorkerUploadTransition,
 };
 use folioharbor_domain::{
     id::{LibraryId, RequestId, UploadId, UserId},
@@ -20,6 +20,60 @@ use crate::{DatabaseContext, PgTransactionContext};
 #[derive(Clone, Debug)]
 pub struct PgUploadRepository {
     pool: PgPool,
+}
+
+struct PgUploadCleanupGuard {
+    connection: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
+    cleanup: UploadCleanup,
+}
+
+impl Drop for PgUploadCleanupGuard {
+    fn drop(&mut self) {
+        if let Some(connection) = &mut self.connection {
+            connection.close_on_drop();
+        }
+    }
+}
+
+#[async_trait]
+impl UploadCleanupGuard for PgUploadCleanupGuard {
+    fn cleanup(&self) -> &UploadCleanup {
+        &self.cleanup
+    }
+
+    async fn complete(
+        mut self: Box<Self>,
+        now: folioharbor_domain::time::OffsetDateTime,
+    ) -> Result<bool, UploadRepositoryError> {
+        let connection = self
+            .connection
+            .as_mut()
+            .ok_or(UploadRepositoryError::Persistence)?;
+        let attempt = uuid::Uuid::parse_str(&self.cleanup.attempt_token)
+            .map_err(|_| UploadRepositoryError::Persistence)?;
+        let changed = sqlx::query("UPDATE folioharbor.upload_cleanups SET state='completed',lease_owner=NULL,lease_expires_at=NULL,completed_at=$3 WHERE upload_id=$1 AND attempt_token=$2 AND state='pending'")
+            .bind(self.cleanup.upload_id.as_uuid()).bind(attempt).bind(now)
+            .execute(&mut **connection).await.map_err(persistence_error)?.rows_affected()==1;
+        sqlx::query("COMMIT")
+            .execute(&mut **connection)
+            .await
+            .map_err(persistence_error)?;
+        let _ = self.connection.take();
+        Ok(changed)
+    }
+
+    async fn abandon(mut self: Box<Self>) -> Result<(), UploadRepositoryError> {
+        let connection = self
+            .connection
+            .as_mut()
+            .ok_or(UploadRepositoryError::Persistence)?;
+        sqlx::query("ROLLBACK")
+            .execute(&mut **connection)
+            .await
+            .map_err(persistence_error)?;
+        let _ = self.connection.take();
+        Ok(())
+    }
 }
 
 impl PgUploadRepository {
@@ -60,16 +114,22 @@ impl UploadRepository for PgUploadRepository {
             .await?;
         let declared = i64::try_from(record.declared_bytes.get())
             .map_err(|_| UploadRepositoryError::Invalid)?;
+        let scope = match record.dedup_scope {
+            folioharbor_domain::imports::blob::DedupScope::Instance => "instance",
+            folioharbor_domain::imports::blob::DedupScope::Library => "library",
+            folioharbor_domain::imports::blob::DedupScope::Disabled => "disabled",
+        };
         let outcome = sqlx::query_scalar!(
-            r#"SELECT folioharbor.upload_create_authorized($1,$2,$3,$4,$5,$6,$7,$8) AS "outcome!""#,
+            r#"SELECT folioharbor.upload_create_authorized($1,$2,$3,$4,$5,$6,$7,$8,$9) AS "outcome!""#,
             record.upload_id.as_uuid(),
             record.library_id.as_uuid(),
             record.actor.as_uuid(),
             &record.file_name,
             &record.media_type,
             declared,
+            scope,
             record.expires_at,
-            record.now
+            record.now,
         )
         .fetch_one(&mut *transaction)
         .await
@@ -231,14 +291,43 @@ impl UploadRepository for PgUploadRepository {
             .transaction(promotion.actor, promotion.library_id, promotion.request_id)
             .await?;
         let changed: bool = sqlx::query_scalar(
-            "SELECT folioharbor.upload_prepare_promotion_authorized($1,$2,$3,$4,$5,$6,$7)",
+            "SELECT folioharbor.upload_prepare_promotion_authorized($1,$2,$3,$4,$5,$6,$7,$8)",
         )
         .bind(promotion.upload_id.as_uuid())
         .bind(promotion.library_id.as_uuid())
         .bind(promotion.actor.as_uuid())
         .bind(promotion.staging_key)
         .bind(promotion.final_key)
-        .bind(promotion.final_owned)
+        .bind(promotion.digest.as_bytes().to_vec())
+        .bind(i64::try_from(promotion.received.get()).map_err(|_| UploadRepositoryError::Invalid)?)
+        .bind(promotion.now)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(persistence_error)?;
+        transaction.commit().await.map_err(persistence_error)?;
+        Ok(changed)
+    }
+
+    async fn record_promotion_disposition(
+        &self,
+        promotion: RecordPromotionDisposition,
+    ) -> Result<bool, UploadRepositoryError> {
+        let disposition = match promotion.disposition {
+            BlobDisposition::Installed => "installed",
+            BlobDisposition::Reused => "reused",
+        };
+        let mut transaction = self
+            .transaction(promotion.actor, promotion.library_id, promotion.request_id)
+            .await?;
+        let changed: bool = sqlx::query_scalar(
+            "SELECT folioharbor.upload_record_promotion_disposition_authorized($1,$2,$3,$4,$5,$6,$7)",
+        )
+        .bind(promotion.upload_id.as_uuid())
+        .bind(promotion.library_id.as_uuid())
+        .bind(promotion.actor.as_uuid())
+        .bind(promotion.staging_key)
+        .bind(promotion.final_key)
+        .bind(disposition)
         .bind(promotion.now)
         .fetch_one(&mut *transaction)
         .await
@@ -313,59 +402,53 @@ impl UploadRepository for PgUploadRepository {
         u64::try_from(expired).map_err(|_| UploadRepositoryError::Persistence)
     }
 
-    async fn lease_cleanups(
+    async fn claim_cleanup(
         &self,
-        request: LeaseUploadCleanups,
-    ) -> Result<Vec<UploadCleanup>, UploadRepositoryError> {
-        let mut transaction = self.pool.begin().await.map_err(persistence_error)?;
-        PgTransactionContext::apply(
-            &mut transaction,
+        request: ClaimUploadCleanup,
+    ) -> Result<Option<Box<dyn UploadCleanupGuard>>, UploadRepositoryError> {
+        let mut connection = self.pool.acquire().await.map_err(persistence_error)?;
+        sqlx::query("BEGIN")
+            .execute(&mut *connection)
+            .await
+            .map_err(persistence_error)?;
+        if let Err(error) = PgTransactionContext::apply(
+            &mut connection,
             &DatabaseContext::worker(request.request_id, None),
         )
         .await
-        .map_err(persistence_error)?;
-        let expires = request.now + request.lease_for;
-        let rows: Vec<(uuid::Uuid, uuid::Uuid, String, Option<String>, bool)> = sqlx::query_as(
-            r"WITH candidates AS (
-                 SELECT upload_id,attempt_token FROM folioharbor.upload_cleanups
-                 WHERE state='pending' OR (state='leased' AND lease_expires_at<=$1)
-                 ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT $2
-               )
-               UPDATE folioharbor.upload_cleanups c SET state='leased',lease_owner=$3,lease_expires_at=$4
-               FROM candidates x WHERE c.upload_id=x.upload_id AND c.attempt_token=x.attempt_token
-               RETURNING c.upload_id,c.attempt_token,c.staging_key,c.final_key,c.final_owned",
-        ).bind(request.now).bind(i64::from(request.limit)).bind(&request.owner).bind(expires)
-         .fetch_all(&mut *transaction).await.map_err(persistence_error)?;
-        transaction.commit().await.map_err(persistence_error)?;
-        Ok(rows
-            .into_iter()
-            .map(|row| UploadCleanup {
+        {
+            connection.close_on_drop();
+            return Err(persistence_error(error));
+        }
+        let row = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid, String, Option<String>, bool)>(
+                "SELECT upload_id,attempt_token,staging_key,final_key,final_owned FROM folioharbor.upload_cleanups WHERE state='pending' ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1",
+            )
+            .fetch_optional(&mut *connection)
+            .await;
+        let row = match row {
+            Ok(row) => row,
+            Err(error) => {
+                connection.close_on_drop();
+                return Err(persistence_error(error));
+            }
+        };
+        let Some(row) = row else {
+            sqlx::query("ROLLBACK")
+                .execute(&mut *connection)
+                .await
+                .map_err(persistence_error)?;
+            return Ok(None);
+        };
+        let _ = (&request.owner, request.now);
+        Ok(Some(Box::new(PgUploadCleanupGuard {
+            connection: Some(connection),
+            cleanup: UploadCleanup {
                 upload_id: UploadId::from_uuid(row.0),
                 attempt_token: row.1.to_string(),
                 staging_key: row.2,
                 final_key: row.3,
                 final_owned: row.4,
-            })
-            .collect())
-    }
-
-    async fn complete_cleanup(
-        &self,
-        upload: UploadId,
-        attempt: &str,
-        owner: &str,
-        now: folioharbor_domain::time::OffsetDateTime,
-        request: RequestId,
-    ) -> Result<bool, UploadRepositoryError> {
-        let attempt = uuid::Uuid::parse_str(attempt).map_err(|_| UploadRepositoryError::Invalid)?;
-        let mut transaction = self.pool.begin().await.map_err(persistence_error)?;
-        PgTransactionContext::apply(&mut transaction, &DatabaseContext::worker(request, None))
-            .await
-            .map_err(persistence_error)?;
-        let changed = sqlx::query("UPDATE folioharbor.upload_cleanups SET state='completed',lease_owner=NULL,lease_expires_at=NULL,completed_at=$4 WHERE upload_id=$1 AND attempt_token=$2 AND state='leased' AND lease_owner=$3 AND lease_expires_at>$4")
-            .bind(upload.as_uuid()).bind(attempt).bind(owner).bind(now)
-            .execute(&mut *transaction).await.map_err(persistence_error)?.rows_affected()==1;
-        transaction.commit().await.map_err(persistence_error)?;
-        Ok(changed)
+            },
+        })))
     }
 }

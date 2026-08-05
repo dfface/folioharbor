@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT folioharbor.upload_create_authorized($1,$2,$3,$4,$5,$6,$7,$8) AS \"outcome!\"",
+  "query": "SELECT folioharbor.upload_create_authorized($1,$2,$3,$4,$5,$6,$7,$8,$9) AS \"outcome!\"",
   "describe": {
     "columns": [
       {
@@ -17,6 +17,7 @@
         "Text",
         "Text",
         "Int8",
+        "Text",
         "Timestamptz",
         "Timestamptz"
       ]
@@ -25,5 +26,5 @@
       null
     ]
   },
-  "hash": "d4730d8a426dd1f97858ecf55221006133bbbb1fb6a175f584c304f9422a41e5"
+  "hash": "dbb6b5b830c84f97a4dea4966dbc8a7f40bad2841454130f1f6951a691890988"
 }

@@ -7,7 +7,8 @@ use folioharbor_application::{
     ports::{
         AuthorizedUploadTransition, Clock, CreateUploadRecord, ExpireUploads,
         FinalizeUploadReceipt, HeartbeatUploadReceipt, MarkUploadReceived, PrepareUploadPromotion,
-        UploadRepository, UploadRepositoryError, WorkerUploadTransition,
+        RecordPromotionDisposition, UploadRepository, UploadRepositoryError,
+        WorkerUploadTransition,
     },
 };
 use folioharbor_domain::{
@@ -87,6 +88,12 @@ impl UploadRepository for FailFirstFinalize {
     ) -> Result<bool, UploadRepositoryError> {
         self.inner.prepare_promotion(promotion).await
     }
+    async fn record_promotion_disposition(
+        &self,
+        promotion: RecordPromotionDisposition,
+    ) -> Result<bool, UploadRepositoryError> {
+        self.inner.record_promotion_disposition(promotion).await
+    }
     async fn mark_received(
         &self,
         receipt: MarkUploadReceived,
@@ -133,6 +140,7 @@ async fn process_restart_recovers_promoted_receipt_with_same_upload_id() -> anyh
             file_name: "restart.epub".into(),
             media_type: "application/epub+zip".into(),
             declared_bytes: ByteCount::new(4),
+            dedup_scope: folioharbor_domain::imports::blob::DedupScope::Instance,
             expires_at: now + Duration::hours(24),
             now,
         })

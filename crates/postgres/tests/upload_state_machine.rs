@@ -1,21 +1,43 @@
 #![allow(clippy::expect_used, clippy::too_many_lines)]
 
 use folioharbor_application::ports::{
-    AuthorizedUploadTransition, CreateUploadRecord, ExpireUploads, FinalizeUploadReceipt,
-    JobRepository, LeaseUploadCleanups, PrepareUploadPromotion, UploadRepository,
-    UploadRepositoryError, WorkerUploadTransition,
+    AuthorizedUploadTransition, BlobDisposition, ClaimUploadCleanup, CreateUploadRecord,
+    ExpireUploads, FinalizeUploadReceipt, JobRepository, PrepareUploadPromotion,
+    RecordPromotionDisposition, UploadRepository, UploadRepositoryError, WorkerUploadTransition,
 };
 use folioharbor_domain::{
     id::{JobId, LibraryId, RequestId, UploadId, UserId},
     imports::{
+        blob::Sha256Digest,
         job::{JobInput, JobKind},
         quota::ByteCount,
         upload::UploadState,
     },
 };
-use folioharbor_postgres::{PgJobRepository, PgPools, PgUploadRepository, run_migrations};
+use folioharbor_postgres::{
+    DatabaseContext, PgJobRepository, PgPools, PgTransactionContext, PgUploadRepository,
+    run_migrations,
+};
 use folioharbor_test_support::postgres::TestPostgres;
 use time::{Duration, OffsetDateTime};
+
+fn staging_key(marker: char) -> String {
+    format!("staging:{}", marker.to_string().repeat(64))
+}
+
+fn instance_key(size: u64) -> String {
+    format!("blob:instance-v1:{}:{size}", "0".repeat(64))
+}
+
+fn disabled_key(upload: UploadId, size: u64) -> String {
+    format!(
+        "blob:upload-{}:{}:{size}",
+        upload.as_uuid().simple(),
+        "0".repeat(64)
+    )
+}
+
+const TEST_DIGEST: Sha256Digest = Sha256Digest::from_bytes([0; 32]);
 
 #[tokio::test]
 async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -> anyhow::Result<()>
@@ -45,6 +67,7 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
             file_name: "book.epub".into(),
             media_type: "application/epub+zip".into(),
             declared_bytes: ByteCount::new(42),
+            dedup_scope: folioharbor_domain::imports::blob::DedupScope::Instance,
             expires_at: now + Duration::hours(24),
             now,
         })
@@ -70,6 +93,7 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
             file_name: "reader.epub".into(),
             media_type: "application/epub+zip".into(),
             declared_bytes: ByteCount::new(1),
+            dedup_scope: folioharbor_domain::imports::blob::DedupScope::Instance,
             expires_at: now + Duration::hours(24),
             now,
         })
@@ -85,7 +109,7 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
                 from: UploadState::Created,
                 to: UploadState::Receiving,
                 received: ByteCount::new(0),
-                storage_key: Some("staging:worker".into()),
+                storage_key: Some(staging_key('a')),
                 error_code: None,
                 request_id: RequestId::new(),
                 now
@@ -101,7 +125,7 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
                 from: UploadState::Receiving,
                 to: UploadState::Receiving,
                 received: ByteCount::new(0),
-                storage_key: Some("staging:concurrent".into()),
+                storage_key: Some(staging_key('b')),
                 error_code: None,
                 request_id: RequestId::new(),
                 now,
@@ -114,9 +138,10 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
                 actor: user,
                 library_id: library,
                 upload_id: upload,
-                staging_key: "staging:worker".into(),
-                final_key: "blobs:worker".into(),
-                final_owned: true,
+                staging_key: staging_key('a'),
+                final_key: instance_key(42),
+                digest: TEST_DIGEST,
+                received: ByteCount::new(42),
                 request_id: RequestId::new(),
                 now,
             })
@@ -124,13 +149,32 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
     );
     assert!(
         repository
+            .record_promotion_disposition(RecordPromotionDisposition {
+                actor: user,
+                library_id: library,
+                upload_id: upload,
+                staging_key: staging_key('a'),
+                final_key: instance_key(42),
+                disposition: BlobDisposition::Installed,
+                request_id: RequestId::new(),
+                now,
+            })
+            .await?
+    );
+    let installed_shared: (String, bool) = sqlx::query_as(
+        "SELECT c.state,u.promotion_owned FROM folioharbor.blob_reachability_candidates c JOIN folioharbor.upload_sessions u ON u.upload_id=c.source_upload_id WHERE c.source_upload_id=$1",
+    )
+    .bind(upload.as_uuid()).fetch_one(&pools.owner).await?;
+    assert_eq!(installed_shared, ("installed_shared".into(), false));
+    assert!(
+        repository
             .finalize_authorized(FinalizeUploadReceipt {
                 actor: user,
                 library_id: library,
                 upload_id: upload,
                 received: ByteCount::new(42),
-                storage_key: "blobs:worker".into(),
-                staging_key: Some("staging:worker".into()),
+                storage_key: instance_key(42),
+                staging_key: Some(staging_key('a')),
                 job_id: JobId::new(),
                 request_id: RequestId::new(),
                 now
@@ -144,7 +188,7 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
                 library_id: library,
                 upload_id: upload,
                 received: ByteCount::new(42),
-                storage_key: "blobs:worker".into(),
+                storage_key: instance_key(42),
                 staging_key: None,
                 job_id: JobId::new(),
                 request_id: RequestId::new(),
@@ -176,7 +220,7 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
                 from: UploadState::Queued,
                 to: UploadState::Validating,
                 received: ByteCount::new(42),
-                storage_key: Some("blobs:worker".into()),
+                storage_key: Some(instance_key(42)),
                 error_code: None,
                 request_id: RequestId::new(),
                 now
@@ -248,6 +292,7 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
             file_name: "duplicate.epub".into(),
             media_type: "application/epub+zip".into(),
             declared_bytes: ByteCount::new(42),
+            dedup_scope: folioharbor_domain::imports::blob::DedupScope::Instance,
             expires_at: now + Duration::hours(24),
             now,
         })
@@ -261,7 +306,7 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
                 from: UploadState::Created,
                 to: UploadState::Receiving,
                 received: ByteCount::new(0),
-                storage_key: Some("staging:duplicate".into()),
+                storage_key: Some(staging_key('c')),
                 error_code: None,
                 request_id: RequestId::new(),
                 now,
@@ -274,9 +319,10 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
                 actor: user,
                 library_id: library,
                 upload_id: duplicate,
-                staging_key: "staging:duplicate".into(),
-                final_key: "blobs:duplicate".into(),
-                final_owned: true,
+                staging_key: staging_key('c'),
+                final_key: instance_key(42),
+                digest: TEST_DIGEST,
+                received: ByteCount::new(42),
                 request_id: RequestId::new(),
                 now,
             })
@@ -284,13 +330,40 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
     );
     assert!(
         repository
+            .record_promotion_disposition(RecordPromotionDisposition {
+                actor: user,
+                library_id: library,
+                upload_id: duplicate,
+                staging_key: staging_key('c'),
+                final_key: instance_key(42),
+                disposition: BlobDisposition::Reused,
+                request_id: RequestId::new(),
+                now,
+            })
+            .await?
+    );
+    let reused_candidate_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM folioharbor.blob_reachability_candidates WHERE source_upload_id=$1",
+    )
+    .bind(duplicate.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    let reused_owned: bool = sqlx::query_scalar(
+        "SELECT promotion_owned FROM folioharbor.upload_sessions WHERE upload_id=$1",
+    )
+    .bind(duplicate.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_eq!((reused_candidate_count, reused_owned), (0, false));
+    assert!(
+        repository
             .finalize_authorized(FinalizeUploadReceipt {
                 actor: user,
                 library_id: library,
                 upload_id: duplicate,
                 received: ByteCount::new(42),
-                storage_key: "blobs:duplicate".into(),
-                staging_key: Some("staging:duplicate".into()),
+                storage_key: instance_key(42),
+                staging_key: Some(staging_key('c')),
                 job_id: JobId::new(),
                 request_id: RequestId::new(),
                 now,
@@ -328,6 +401,7 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
             file_name: "legacy.epub".into(),
             media_type: "application/epub+zip".into(),
             declared_bytes: ByteCount::new(42),
+            dedup_scope: folioharbor_domain::imports::blob::DedupScope::Instance,
             expires_at: now + Duration::hours(24),
             now,
         })
@@ -390,6 +464,7 @@ async fn failed_receipts_release_once_and_retry_the_same_upload_id() -> anyhow::
             file_name: "retry.epub".into(),
             media_type: "application/octet-stream".into(),
             declared_bytes: ByteCount::new(50),
+            dedup_scope: folioharbor_domain::imports::blob::DedupScope::Instance,
             expires_at: now + Duration::hours(24),
             now,
         })
@@ -403,7 +478,7 @@ async fn failed_receipts_release_once_and_retry_the_same_upload_id() -> anyhow::
                 from: UploadState::Created,
                 to: UploadState::Receiving,
                 received: ByteCount::new(0),
-                storage_key: Some("staging:first".into()),
+                storage_key: Some(staging_key('d')),
                 error_code: None,
                 request_id: RequestId::new(),
                 now
@@ -419,7 +494,7 @@ async fn failed_receipts_release_once_and_retry_the_same_upload_id() -> anyhow::
                 from: UploadState::Receiving,
                 to: UploadState::Failed,
                 received: ByteCount::new(12),
-                storage_key: Some("staging:first".into()),
+                storage_key: Some(staging_key('d')),
                 error_code: Some("upload_interrupted".into()),
                 request_id: RequestId::new(),
                 now
@@ -435,7 +510,7 @@ async fn failed_receipts_release_once_and_retry_the_same_upload_id() -> anyhow::
                 from: UploadState::Receiving,
                 to: UploadState::Failed,
                 received: ByteCount::new(12),
-                storage_key: Some("staging:first".into()),
+                storage_key: Some(staging_key('d')),
                 error_code: Some("upload_interrupted".into()),
                 request_id: RequestId::new(),
                 now
@@ -453,7 +528,7 @@ async fn failed_receipts_release_once_and_retry_the_same_upload_id() -> anyhow::
                 from: UploadState::Failed,
                 to: UploadState::Receiving,
                 received: ByteCount::new(0),
-                storage_key: Some("staging:retry".into()),
+                storage_key: Some(staging_key('e')),
                 error_code: None,
                 request_id: RequestId::new(),
                 now
@@ -471,7 +546,7 @@ async fn failed_receipts_release_once_and_retry_the_same_upload_id() -> anyhow::
                 from: UploadState::Receiving,
                 to: UploadState::Failed,
                 received: ByteCount::new(12),
-                storage_key: Some("staging:first".into()),
+                storage_key: Some(staging_key('d')),
                 error_code: Some("upload_interrupted".into()),
                 request_id: RequestId::new(),
                 now,
@@ -481,6 +556,122 @@ async fn failed_receipts_release_once_and_retry_the_same_upload_id() -> anyhow::
     let after_stale_abort: (i64, String) = sqlx::query_as("SELECT l.quota_reserved_bytes,q.state FROM folioharbor.libraries l JOIN folioharbor.quota_reservations q USING(library_id) WHERE q.upload_id=$1")
         .bind(upload.as_uuid()).fetch_one(&pools.owner).await?;
     assert_eq!(after_stale_abort, (50, "active".into()));
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn security_definer_rejects_forged_storage_keys_identity_and_ownership() -> anyhow::Result<()>
+{
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let now = OffsetDateTime::now_utc();
+    let actor = UserId::new();
+    let library = LibraryId::new();
+    let upload = UploadId::new();
+    sqlx::query("INSERT INTO folioharbor.user_accounts(user_id,normalized_email,display_email,status,created_at,verified_at) VALUES($1,$2,$2,'verified',$3,$3)")
+        .bind(actor.as_uuid()).bind("storage-forgery@test.invalid").bind(now).execute(&pools.owner).await?;
+    sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,created_at,updated_at) VALUES($1,'Storage forgery',$2,$2)")
+        .bind(library.as_uuid()).bind(now).execute(&pools.owner).await?;
+    sqlx::query("INSERT INTO folioharbor.library_memberships(library_id,user_id,role_code,status,joined_at) VALUES($1,$2,'editor','active',$3)")
+        .bind(library.as_uuid()).bind(actor.as_uuid()).bind(now).execute(&pools.owner).await?;
+    let repository = PgUploadRepository::new(pools.api.clone());
+    repository
+        .create_authorized(CreateUploadRecord {
+            upload_id: upload,
+            library_id: library,
+            actor,
+            request_id: RequestId::new(),
+            file_name: "forgery.epub".into(),
+            media_type: "application/epub+zip".into(),
+            declared_bytes: ByteCount::new(4),
+            dedup_scope: folioharbor_domain::imports::blob::DedupScope::Instance,
+            expires_at: now + Duration::hours(1),
+            now,
+        })
+        .await?;
+    assert!(
+        repository
+            .transition_authorized(AuthorizedUploadTransition {
+                actor,
+                library_id: library,
+                upload_id: upload,
+                from: UploadState::Created,
+                to: UploadState::Receiving,
+                received: ByteCount::new(0),
+                storage_key: Some(format!("staging:{}", "a".repeat(64))),
+                error_code: None,
+                request_id: RequestId::new(),
+                now,
+            })
+            .await?
+    );
+
+    let mut transaction = pools.api.begin().await?;
+    PgTransactionContext::apply(
+        &mut transaction,
+        &DatabaseContext::api(actor, library, RequestId::new()),
+    )
+    .await?;
+    sqlx::query("SELECT folioharbor.upload_record_orphan_cleanup_authorized($1,$2,$3,$4,$5)")
+        .bind(upload.as_uuid())
+        .bind(library.as_uuid())
+        .bind(actor.as_uuid())
+        .bind("blob:instance-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:4")
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+    let forged = sqlx::query_scalar::<_, bool>(
+        "SELECT folioharbor.upload_prepare_promotion_authorized($1,$2,$3,$4,$5,$6,$7,$8)",
+    )
+    .bind(upload.as_uuid())
+    .bind(library.as_uuid())
+    .bind(actor.as_uuid())
+    .bind(format!("staging:{}", "a".repeat(64)))
+    .bind("blob:library-forged:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:4")
+    .bind(vec![0_u8; 32])
+    .bind(4_i64)
+    .bind(now)
+    .fetch_one(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    assert!(!forged);
+    let mut ownership_forgery = pools.api.begin().await?;
+    PgTransactionContext::apply(
+        &mut ownership_forgery,
+        &DatabaseContext::api(actor, library, RequestId::new()),
+    )
+    .await?;
+    assert!(
+        sqlx::query(
+            "UPDATE folioharbor.upload_sessions SET promotion_owned=true WHERE upload_id=$1"
+        )
+        .bind(upload.as_uuid())
+        .execute(&mut *ownership_forgery)
+        .await
+        .is_err()
+    );
+    ownership_forgery.rollback().await?;
+    let unsafe_targets: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM folioharbor.upload_cleanups WHERE upload_id=$1")
+            .bind(upload.as_uuid())
+            .fetch_one(&pools.owner)
+            .await?;
+    assert_eq!(unsafe_targets, 0);
+    let promotion: (Option<String>, bool) = sqlx::query_as(
+        "SELECT promotion_key,promotion_owned FROM folioharbor.upload_sessions WHERE upload_id=$1",
+    )
+    .bind(upload.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_eq!(promotion, (None, false));
     pools.close().await;
     database.cleanup().await?;
     Ok(())
@@ -512,6 +703,7 @@ async fn worker_expiry_releases_created_upload_reservations_exactly_once() -> an
             file_name: "expired.epub".into(),
             media_type: "application/epub+zip".into(),
             declared_bytes: ByteCount::new(64),
+            dedup_scope: folioharbor_domain::imports::blob::DedupScope::Instance,
             expires_at: now - Duration::seconds(1),
             now: now - Duration::hours(25),
         })
@@ -526,6 +718,7 @@ async fn worker_expiry_releases_created_upload_reservations_exactly_once() -> an
             file_name: "abandoned.epub".into(),
             media_type: "application/epub+zip".into(),
             declared_bytes: ByteCount::new(32),
+            dedup_scope: folioharbor_domain::imports::blob::DedupScope::Disabled,
             expires_at: now - Duration::seconds(1),
             now: now - Duration::hours(25),
         })
@@ -539,10 +732,40 @@ async fn worker_expiry_releases_created_upload_reservations_exactly_once() -> an
                 from: UploadState::Created,
                 to: UploadState::Receiving,
                 received: ByteCount::new(0),
-                storage_key: Some("staging:abandoned".into()),
+                storage_key: Some(staging_key('f')),
                 error_code: None,
                 request_id: RequestId::new(),
                 now: now - Duration::hours(2),
+            })
+            .await?
+    );
+    let receipt_time = now - Duration::hours(2) + Duration::minutes(1);
+    assert!(
+        PgUploadRepository::new(pools.api.clone())
+            .prepare_promotion(PrepareUploadPromotion {
+                actor,
+                library_id: library,
+                upload_id: receiving,
+                staging_key: staging_key('f'),
+                final_key: disabled_key(receiving, 0),
+                digest: TEST_DIGEST,
+                received: ByteCount::new(0),
+                request_id: RequestId::new(),
+                now: receipt_time,
+            })
+            .await?
+    );
+    assert!(
+        PgUploadRepository::new(pools.api.clone())
+            .record_promotion_disposition(RecordPromotionDisposition {
+                actor,
+                library_id: library,
+                upload_id: receiving,
+                staging_key: staging_key('f'),
+                final_key: disabled_key(receiving, 0),
+                disposition: BlobDisposition::Installed,
+                request_id: RequestId::new(),
+                now: receipt_time,
             })
             .await?
     );
@@ -574,10 +797,7 @@ async fn worker_expiry_releases_created_upload_reservations_exactly_once() -> an
     .bind(receiving.as_uuid())
     .fetch_one(&pools.owner)
     .await?;
-    assert_eq!(
-        cleanup,
-        ("pending".into(), "staging:abandoned".into(), false)
-    );
+    assert_eq!(cleanup, ("pending".into(), staging_key('f'), true));
     assert!(
         !PgUploadRepository::new(pools.api.clone())
             .transition_authorized(AuthorizedUploadTransition {
@@ -587,34 +807,50 @@ async fn worker_expiry_releases_created_upload_reservations_exactly_once() -> an
                 from: UploadState::Failed,
                 to: UploadState::Receiving,
                 received: ByteCount::new(0),
-                storage_key: Some("staging:too-early".into()),
+                storage_key: Some(staging_key('1')),
                 error_code: None,
                 request_id: RequestId::new(),
                 now,
             })
             .await?
     );
-    let leased = expiry
-        .lease_cleanups(LeaseUploadCleanups {
+    let cleanup_guard = expiry
+        .claim_cleanup(ClaimUploadCleanup {
             owner: "expiry-worker".into(),
             now,
-            lease_for: Duration::minutes(1),
-            limit: 10,
             request_id: RequestId::new(),
         })
-        .await?;
-    assert_eq!(leased.len(), 1);
+        .await?
+        .expect("cleanup claim");
     assert!(
-        expiry
-            .complete_cleanup(
-                receiving,
-                &leased[0].attempt_token,
-                "expiry-worker",
-                now,
-                RequestId::new(),
-            )
+        !PgUploadRepository::new(pools.api.clone())
+            .transition_authorized(AuthorizedUploadTransition {
+                actor,
+                library_id: library,
+                upload_id: receiving,
+                from: UploadState::Failed,
+                to: UploadState::Receiving,
+                received: ByteCount::new(0),
+                storage_key: Some(staging_key('3')),
+                error_code: None,
+                request_id: RequestId::new(),
+                now: now + Duration::hours(1),
+            })
             .await?
     );
+    let late_worker_pool = sqlx::PgPool::connect(&database.worker_url()?).await?;
+    assert!(
+        PgUploadRepository::new(late_worker_pool.clone())
+            .claim_cleanup(ClaimUploadCleanup {
+                owner: "late-worker".into(),
+                now: now + Duration::hours(1),
+                request_id: RequestId::new(),
+            })
+            .await?
+            .is_none()
+    );
+    late_worker_pool.close().await;
+    assert!(cleanup_guard.complete(now + Duration::hours(1)).await?);
     assert!(
         PgUploadRepository::new(pools.api.clone())
             .transition_authorized(AuthorizedUploadTransition {
@@ -624,7 +860,7 @@ async fn worker_expiry_releases_created_upload_reservations_exactly_once() -> an
                 from: UploadState::Failed,
                 to: UploadState::Receiving,
                 received: ByteCount::new(0),
-                storage_key: Some("staging:retry".into()),
+                storage_key: Some(staging_key('2')),
                 error_code: None,
                 request_id: RequestId::new(),
                 now,
