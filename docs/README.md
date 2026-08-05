@@ -24,8 +24,9 @@
 
 ## 当前阅读顺序
 
-1. [产品愿景与范围](requirements/product-vision.md)
-2. [核心领域模型](architecture/core-domain-model.md)
-3. [标准应用规范草案](standards/application-profile.md)
-4. [旧系统数据调研摘要](research/legacy-ebooks-audit.md)
-5. `decisions/` 中的架构决策记录
+1. [全量 Brainstorm 纪要](research/2026-08-04-to-2026-08-05-full-brainstorm.md)
+2. [产品愿景与范围](requirements/product-vision.md)
+3. [核心领域模型](architecture/core-domain-model.md)
+4. [标准应用规范草案](standards/application-profile.md)
+5. [旧系统数据调研摘要](research/legacy-ebooks-audit.md)
+6. `decisions/` 中的架构决策记录
