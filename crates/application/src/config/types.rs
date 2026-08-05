@@ -1,0 +1,199 @@
+use std::path::PathBuf;
+
+use secrecy::SecretString;
+use serde::Deserialize;
+use url::Url;
+
+use super::{ConfigError, raw::RawStorage};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ByteSize(u64);
+
+impl ByteSize {
+    fn new(key: &'static str, value: u64) -> Result<Self, ConfigError> {
+        if value == 0 {
+            return Err(ConfigError::invalid(key, "must be greater than zero"));
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Duration(u64);
+
+impl Duration {
+    fn new(key: &'static str, seconds: u64) -> Result<Self, ConfigError> {
+        if seconds == 0 {
+            return Err(ConfigError::invalid(key, "must be greater than zero"));
+        }
+        Ok(Self(seconds))
+    }
+
+    #[must_use]
+    pub const fn as_seconds(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum DedupScope {
+    Instance,
+    Library,
+    Disabled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicUrl(Url);
+
+impl PublicUrl {
+    pub(super) fn parse(value: &str) -> Result<Self, ConfigError> {
+        let url = Url::parse(value)
+            .map_err(|error| ConfigError::invalid("server.public_base_url", error.to_string()))?;
+        if !matches!(url.scheme(), "http" | "https") || url.cannot_be_a_base() {
+            return Err(ConfigError::invalid(
+                "server.public_base_url",
+                "must be an absolute HTTP(S) base URL",
+            ));
+        }
+        Ok(Self(url))
+    }
+
+    #[must_use]
+    pub const fn as_url(&self) -> &Url {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SmtpUrl(Url);
+
+impl SmtpUrl {
+    pub(super) fn parse(value: &str) -> Result<Self, ConfigError> {
+        let url = Url::parse(value)
+            .map_err(|error| ConfigError::invalid("mail.smtp_url", error.to_string()))?;
+        if !matches!(url.scheme(), "smtp" | "smtps") {
+            return Err(ConfigError::invalid(
+                "mail.smtp_url",
+                "scheme must be smtp or smtps",
+            ));
+        }
+        Ok(Self(url))
+    }
+
+    #[must_use]
+    pub const fn as_url(&self) -> &Url {
+        &self.0
+    }
+}
+
+#[derive(Debug)]
+pub struct ApplicationSecret {
+    pub key_id: String,
+    pub(super) secret: SecretString,
+}
+
+impl ApplicationSecret {
+    #[must_use]
+    pub const fn secret(&self) -> &SecretString {
+        &self.secret
+    }
+}
+
+#[derive(Debug)]
+pub struct ApplicationSecretRing {
+    pub current: ApplicationSecret,
+    pub old: Vec<ApplicationSecret>,
+}
+
+#[derive(Debug)]
+pub struct Settings {
+    pub server: ServerSettings,
+    pub database: DatabaseSettings,
+    pub storage: StorageSettings,
+    pub auth: AuthSettings,
+    pub mail: MailSettings,
+    pub worker: WorkerSettings,
+    pub observability: ObservabilitySettings,
+}
+
+#[derive(Debug)]
+pub struct ServerSettings {
+    pub bind_address: String,
+    pub public_base_url: PublicUrl,
+}
+
+#[derive(Debug)]
+pub struct DatabaseSettings {
+    pub url: Option<SecretString>,
+}
+
+#[derive(Debug)]
+pub struct StorageSettings {
+    pub root: PathBuf,
+    pub staging_root: PathBuf,
+    pub library_quota: ByteSize,
+    pub upload_limit: ByteSize,
+    pub free_reserve: ByteSize,
+    pub dedup_scope: DedupScope,
+    pub failed_retention: Duration,
+    pub gc_delay: Duration,
+    pub recovery_period: Duration,
+}
+
+impl StorageSettings {
+    pub(super) fn from_raw(raw: RawStorage) -> Result<Self, ConfigError> {
+        Ok(Self {
+            root: raw.root,
+            staging_root: raw.staging_root,
+            library_quota: ByteSize::new("storage.library_quota_bytes", raw.library_quota_bytes)?,
+            upload_limit: ByteSize::new("storage.upload_limit_bytes", raw.upload_limit_bytes)?,
+            free_reserve: ByteSize::new("storage.free_reserve_bytes", raw.free_reserve_bytes)?,
+            dedup_scope: raw.dedup_scope,
+            failed_retention: Duration::new(
+                "storage.failed_retention_seconds",
+                raw.failed_retention_seconds,
+            )?,
+            gc_delay: Duration::new("storage.gc_delay_seconds", raw.gc_delay_seconds)?,
+            recovery_period: Duration::new(
+                "storage.recovery_period_seconds",
+                raw.recovery_period_seconds,
+            )?,
+        })
+    }
+}
+
+#[derive(Debug)]
+// These are independent deployment feature flags, not mutually exclusive states.
+#[allow(clippy::struct_excessive_bools)]
+pub struct AuthSettings {
+    pub registration_enabled: bool,
+    pub email_verification_enabled: bool,
+    pub personal_library_enabled: bool,
+    pub reader_download_enabled: bool,
+    pub invitation_enabled: bool,
+    pub password_reset_enabled: bool,
+    pub application_secrets: ApplicationSecretRing,
+}
+
+#[derive(Debug)]
+pub struct MailSettings {
+    pub smtp_url: Option<SmtpUrl>,
+    pub username: Option<SecretString>,
+    pub password: Option<SecretString>,
+}
+
+#[derive(Debug)]
+pub struct WorkerSettings {
+    pub concurrency: usize,
+}
+
+#[derive(Debug)]
+pub struct ObservabilitySettings {
+    pub log_filter: String,
+}

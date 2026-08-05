@@ -1,0 +1,154 @@
+mod raw;
+mod secret;
+mod types;
+
+use std::{collections::BTreeMap, fmt};
+
+use secrecy::SecretString;
+use thiserror::Error;
+
+use raw::RawSettings;
+use secret::{load_secret_ring, secret_environment};
+pub use types::{
+    ApplicationSecret, ApplicationSecretRing, AuthSettings, ByteSize, DatabaseSettings, DedupScope,
+    Duration, MailSettings, ObservabilitySettings, PublicUrl, ServerSettings, Settings, SmtpUrl,
+    StorageSettings, WorkerSettings,
+};
+
+#[derive(Clone, Default)]
+pub struct ConfigSources {
+    pub toml: Option<String>,
+    pub environment: BTreeMap<String, String>,
+    pub cli: BTreeMap<String, String>,
+}
+
+impl fmt::Debug for ConfigSources {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConfigSources")
+            .field("toml", &self.toml.as_ref().map(|_| "<redacted>"))
+            .field("environment_keys", &self.environment.keys())
+            .field("cli_keys", &self.cli.keys())
+            .finish()
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("invalid configuration key `{key}`: {reason}")]
+    Invalid { key: String, reason: String },
+    #[error("could not parse TOML configuration: {0}")]
+    Toml(#[from] toml::de::Error),
+}
+
+impl ConfigError {
+    pub(super) fn invalid(key: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::Invalid {
+            key: key.into(),
+            reason: reason.into(),
+        }
+    }
+}
+
+impl Settings {
+    /// Loads, layers, parses, and validates all configuration sources.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when TOML cannot be parsed, a layered value is
+    /// invalid, a required secret is unavailable, or cross-field validation fails.
+    // The fixed public contract intentionally consumes `ConfigSources`.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn load(sources: ConfigSources) -> Result<Self, ConfigError> {
+        let raw = RawSettings::parse(&sources)?;
+        Self::validate(raw, &sources.environment)
+    }
+
+    fn validate(
+        raw: RawSettings,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Self, ConfigError> {
+        validate_storage_paths(&raw)?;
+        if raw.worker.concurrency == 0 {
+            return Err(ConfigError::invalid(
+                "worker.concurrency",
+                "must be greater than zero",
+            ));
+        }
+        let smtp_url = raw
+            .mail
+            .smtp_url
+            .as_deref()
+            .map(SmtpUrl::parse)
+            .transpose()?;
+        if smtp_url.is_none() && raw.auth.any_mail_flow_enabled() {
+            return Err(ConfigError::invalid(
+                "mail.smtp_url",
+                "is required when email verification, invitations, or password reset is enabled",
+            ));
+        }
+        let application_secrets = load_secret_ring(environment)?;
+        Ok(Self {
+            server: ServerSettings {
+                bind_address: raw.server.bind_address,
+                public_base_url: PublicUrl::parse(&raw.server.public_base_url)?,
+            },
+            database: DatabaseSettings {
+                url: secret_environment(environment, "FOLIOHARBOR_DATABASE_URL")?
+                    .or(raw.database.url)
+                    .map(secret_string),
+            },
+            storage: StorageSettings::from_raw(raw.storage)?,
+            auth: AuthSettings {
+                registration_enabled: raw.auth.registration_enabled,
+                email_verification_enabled: raw.auth.email_verification_enabled,
+                personal_library_enabled: raw.auth.personal_library_enabled,
+                reader_download_enabled: raw.auth.reader_download_enabled,
+                invitation_enabled: raw.auth.invitation_enabled,
+                password_reset_enabled: raw.auth.password_reset_enabled,
+                application_secrets,
+            },
+            mail: MailSettings {
+                smtp_url,
+                username: environment
+                    .get("FOLIOHARBOR_MAIL_USERNAME")
+                    .cloned()
+                    .map(secret_string),
+                password: secret_environment(environment, "FOLIOHARBOR_MAIL_PASSWORD")?
+                    .map(secret_string),
+            },
+            worker: WorkerSettings {
+                concurrency: raw.worker.concurrency,
+            },
+            observability: ObservabilitySettings {
+                log_filter: raw.observability.log_filter,
+            },
+        })
+    }
+}
+
+fn secret_string(value: String) -> SecretString {
+    SecretString::from(value.into_boxed_str())
+}
+
+fn validate_storage_paths(raw: &RawSettings) -> Result<(), ConfigError> {
+    let storage = &raw.storage;
+    for (key, path) in [
+        ("storage.root", &storage.root),
+        ("storage.staging_root", &storage.staging_root),
+    ] {
+        if !path.is_absolute() || path.parent().is_none() {
+            return Err(ConfigError::invalid(
+                key,
+                "must be an absolute path below the filesystem root",
+            ));
+        }
+    }
+    if storage.root == storage.staging_root {
+        return Err(ConfigError::invalid(
+            "storage.staging_root",
+            "must differ from storage.root",
+        ));
+    }
+    Ok(())
+}

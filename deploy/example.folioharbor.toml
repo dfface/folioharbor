@@ -1,0 +1,39 @@
+# Application secrets are intentionally absent. Supply these through the environment:
+# FOLIOHARBOR_AUTH_APPLICATION_SECRET_KEY_ID
+# FOLIOHARBOR_AUTH_APPLICATION_SECRET or FOLIOHARBOR_AUTH_APPLICATION_SECRET_FILE
+
+[server]
+bind_address = "0.0.0.0:8080"
+public_base_url = "https://library.example/"
+
+[database]
+# Prefer FOLIOHARBOR_DATABASE_URL in production so credentials do not enter this file.
+url = "postgres://folioharbor_api@localhost/folioharbor"
+
+[storage]
+root = "/var/lib/folioharbor/blobs"
+staging_root = "/var/lib/folioharbor/staging"
+library_quota_bytes = 5368709120
+upload_limit_bytes = 1073741824
+free_reserve_bytes = 1073741824
+dedup_scope = "instance"
+failed_retention_seconds = 86400
+gc_delay_seconds = 86400
+recovery_period_seconds = 604800
+
+[auth]
+registration_enabled = true
+email_verification_enabled = true
+personal_library_enabled = true
+reader_download_enabled = false
+invitation_enabled = true
+password_reset_enabled = true
+
+[mail]
+smtp_url = "smtp://mail.example:2525"
+
+[worker]
+concurrency = 1
+
+[observability]
+log_filter = "info"

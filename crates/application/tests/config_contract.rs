@@ -1,0 +1,212 @@
+#![allow(clippy::expect_used)]
+
+use std::collections::BTreeMap;
+use std::fs;
+
+use folioharbor_application::config::{ConfigSources, DedupScope, Settings};
+use folioharbor_application::ports::{Clock, RandomSource};
+use folioharbor_domain::time::OffsetDateTime;
+
+const GIB: u64 = 1024 * 1024 * 1024;
+
+fn minimum_environment() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "FOLIOHARBOR_AUTH_APPLICATION_SECRET".to_owned(),
+            "a-secret-value-with-at-least-32-bytes".to_owned(),
+        ),
+        (
+            "FOLIOHARBOR_AUTH_APPLICATION_SECRET_KEY_ID".to_owned(),
+            "primary-2026".to_owned(),
+        ),
+        (
+            "FOLIOHARBOR_MAIL_SMTP_URL".to_owned(),
+            "smtp://mail.example:2525".to_owned(),
+        ),
+    ])
+}
+
+#[test]
+fn approved_defaults_are_stable() {
+    let settings = Settings::load(ConfigSources {
+        environment: minimum_environment(),
+        ..ConfigSources::default()
+    })
+    .expect("valid minimum configuration");
+
+    assert!(settings.auth.registration_enabled);
+    assert!(settings.auth.email_verification_enabled);
+    assert!(settings.auth.personal_library_enabled);
+    assert!(!settings.auth.reader_download_enabled);
+    assert_eq!(settings.storage.library_quota.as_u64(), 5 * GIB);
+    assert_eq!(settings.storage.upload_limit.as_u64(), GIB);
+    assert_eq!(settings.storage.free_reserve.as_u64(), GIB);
+    assert_eq!(settings.storage.dedup_scope, DedupScope::Instance);
+    assert_eq!(settings.storage.failed_retention.as_seconds(), 24 * 60 * 60);
+    assert_eq!(settings.storage.gc_delay.as_seconds(), 24 * 60 * 60);
+    assert_eq!(
+        settings.storage.recovery_period.as_seconds(),
+        7 * 24 * 60 * 60
+    );
+}
+
+#[test]
+fn environment_overrides_toml_and_cli_overrides_environment() {
+    let mut environment = minimum_environment();
+    environment.insert(
+        "FOLIOHARBOR_STORAGE_DEDUP_SCOPE".to_owned(),
+        "library".to_owned(),
+    );
+    let settings = Settings::load(ConfigSources {
+        toml: Some("[storage]\ndedup_scope = \"disabled\"\n".to_owned()),
+        environment,
+        cli: BTreeMap::from([("storage.dedup_scope".to_owned(), "instance".to_owned())]),
+    })
+    .expect("valid layered configuration");
+
+    assert_eq!(settings.storage.dedup_scope, DedupScope::Instance);
+}
+
+#[test]
+fn debug_output_redacts_secret_values() {
+    let sources = ConfigSources {
+        environment: minimum_environment(),
+        ..ConfigSources::default()
+    };
+
+    let debug = format!("{sources:?}");
+    assert!(!debug.contains("a-secret-value-with-at-least-32-bytes"));
+}
+
+#[test]
+fn application_secret_can_be_loaded_from_a_secret_file() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let secret_path = directory.path().join("application-secret");
+    fs::write(&secret_path, "a-file-secret-value-with-at-least-32-bytes\n")
+        .expect("write secret file");
+    let mut environment = minimum_environment();
+    environment.remove("FOLIOHARBOR_AUTH_APPLICATION_SECRET");
+    environment.insert(
+        "FOLIOHARBOR_AUTH_APPLICATION_SECRET_FILE".to_owned(),
+        secret_path.to_string_lossy().into_owned(),
+    );
+
+    let settings = Settings::load(ConfigSources {
+        environment,
+        ..ConfigSources::default()
+    })
+    .expect("valid file-injected secret");
+
+    assert_eq!(
+        settings.auth.application_secrets.current.key_id,
+        "primary-2026"
+    );
+}
+
+#[test]
+fn short_application_secrets_are_rejected_with_the_key_name() {
+    let mut environment = minimum_environment();
+    environment.insert(
+        "FOLIOHARBOR_AUTH_APPLICATION_SECRET".to_owned(),
+        "too-short".to_owned(),
+    );
+
+    let error = Settings::load(ConfigSources {
+        environment,
+        ..ConfigSources::default()
+    })
+    .expect_err("short secret must fail");
+
+    assert!(error.to_string().contains("auth.application_secret"));
+}
+
+#[test]
+fn enabled_mail_flows_require_smtp() {
+    let mut environment = minimum_environment();
+    environment.remove("FOLIOHARBOR_MAIL_SMTP_URL");
+
+    let error = Settings::load(ConfigSources {
+        environment,
+        ..ConfigSources::default()
+    })
+    .expect_err("enabled mail flows without SMTP must fail");
+
+    assert!(error.to_string().contains("mail.smtp_url"));
+}
+
+#[test]
+fn storage_paths_must_be_absolute_non_root_and_distinct() {
+    for (key, value) in [
+        ("storage.root", "relative"),
+        ("storage.root", "/"),
+        ("storage.staging_root", "/var/lib/folioharbor/blobs"),
+    ] {
+        let error = Settings::load(ConfigSources {
+            environment: minimum_environment(),
+            cli: BTreeMap::from([(key.to_owned(), value.to_owned())]),
+            ..ConfigSources::default()
+        })
+        .expect_err("invalid storage path must fail");
+
+        assert!(error.to_string().contains(key));
+    }
+}
+
+#[test]
+fn old_application_secrets_are_retained_for_decryption_only() {
+    let mut environment = minimum_environment();
+    environment.insert(
+        "FOLIOHARBOR_AUTH_OLD_APPLICATION_SECRETS".to_owned(),
+        "previous-2025=an-old-secret-value-with-at-least-32-bytes".to_owned(),
+    );
+
+    let settings = Settings::load(ConfigSources {
+        environment,
+        ..ConfigSources::default()
+    })
+    .expect("valid rotated secret ring");
+
+    assert_eq!(settings.auth.application_secrets.old.len(), 1);
+    assert_eq!(
+        settings.auth.application_secrets.old[0].key_id,
+        "previous-2025"
+    );
+    assert_eq!(
+        settings.auth.application_secrets.current.key_id,
+        "primary-2026"
+    );
+}
+
+#[test]
+fn deployment_example_is_valid_when_runtime_secrets_are_injected() {
+    let settings = Settings::load(ConfigSources {
+        toml: Some(include_str!("../../../deploy/example.folioharbor.toml").to_owned()),
+        environment: minimum_environment(),
+        ..ConfigSources::default()
+    })
+    .expect("valid example configuration");
+
+    assert_eq!(settings.storage.dedup_scope, DedupScope::Instance);
+}
+
+#[test]
+fn clock_and_random_ports_have_transport_neutral_contracts() {
+    struct FixedClock;
+    impl Clock for FixedClock {
+        fn now(&self) -> OffsetDateTime {
+            OffsetDateTime::UNIX_EPOCH
+        }
+    }
+
+    struct FixedRandom;
+    impl RandomSource for FixedRandom {
+        fn fill(&self, destination: &mut [u8]) {
+            destination.fill(7);
+        }
+    }
+
+    let mut bytes = [0; 4];
+    FixedRandom.fill(&mut bytes);
+    assert_eq!(FixedClock.now(), OffsetDateTime::UNIX_EPOCH);
+    assert_eq!(bytes, [7; 4]);
+}

@@ -6,6 +6,7 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+time.workspace = true
 ulid.workspace = true
 uuid.workspace = true
 
