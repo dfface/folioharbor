@@ -6,6 +6,10 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+base64.workspace = true
+secrecy.workspace = true
+sha2.workspace = true
+subtle.workspace = true
 time.workspace = true
 ulid.workspace = true
 uuid.workspace = true

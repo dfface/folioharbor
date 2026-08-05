@@ -19,12 +19,17 @@ version = "0.1.0"
 
 [workspace.dependencies]
 anyhow = "1.0"
+argon2 = "0.5"
+async-trait = "0.1"
+base64 = "0.22"
 secrecy = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_path_to_error = "0.1"
 thiserror = "2.0"
 sqlx = { version = "0.8", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio", "time", "uuid"] }
+sha2 = "0.10"
+subtle = "2.6"
 time = { version = "0.3", features = ["serde"] }
 toml = "0.9"
 tokio = { version = "1.47", features = ["macros", "rt-multi-thread"] }

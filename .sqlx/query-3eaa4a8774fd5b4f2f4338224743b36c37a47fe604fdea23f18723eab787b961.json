@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT folioharbor.identity_create_session($1, $2, $3, $4, $5, $6, $7)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "identity_create_session",
+        "type_info": "Void"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Bytea",
+        "Bytea",
+        "Timestamptz",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "3eaa4a8774fd5b4f2f4338224743b36c37a47fe604fdea23f18723eab787b961"
+}

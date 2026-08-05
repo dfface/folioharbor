@@ -6,16 +6,20 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 folioharbor-application = { path = "../application", version = "0.1.0" }
 folioharbor-domain = { path = "../domain", version = "0.1.0" }
 secrecy.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
 folioharbor-test-support = { path = "../test-support", version = "0.1.0" }
 tokio.workspace = true
+secrecy.workspace = true
+time.workspace = true
 uuid.workspace = true
 
 [lints]
