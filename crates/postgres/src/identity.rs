@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use folioharbor_application::ports::{
     IdentityRepository, IdentityRepositoryError, LoginIdentity, NewAccount, NewSession,
-    RegisterOutcome, SessionPrincipal,
+    RegisterOutcome, SessionPrincipal, SessionRecord,
 };
 use folioharbor_domain::{
     id::{SessionId, UserId},
@@ -31,6 +31,7 @@ const fn revocation_reason_value(reason: SessionRevocationReason) -> &'static st
     match reason {
         SessionRevocationReason::Logout => "logout",
         SessionRevocationReason::PasswordReset => "password_reset",
+        SessionRevocationReason::UserRevoked => "user_revoked",
     }
 }
 
@@ -128,7 +129,7 @@ impl IdentityRepository for PgIdentityRepository {
         new_idle_expires_at: OffsetDateTime,
     ) -> Result<Option<SessionPrincipal>, IdentityRepositoryError> {
         let row = sqlx::query!(
-            r#"SELECT user_id AS "user_id!", session_id AS "session_id!" FROM folioharbor.identity_authenticate_session($1, $2, $3)"#,
+            r#"SELECT user_id AS "user_id!", session_id AS "session_id!", csrf_token_hash AS "csrf_token_hash!" FROM folioharbor.identity_authenticate_session($1, $2, $3)"#,
             token_hash.as_bytes().as_slice(), now, new_idle_expires_at,
         )
         .fetch_optional(&self.pool)
@@ -137,6 +138,11 @@ impl IdentityRepository for PgIdentityRepository {
         Ok(row.map(|row| SessionPrincipal {
             user_id: UserId::from_uuid(row.user_id),
             session_id: SessionId::from_uuid(row.session_id),
+            csrf_token_hash: {
+                let mut bytes = [0_u8; 32];
+                bytes.copy_from_slice(&row.csrf_token_hash);
+                TokenHash::from_bytes(bytes)
+            },
         }))
     }
 
@@ -197,5 +203,34 @@ impl IdentityRepository for PgIdentityRepository {
         .map_err(persistence_error)?;
         tx.commit().await.map_err(persistence_error)?;
         Ok(user_id.map(UserId::from_uuid))
+    }
+
+    async fn list_user_sessions(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<SessionRecord>, IdentityRepositoryError> {
+        let rows = sqlx::query!(r#"SELECT session_id AS "session_id!", created_at AS "created_at!", last_seen_at AS "last_seen_at!", idle_expires_at AS "idle_expires_at!", absolute_expires_at AS "absolute_expires_at!", revoked_at FROM folioharbor.user_sessions WHERE user_id = $1 ORDER BY created_at DESC"#, user_id.as_uuid()).fetch_all(&self.pool).await.map_err(persistence_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| SessionRecord {
+                session_id: SessionId::from_uuid(row.session_id),
+                created_at: row.created_at,
+                last_seen_at: row.last_seen_at,
+                idle_expires_at: row.idle_expires_at,
+                absolute_expires_at: row.absolute_expires_at,
+                revoked_at: row.revoked_at,
+            })
+            .collect())
+    }
+
+    async fn revoke_user_session(
+        &self,
+        user_id: UserId,
+        session_id: SessionId,
+        now: OffsetDateTime,
+        reason: SessionRevocationReason,
+    ) -> Result<bool, IdentityRepositoryError> {
+        let result = sqlx::query!("UPDATE folioharbor.user_sessions SET revoked_at = $3, revocation_reason = $4, version = version + 1 WHERE user_id = $1 AND session_id = $2 AND revoked_at IS NULL", user_id.as_uuid(), session_id.as_uuid(), now, revocation_reason_value(reason)).execute(&self.pool).await.map_err(persistence_error)?;
+        Ok(result.rows_affected() == 1)
     }
 }

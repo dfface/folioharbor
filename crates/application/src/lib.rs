@@ -5,3 +5,4 @@ pub mod config;
 pub mod error;
 pub mod identity;
 pub mod ports;
+pub mod rate_limit;

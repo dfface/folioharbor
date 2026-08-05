@@ -1,3 +1,7 @@
+use axum::{
+    http::{Extensions, HeaderValue, StatusCode, header::CONTENT_TYPE},
+    response::{IntoResponse, Response},
+};
 use folioharbor_application::error::{AppError, FieldViolation};
 use folioharbor_domain::id::RequestId;
 use serde::Serialize;
@@ -212,4 +216,33 @@ impl ProblemMapping {
             detail,
         }
     }
+}
+
+#[must_use]
+pub fn response(error: &AppError, context: &ProblemContext) -> Response {
+    let problem = ProblemDetails::from_app_error(error, context);
+    let status = StatusCode::from_u16(problem.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut response = (status, axum::Json(problem)).into_response();
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(PROBLEM_CONTENT_TYPE));
+    if let AppError::RateLimited { retry_after } = error {
+        if let Ok(value) = HeaderValue::from_str(&retry_after.as_secs().max(1).to_string()) {
+            response.headers_mut().insert("Retry-After", value);
+        }
+    }
+    response
+}
+
+#[must_use]
+pub fn response_from_extensions(
+    extensions: &Extensions,
+    public_base_url: &Url,
+    error: &AppError,
+) -> Response {
+    let request_id = extensions
+        .get::<RequestId>()
+        .copied()
+        .unwrap_or_else(RequestId::new);
+    response(error, &ProblemContext::new(public_base_url, request_id))
 }

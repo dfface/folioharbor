@@ -19,6 +19,7 @@ pub enum SessionStatus {
 pub enum SessionRevocationReason {
     Logout,
     PasswordReset,
+    UserRevoked,
 }
 
 impl SessionStatus {

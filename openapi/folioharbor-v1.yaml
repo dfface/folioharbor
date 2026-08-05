@@ -1,0 +1,104 @@
+openapi: 3.1.0
+info: {title: FolioHarbor API, version: 0.1.0}
+paths:
+  /api/v1/auth/register:
+    post:
+      operationId: register
+      requestBody: {$ref: '#/components/requestBodies/Credentials'}
+      responses:
+        '202': {description: Registration accepted}
+        '422': {$ref: '#/components/responses/Problem'}
+        '429': {$ref: '#/components/responses/Problem'}
+  /api/v1/auth/verify-email:
+    post:
+      operationId: verifyEmail
+      responses:
+        '204': {description: Verified}
+        '422': {$ref: '#/components/responses/Problem'}
+        '429': {$ref: '#/components/responses/Problem'}
+  /api/v1/auth/login:
+    post:
+      operationId: login
+      requestBody: {$ref: '#/components/requestBodies/Credentials'}
+      responses:
+        '200': {description: Session cookie issued, headers: {Set-Cookie: {schema: {type: string}}}}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '429': {$ref: '#/components/responses/Problem'}
+  /api/v1/auth/logout:
+    post:
+      operationId: logout
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: '#/components/parameters/CsrfToken'}]
+      responses:
+        '204': {description: Logged out}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+  /api/v1/auth/forgot-password:
+    post:
+      operationId: forgotPassword
+      responses:
+        '202': {description: Request accepted whether or not the account exists}
+        '429': {$ref: '#/components/responses/Problem'}
+  /api/v1/auth/reset-password:
+    post:
+      operationId: resetPassword
+      responses:
+        '204': {description: Password changed and sessions revoked}
+        '422': {$ref: '#/components/responses/Problem'}
+        '429': {$ref: '#/components/responses/Problem'}
+  /api/v1/auth/session:
+    get:
+      operationId: currentSession
+      security: [{cookieAuth: []}]
+      responses:
+        '200': {description: Current session, content: {application/json: {schema: {$ref: '#/components/schemas/Session'}}}}
+        '401': {$ref: '#/components/responses/Problem'}
+  /api/v1/auth/sessions:
+    get:
+      operationId: listSessions
+      security: [{cookieAuth: []}]
+      responses:
+        '200': {description: Safe session metadata, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Session'}}}}}
+        '401': {$ref: '#/components/responses/Problem'}
+  /api/v1/auth/sessions/{session_id}/revoke:
+    post:
+      operationId: revokeSession
+      security: [{cookieAuth: []}]
+      parameters:
+        - {name: session_id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {$ref: '#/components/parameters/CsrfToken'}
+      responses:
+        '204': {description: Session revoked}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+components:
+  securitySchemes:
+    cookieAuth: {type: apiKey, in: cookie, name: folioharbor_session}
+  parameters:
+    CsrfToken: {name: X-CSRF-Token, in: header, required: true, schema: {type: string}, description: Opaque session-bound CSRF token for unsafe authenticated requests}
+  requestBodies:
+    Credentials:
+      required: true
+      content: {application/json: {schema: {type: object, required: [email, password], properties: {email: {type: string, format: email}, password: {type: string, format: password}}}}}
+  responses:
+    Problem:
+      description: RFC 9457 problem
+      content: {application/problem+json: {schema: {$ref: '#/components/schemas/ProblemDetails'}}}
+  schemas:
+    Session:
+      type: object
+      required: [session_id, is_current, status]
+      properties: {session_id: {type: string, format: uuid}, is_current: {type: boolean}, status: {type: string, enum: [active, idle_expired, absolute_expired, revoked]}}
+    ProblemDetails:
+      type: object
+      required: [type, title, status, detail, instance, code, request_id]
+      properties:
+        type: {type: string, format: uri}
+        title: {type: string}
+        status: {type: integer}
+        detail: {type: string}
+        instance: {type: string}
+        code: {type: string, examples: [unauthenticated, csrf_failed, rate_limited, session_not_found]}
+        request_id: {type: string, description: ULID request identifier}

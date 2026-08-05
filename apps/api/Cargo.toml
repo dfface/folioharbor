@@ -7,6 +7,15 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+folioharbor-application = { path = "../../crates/application", version = "0.1.0" }
+folioharbor-domain = { path = "../../crates/domain", version = "0.1.0" }
+folioharbor-http = { path = "../../crates/http", version = "0.1.0" }
+folioharbor-postgres = { path = "../../crates/postgres", version = "0.1.0" }
+getrandom.workspace = true
+secrecy.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

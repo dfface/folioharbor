@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT user_id AS \"user_id!\", session_id AS \"session_id!\" FROM folioharbor.identity_authenticate_session($1, $2, $3)",
+  "query": "SELECT user_id AS \"user_id!\", session_id AS \"session_id!\", csrf_token_hash AS \"csrf_token_hash!\" FROM folioharbor.identity_authenticate_session($1, $2, $3)",
   "describe": {
     "columns": [
       {
@@ -12,6 +12,11 @@
         "ordinal": 1,
         "name": "session_id!",
         "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "csrf_token_hash!",
+        "type_info": "Bytea"
       }
     ],
     "parameters": {
@@ -23,8 +28,9 @@
     },
     "nullable": [
       null,
+      null,
       null
     ]
   },
-  "hash": "174b32841086d21f23fd1b17117295421f248c8fb01364b8b64382eb8e4bb924"
+  "hash": "e918075c2f42862675c28c76cf5ac3ff3033adf1d3b7e9d7c8ec25252785463b"
 }

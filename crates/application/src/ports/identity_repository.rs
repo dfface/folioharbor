@@ -49,6 +49,17 @@ pub struct NewSession {
 pub struct SessionPrincipal {
     pub user_id: UserId,
     pub session_id: SessionId,
+    pub csrf_token_hash: TokenHash,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SessionRecord {
+    pub session_id: SessionId,
+    pub created_at: OffsetDateTime,
+    pub last_seen_at: OffsetDateTime,
+    pub idle_expires_at: OffsetDateTime,
+    pub absolute_expires_at: OffsetDateTime,
+    pub revoked_at: Option<OffsetDateTime>,
 }
 
 #[async_trait]
@@ -106,4 +117,21 @@ pub trait IdentityRepository: Send + Sync {
         password_hash: String,
         now: OffsetDateTime,
     ) -> Result<Option<UserId>, IdentityRepositoryError>;
+
+    async fn list_user_sessions(
+        &self,
+        _user_id: UserId,
+    ) -> Result<Vec<SessionRecord>, IdentityRepositoryError> {
+        Err(IdentityRepositoryError)
+    }
+
+    async fn revoke_user_session(
+        &self,
+        _user_id: UserId,
+        _session_id: SessionId,
+        _now: OffsetDateTime,
+        _reason: SessionRevocationReason,
+    ) -> Result<bool, IdentityRepositoryError> {
+        Err(IdentityRepositoryError)
+    }
 }

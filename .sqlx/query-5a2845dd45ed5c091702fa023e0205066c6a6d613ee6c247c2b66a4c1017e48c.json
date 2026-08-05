@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE folioharbor.user_sessions SET revoked_at = $3, revocation_reason = $4, version = version + 1 WHERE user_id = $1 AND session_id = $2 AND revoked_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5a2845dd45ed5c091702fa023e0205066c6a6d613ee6c247c2b66a4c1017e48c"
+}

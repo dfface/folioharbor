@@ -6,11 +6,25 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+axum.workspace = true
 folioharbor-application = { path = "../application", version = "0.1.0" }
 folioharbor-domain = { path = "../domain", version = "0.1.0" }
+http.workspace = true
+secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+subtle.workspace = true
+time.workspace = true
 url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tokio.workspace = true
+tower.workspace = true
+uuid.workspace = true
+serde_yaml = "0.9"
 
 [lints]
 workspace = true

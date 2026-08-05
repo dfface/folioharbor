@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO folioharbor.auth_rate_limit_buckets (bucket_key, purpose, tokens, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT (bucket_key) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Text",
+        "Float8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1bbfc12bba43e871cae360c8d959661e79f8d1a1e8737b7af3b8b2b45f44293b"
+}
