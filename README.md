@@ -2,7 +2,7 @@
 
 FolioHarbor（中文名：书港）是一个面向个人、家庭和小型团队的开源私人数字图书馆。
 
-项目当前处于需求分析与标准化设计阶段，尚未进入代码实现。现阶段的目标是先建立稳定、可迁移、可互操作的产品与数据模型，再据此制定实施计划。
+项目当前处于首个 EPUB 端到端切片的实现阶段。需求、决策和标准化设计仍然是实现的约束来源。
 
 ## 当前方向
 
@@ -18,6 +18,13 @@ FolioHarbor（中文名：书港）是一个面向个人、家庭和小型团队
 
 请从 [设计文档索引](docs/README.md) 开始阅读。
 
-## 状态说明
+## Rust 工作区
 
-在正式设计规格通过审阅前，本仓库不会生成业务代码、数据库迁移或部署脚手架。
+工作区固定使用 Rust 1.88.0。提交前运行：
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+cargo deny check
+```
