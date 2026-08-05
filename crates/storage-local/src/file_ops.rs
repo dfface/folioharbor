@@ -1,4 +1,4 @@
-use std::ffi::OsStr;
+use std::{ffi::OsStr, io::Read};
 
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, File, OpenOptions};
@@ -14,6 +14,21 @@ pub(crate) fn verify_file(file: &mut File, identity: &BlobIdentity) -> Result<()
         return Err(BlobStoreError::IdentityMismatch);
     }
     Ok(())
+}
+
+pub(crate) fn read_up_to(reader: &mut impl Read, length: usize) -> Result<Vec<u8>, std::io::Error> {
+    let mut output = vec![0; length];
+    let mut count = 0;
+    while count < length {
+        match reader.read(&mut output[count..]) {
+            Ok(0) => break,
+            Ok(read) => count += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    output.truncate(count);
+    Ok(output)
 }
 
 pub(crate) fn open_optional(directory: &Dir, name: &OsStr) -> Result<Option<File>, BlobStoreError> {
