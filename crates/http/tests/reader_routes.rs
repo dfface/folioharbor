@@ -54,6 +54,7 @@ use std::{
     collections::HashMap,
     io::{Cursor, Write},
     sync::Arc,
+    time::Duration,
 };
 use tower::ServiceExt as _;
 use url::Url;
@@ -254,10 +255,13 @@ impl ProgressApi for Reader {
         manifestation_id: ManifestationId,
         _: RequestId,
     ) -> Result<Option<ReadingProgress>, AppError> {
-        if actor != self.allowed || manifestation_id != self.manifestation {
+        if actor != self.allowed {
             return Err(AppError::NotFound {
                 code: "manifestation_not_found",
             });
+        }
+        if manifestation_id != self.manifestation {
+            return Ok(None);
         }
         Ok(Some(ReadingProgress {
             manifestation_id,
@@ -277,6 +281,11 @@ impl ProgressApi for Reader {
                 code: "progress_mutation_mismatch",
             });
         }
+        if command.locator.locations().progression() == Some(0.88) {
+            return Err(AppError::RateLimited {
+                retry_after: Duration::from_secs(17),
+            });
+        }
         let global = ReadingProgress {
             manifestation_id: command.manifestation_id,
             package_id: None,
@@ -290,6 +299,9 @@ impl ProgressApi for Reader {
             locator: command.locator,
             updated_at: OffsetDateTime::UNIX_EPOCH,
         };
+        if device.locator.locations().progression() == Some(0.66) {
+            return Ok(ReadingUpdateOutcome::Updated { global, device });
+        }
         Ok(ReadingUpdateOutcome::Conflict {
             global: (command.base_version != 9).then_some(global),
             device,
@@ -351,6 +363,13 @@ async fn progress_routes_return_etag_and_correlated_safe_conflict_positions() {
         response.headers().get(ETAG).and_then(|v| v.to_str().ok()),
         Some("\"progress-v3\"")
     );
+    assert_eq!(
+        response
+            .headers()
+            .get(CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("private, no-store")
+    );
 
     let body = serde_json::json!({
         "deviceId":DeviceId::new().as_uuid().to_string(),"clientMutationId":Uuid::now_v7().to_string(),"baseVersion":2,
@@ -374,6 +393,13 @@ async fn progress_routes_return_etag_and_correlated_safe_conflict_positions() {
         response.headers().get(ETAG).and_then(|v| v.to_str().ok()),
         Some("\"progress-v3\"")
     );
+    assert_eq!(
+        response
+            .headers()
+            .get(CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("private, no-store")
+    );
     let body: serde_json::Value = serde_json::from_slice(
         &response
             .into_body()
@@ -396,6 +422,62 @@ async fn progress_routes_return_etag_and_correlated_safe_conflict_positions() {
     assert_eq!(body["global"]["locator"]["locations"]["progression"], 0.4);
     assert_eq!(body["device"]["locator"]["locations"]["progression"], 0.9);
     assert!(body.get("userId").is_none());
+}
+
+#[tokio::test]
+async fn progress_empty_and_success_responses_are_private_and_not_stored() {
+    let (app, _, manifestation) = app();
+    let empty = app
+        .clone()
+        .oneshot(request(
+            &format!(
+                "/api/v1/manifestations/{}/progress",
+                ManifestationId::new().as_uuid()
+            ),
+            "allowed",
+        ))
+        .await
+        .expect("response");
+    assert_eq!(empty.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        empty
+            .headers()
+            .get(CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("private, no-store")
+    );
+
+    let body = serde_json::json!({
+        "deviceId":DeviceId::new().as_uuid().to_string(),
+        "clientMutationId":Uuid::now_v7().to_string(),
+        "baseVersion":2,
+        "locator":{"href":"OPS/chapter.xhtml","locations":{"progression":0.66},"extensions":{"version":1,"values":{}}}
+    });
+    let updated = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/api/v1/manifestations/{}/progress",
+                    manifestation.as_uuid()
+                ))
+                .header("Cookie", "folioharbor_session=allowed")
+                .header("X-CSRF-Token", "reader-csrf")
+                .header("If-Match", "\"progress-v2\"")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(updated.status(), StatusCode::OK);
+    assert_eq!(
+        updated
+            .headers()
+            .get(CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("private, no-store")
+    );
 }
 
 #[tokio::test]
@@ -528,6 +610,62 @@ async fn progress_mutation_mismatch_returns_only_correlated_problem_details() {
     assert!(body.get("global").is_none());
     assert!(body.get("device").is_none());
     assert!(!body.to_string().contains("OPS/chapter.xhtml"));
+}
+
+#[tokio::test]
+async fn progress_mutation_capacity_is_correlated_private_and_retryable() {
+    let (app, _, manifestation) = app();
+    let body = serde_json::json!({
+        "deviceId":DeviceId::new().as_uuid().to_string(),
+        "clientMutationId":Uuid::now_v7().to_string(),
+        "baseVersion":2,
+        "locator":{"href":"OPS/chapter.xhtml","locations":{"progression":0.88},"extensions":{"version":1,"values":{}}}
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/api/v1/manifestations/{}/progress",
+                    manifestation.as_uuid()
+                ))
+                .header("Cookie", "folioharbor_session=allowed")
+                .header("X-CSRF-Token", "reader-csrf")
+                .header("If-Match", "\"progress-v2\"")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response
+            .headers()
+            .get("Retry-After")
+            .and_then(|value| value.to_str().ok()),
+        Some("17")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("private, no-store")
+    );
+    let body: serde_json::Value = serde_json::from_slice(
+        &response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes(),
+    )
+    .expect("json");
+    assert_eq!(body["code"], "rate_limited");
+    assert!(body["instance"].as_str().is_some());
+    assert!(body.get("global").is_none());
+    assert!(body.get("device").is_none());
 }
 
 fn request(uri: &str, actor: &str) -> Request<Body> {

@@ -5,7 +5,7 @@ use axum::{
     extract::{Extension, Path, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
-        header::{ETAG, IF_MATCH},
+        header::{CACHE_CONTROL, ETAG, IF_MATCH},
     },
     response::{IntoResponse, Response},
     routing::get,
@@ -158,7 +158,7 @@ async fn get_progress(
 ) -> Response {
     let manifestation = match parse_manifestation(&raw) {
         Ok(v) => v,
-        Err(e) => return problem_response(&e, &context),
+        Err(e) => return private_no_store(problem_response(&e, &context)),
     };
     match state
         .progress_api
@@ -167,7 +167,7 @@ async fn get_progress(
     {
         Ok(Some(progress)) => state_response(progress),
         Ok(None) => with_etag(StatusCode::NO_CONTENT.into_response(), 0),
-        Err(error) => problem_response(&error, &context),
+        Err(error) => private_no_store(problem_response(&error, &context)),
     }
 }
 async fn put_progress(
@@ -181,22 +181,25 @@ async fn put_progress(
 ) -> Response {
     let manifestation = match parse_manifestation(&raw) {
         Ok(v) => v,
-        Err(e) => return problem_response(&e, &context),
+        Err(e) => return private_no_store(problem_response(&e, &context)),
     };
     let header_version = match parse_if_match(&headers) {
         Ok(v) => v,
-        Err(e) => return problem_response(&e, &context),
+        Err(e) => return private_no_store(problem_response(&e, &context)),
     };
     if header_version != body.base_version {
-        return problem_response(&invalid("base_version", "if_match_mismatch"), &context);
+        return private_no_store(problem_response(
+            &invalid("base_version", "if_match_mismatch"),
+            &context,
+        ));
     }
     let device_id = match parse_uuid(&body.device_id, "device_id") {
         Ok(v) => DeviceId::from_uuid(v),
-        Err(e) => return problem_response(&e, &context),
+        Err(e) => return private_no_store(problem_response(&e, &context)),
     };
     let client_mutation_id = match parse_uuid(&body.client_mutation_id, "client_mutation_id") {
         Ok(v) => v,
-        Err(e) => return problem_response(&e, &context),
+        Err(e) => return private_no_store(problem_response(&e, &context)),
     };
     let package_id = match body
         .package_id
@@ -205,7 +208,7 @@ async fn put_progress(
         .transpose()
     {
         Ok(v) => v.map(PublicationPackageId::from_uuid),
-        Err(e) => return problem_response(&e, &context),
+        Err(e) => return private_no_store(problem_response(&e, &context)),
     };
     let content_unit_id = match body
         .content_unit_id
@@ -214,11 +217,11 @@ async fn put_progress(
         .transpose()
     {
         Ok(v) => v.map(ContentUnitId::from_uuid),
-        Err(e) => return problem_response(&e, &context),
+        Err(e) => return private_no_store(problem_response(&e, &context)),
     };
     let locator = match body.locator.try_into() {
         Ok(v) => v,
-        Err(e) => return problem_response(&e, &context),
+        Err(e) => return private_no_store(problem_response(&e, &context)),
     };
     let command = UpdateReadingProgressCommand {
         actor: actor.user_id,
@@ -245,7 +248,7 @@ async fn put_progress(
                 version,
             )
         }
-        Err(error) => problem_response(&error, &context),
+        Err(error) => private_no_store(problem_response(&error, &context)),
     }
 }
 fn state_response(progress: ReadingProgress) -> Response {
@@ -259,6 +262,12 @@ fn with_etag(mut response: Response, version: u64) -> Response {
     if let Ok(value) = HeaderValue::from_str(&format!("\"progress-v{version}\"")) {
         response.headers_mut().insert(ETAG, value);
     }
+    private_no_store(response)
+}
+fn private_no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
     response
 }
 fn parse_if_match(headers: &HeaderMap) -> Result<u64, AppError> {

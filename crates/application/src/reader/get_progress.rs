@@ -44,6 +44,9 @@ pub(crate) fn map_error(error: ReadingRepositoryError) -> AppError {
         ReadingRepositoryError::MutationMismatch => AppError::Conflict {
             code: "progress_mutation_mismatch",
         },
+        ReadingRepositoryError::MutationCapacity { retry_after } => {
+            AppError::RateLimited { retry_after }
+        }
         ReadingRepositoryError::Persistence => AppError::DependencyUnavailable {
             code: "reading_repository_unavailable",
         },

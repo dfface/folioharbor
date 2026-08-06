@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use folioharbor_application::ports::{
@@ -18,6 +19,10 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::{DatabaseContext, PgTransactionContext};
+
+const MUTATION_RETENTION_DAYS: i64 = 30;
+const MUTATION_MAX_ROWS_PER_USER: i64 = 10_000;
+const MUTATION_MAX_BYTES_PER_USER: i64 = 64 * 1_024 * 1_024;
 
 #[derive(Clone)]
 pub struct PgReadingRepository {
@@ -67,38 +72,23 @@ impl ReadingRepository for PgReadingRepository {
         .await
         .map_err(persistence)?;
         require_readable(&mut tx, command.actor, command.manifestation_id).await?;
-        advisory_lock(
-            &mut tx,
-            format!(
-                "progress:mutation:{}:{}",
-                command.actor.as_uuid(),
-                command.client_mutation_id
-            ),
-        )
-        .await?;
-        advisory_lock(
-            &mut tx,
-            format!(
-                "progress:state:{}:{}",
-                command.actor.as_uuid(),
-                command.manifestation_id.as_uuid()
-            ),
-        )
-        .await?;
+        lock_progress_update(&mut tx, &command).await?;
 
         require_active_device(&mut tx, command.actor, command.device_id).await?;
+        let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(persistence)?;
+        prune_expired_mutations(&mut tx, command.actor, now).await?;
         let fingerprint = command_fingerprint(&command);
         if let Some(outcome) = replay(&mut tx, &command, &fingerprint).await? {
             tx.commit().await.map_err(persistence)?;
             return Ok(outcome);
         }
+        ensure_row_capacity(&mut tx, command.actor, now).await?;
 
         let existing = sqlx::query("SELECT package_id,content_unit_id,locator,version,updated_at FROM folioharbor.reading_states WHERE user_id=$1 AND manifestation_id=$2 FOR UPDATE")
             .bind(command.actor.as_uuid()).bind(command.manifestation_id.as_uuid()).fetch_optional(&mut *tx).await.map_err(persistence)?;
-        let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(persistence)?;
         let locator_json = locator_to_json(&command.locator);
         sqlx::query("INSERT INTO folioharbor.device_reading_states(user_id,device_id,manifestation_id,locator,updated_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(user_id,device_id,manifestation_id) DO UPDATE SET locator=EXCLUDED.locator,updated_at=EXCLUDED.updated_at")
             .bind(command.actor.as_uuid()).bind(command.device_id.as_uuid()).bind(command.manifestation_id.as_uuid()).bind(&locator_json).bind(now).execute(&mut *tx).await.map_err(persistence)?;
@@ -149,7 +139,7 @@ impl ReadingRepository for PgReadingRepository {
             (None, false)
         };
         let outcome = update_outcome(global.as_ref(), &device, updated);
-        store_mutation(
+        let mutation_bytes = store_mutation(
             &mut tx,
             &command,
             &fingerprint,
@@ -158,6 +148,11 @@ impl ReadingRepository for PgReadingRepository {
             updated,
         )
         .await?;
+        if !reserve_mutation_usage(&mut tx, command.actor, mutation_bytes, now).await? {
+            let error = capacity_error(&mut tx, command.actor, now).await?;
+            tx.rollback().await.map_err(persistence)?;
+            return Err(error);
+        }
         tx.commit().await.map_err(persistence)?;
         Ok(outcome)
     }
@@ -208,13 +203,79 @@ async fn store_mutation(
     global: Option<&ReadingProgress>,
     device: &DeviceReadingState,
     updated: bool,
-) -> Result<(), ReadingRepositoryError> {
+) -> Result<i64, ReadingRepositoryError> {
     let version = global.map_or(Ok(0), |state| {
         i64::try_from(state.version).map_err(|_| ReadingRepositoryError::Persistence)
     })?;
     sqlx::query("INSERT INTO folioharbor.reading_mutations(user_id,client_mutation_id,manifestation_id,device_id,outcome,global_package_id,global_content_unit_id,global_locator,global_version,global_updated_at,device_locator,device_updated_at,request_fingerprint) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)")
         .bind(command.actor.as_uuid()).bind(command.client_mutation_id).bind(command.manifestation_id.as_uuid()).bind(command.device_id.as_uuid()).bind(if updated { "updated" } else { "conflict" }).bind(global.and_then(|state|state.package_id.map(PublicationPackageId::as_uuid))).bind(global.and_then(|state|state.content_unit_id.map(ContentUnitId::as_uuid))).bind(global.map(|state|locator_to_json(&state.locator))).bind(version).bind(global.map(|state|state.updated_at)).bind(locator_to_json(&device.locator)).bind(device.updated_at).bind(fingerprint.as_slice()).execute(&mut **tx).await.map_err(persistence)?;
+    sqlx::query_scalar("SELECT (pg_column_size(mutation)+COALESCE(pg_column_size(global_locator),0)+pg_column_size(device_locator))::bigint FROM folioharbor.reading_mutations mutation WHERE user_id=$1 AND client_mutation_id=$2")
+        .bind(command.actor.as_uuid()).bind(command.client_mutation_id).fetch_one(&mut **tx).await.map_err(persistence)
+}
+
+async fn prune_expired_mutations(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    actor: UserId,
+    now: OffsetDateTime,
+) -> Result<(), ReadingRepositoryError> {
+    sqlx::query("INSERT INTO folioharbor.reading_mutation_usage(user_id,live_count,live_bytes,updated_at) VALUES($1,0,0,$2) ON CONFLICT(user_id) DO NOTHING")
+        .bind(actor.as_uuid()).bind(now).execute(&mut **tx).await.map_err(persistence)?;
+    let cutoff = now - time::Duration::days(MUTATION_RETENTION_DAYS);
+    sqlx::query("WITH deleted AS (DELETE FROM folioharbor.reading_mutations AS mutation WHERE user_id=$1 AND created_at<$2 RETURNING (pg_column_size(mutation)+COALESCE(pg_column_size(global_locator),0)+pg_column_size(device_locator))::bigint AS bytes), removed AS (SELECT count(*)::bigint AS count,COALESCE(sum(bytes),0)::bigint AS bytes FROM deleted) UPDATE folioharbor.reading_mutation_usage usage SET live_count=usage.live_count-removed.count,live_bytes=usage.live_bytes-removed.bytes,updated_at=$3 FROM removed WHERE usage.user_id=$1")
+        .bind(actor.as_uuid()).bind(cutoff).bind(now).execute(&mut **tx).await.map_err(persistence)?;
     Ok(())
+}
+
+async fn ensure_row_capacity(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    actor: UserId,
+    now: OffsetDateTime,
+) -> Result<(), ReadingRepositoryError> {
+    let usage: (i64, i64) = sqlx::query_as(
+        "SELECT live_count,live_bytes FROM folioharbor.reading_mutation_usage WHERE user_id=$1",
+    )
+    .bind(actor.as_uuid())
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(persistence)?;
+    if usage.0 >= MUTATION_MAX_ROWS_PER_USER || usage.1 >= MUTATION_MAX_BYTES_PER_USER {
+        Err(capacity_error(tx, actor, now).await?)
+    } else {
+        Ok(())
+    }
+}
+
+async fn reserve_mutation_usage(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    actor: UserId,
+    mutation_bytes: i64,
+    now: OffsetDateTime,
+) -> Result<bool, ReadingRepositoryError> {
+    let reserved = sqlx::query_scalar::<_, i64>("UPDATE folioharbor.reading_mutation_usage SET live_count=live_count+1,live_bytes=live_bytes+$2,updated_at=$3 WHERE user_id=$1 AND live_count<$4 AND live_bytes<=$5-$2 RETURNING live_count")
+        .bind(actor.as_uuid()).bind(mutation_bytes).bind(now).bind(MUTATION_MAX_ROWS_PER_USER).bind(MUTATION_MAX_BYTES_PER_USER).fetch_optional(&mut **tx).await.map_err(persistence)?;
+    Ok(reserved.is_some())
+}
+
+async fn capacity_error(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    actor: UserId,
+    now: OffsetDateTime,
+) -> Result<ReadingRepositoryError, ReadingRepositoryError> {
+    let oldest: Option<OffsetDateTime> = sqlx::query_scalar(
+        "SELECT min(created_at) FROM folioharbor.reading_mutations WHERE user_id=$1",
+    )
+    .bind(actor.as_uuid())
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(persistence)?;
+    let seconds = oldest.map_or(1, |created_at| {
+        (created_at + time::Duration::days(MUTATION_RETENTION_DAYS) - now)
+            .whole_seconds()
+            .max(1)
+    });
+    Ok(ReadingRepositoryError::MutationCapacity {
+        retry_after: Duration::from_secs(u64::try_from(seconds).unwrap_or(1)),
+    })
 }
 
 async fn require_readable(
@@ -244,6 +305,27 @@ async fn advisory_lock(
         .execute(&mut **tx)
         .await
         .map_err(persistence)?;
+    Ok(())
+}
+async fn lock_progress_update(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    command: &UpdateProgressRecord,
+) -> Result<(), ReadingRepositoryError> {
+    for key in [
+        format!("progress:mutation-capacity:{}", command.actor.as_uuid()),
+        format!(
+            "progress:mutation:{}:{}",
+            command.actor.as_uuid(),
+            command.client_mutation_id
+        ),
+        format!(
+            "progress:state:{}:{}",
+            command.actor.as_uuid(),
+            command.manifestation_id.as_uuid()
+        ),
+    ] {
+        advisory_lock(tx, key).await?;
+    }
     Ok(())
 }
 async fn replay(

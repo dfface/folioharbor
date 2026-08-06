@@ -13,6 +13,20 @@ fn progress_openapi_contract_exposes_versioned_etag_and_rfc9457_conflict() {
     let operation = &document["paths"]["/api/v1/manifestations/{manifestation_id}/progress"];
     assert_eq!(operation["get"]["operationId"], "getReadingProgress");
     assert_eq!(operation["put"]["operationId"], "updateReadingProgress");
+    for status in ["200", "204"] {
+        assert_eq!(
+            operation["get"]["responses"][status]["headers"]["Cache-Control"]["example"],
+            "private, no-store"
+        );
+    }
+    assert_eq!(
+        operation["put"]["responses"]["200"]["headers"]["Cache-Control"]["example"],
+        "private, no-store"
+    );
+    assert_eq!(
+        document["components"]["responses"]["ProgressConflict"]["headers"]["Cache-Control"]["example"],
+        "private, no-store"
+    );
     assert_eq!(operation["put"]["parameters"][2]["name"], "If-Match");
     assert!(
         operation["put"]["parameters"][2]["required"]
@@ -22,6 +36,16 @@ fn progress_openapi_contract_exposes_versioned_etag_and_rfc9457_conflict() {
     assert_eq!(
         operation["put"]["responses"]["409"]["$ref"],
         "#/components/responses/ProgressConflict"
+    );
+    assert_eq!(
+        operation["put"]["responses"]["429"]["$ref"],
+        "#/components/responses/ProgressMutationCapacity"
+    );
+    let capacity = &document["components"]["responses"]["ProgressMutationCapacity"];
+    assert_eq!(capacity["headers"]["Retry-After"]["schema"]["minimum"], 1);
+    assert_eq!(
+        capacity["headers"]["Cache-Control"]["example"],
+        "private, no-store"
     );
     assert_eq!(
         document["components"]["schemas"]["Locator"]["extensions"]["version"],

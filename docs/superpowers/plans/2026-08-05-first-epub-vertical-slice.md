@@ -780,9 +780,9 @@ not-yet-implemented migrations originally numbered 0011 through 0014 were initia
 0012 through 0015 below. Task 14 now also owns additive migration `0013` to correct the committed
 reader projection without rewriting migration history. The Task 14 performance hardening owns
 additive migrations `0014_reader_access_gate.sql` and `0015_reader_projection_location.sql`. Task 15
-uses `0016_reading_state.sql` plus additive hardening migration
-`0017_reading_mutation_scope.sql`, so the remaining planned migrations are numbered 0018 through
-0020.
+uses `0016_reading_state.sql` plus additive hardening migrations
+`0017_reading_mutation_scope.sql` and `0018_reading_mutation_retention.sql`, so the remaining
+planned migrations are numbered 0019 through 0021.
 
 - [ ] **Step 1: Write failing list/detail tests**
 
@@ -931,7 +931,7 @@ composition and adapter seams required to expose this use case: `crates/domain/s
 `crates/application/src/{lib,reader/mod}.rs`, `crates/application/src/ports/mod.rs`,
 `crates/postgres/src/lib.rs`, `crates/http/src/{lib,problem}.rs`,
 `crates/http/src/routes/mod.rs`, `apps/api/src/{lib,main}.rs`, their Cargo/SQLx metadata, and
-focused contract tests. Migration `0016_reading_state.sql` remains the only schema change and
+focused contract tests. Migration `0016_reading_state.sql` is the initial schema change and
 migrations 0015 and older stay immutable. Progress access is resolved from an active readable
 Item/Holding for the requested Manifestation, while the retained progress rows themselves remain
 user-scoped rather than library-scoped.
@@ -944,6 +944,18 @@ correlated safe conflict without exposing the original mutation scope or locator
 against absent global state still persists the device state and idempotent conflict atomically; the
 conflict represents global version 0 with no locator. Offline retry permutations must prove replay
 never changes the current state.
+
+**Task 15 bounded-state amendment (2026-08-06):** Additive migration
+`0018_reading_mutation_retention.sql` keeps migrations 0016 and 0017 immutable. Mutation
+idempotency is guaranteed for 30 days; after expiry, a reused ID is evaluated as a new command
+against current state. Each user retains at most 10,000 mutation rows and 64 MiB of accounted
+physical row/Locator data. An RLS-protected usage row tracks live count and bytes in O(1), while a
+per-user advisory lock serializes exact-size pruning, replay, quota reservation, and insertion.
+Capacity rejection is a correlated 429 with an expiry-based `Retry-After` and rolls back device and
+global changes. Progress responses are `Cache-Control: private, no-store`. The migration also adds
+the `(user_id, created_at)` pruning index and a global-snapshot consistency constraint. Bounded
+Locator fields cap each mutation's input size; Task 15 performs only request-local pruning and does
+not take ownership of Task 18's general garbage-collection work.
 
 - [ ] **Step 1: Write failing state-machine tests**
 
@@ -1015,7 +1027,7 @@ git commit -m "feat: stream authorized original EPUB downloads"
 
 **Files:**
 
-- Create: `migrations/0018_outbox.sql`
+- Create: `migrations/0019_outbox.sql`
 - Create: `crates/application/src/mail/{mod,enqueue,deliver}.rs`
 - Create: `crates/application/src/ports/mail_repository.rs`
 - Create: `crates/postgres/src/mail.rs`
@@ -1051,7 +1063,7 @@ Render one public, locale-negotiated explanation per stable problem code without
 Run against a local SMTP capture service in integration tests, inspect captured text/HTML, force retry/failure, scan logs for test token values, then run workspace gate. Commit:
 
 ```bash
-git add migrations/0018_outbox.sql crates/application crates/postgres crates/http apps/worker deploy
+git add migrations/0019_outbox.sql crates/application crates/postgres crates/http apps/worker deploy
 git commit -m "feat: deliver transactional account and invitation email"
 ```
 
@@ -1059,7 +1071,7 @@ git commit -m "feat: deliver transactional account and invitation email"
 
 **Files:**
 
-- Create: `migrations/0019_deletion_and_gc.sql`
+- Create: `migrations/0020_deletion_and_gc.sql`
 - Create: `crates/domain/src/catalog/lifecycle.rs`
 - Create: `crates/application/src/catalog/{delete_item,restore_item,garbage_collect}.rs`
 - Create: `crates/application/tests/item_lifecycle.rs`
@@ -1095,7 +1107,7 @@ Select a limited `SKIP LOCKED` batch, recheck authoritative references in the tr
 Run shared-Blob deletion, concurrent import-versus-GC, storage failure/retry, progress preservation, quota release, and audit retention tests. Run workspace gate. Commit:
 
 ```bash
-git add migrations/0019_deletion_and_gc.sql crates/domain crates/application crates/postgres crates/http apps/worker openapi
+git add migrations/0020_deletion_and_gc.sql crates/domain crates/application crates/postgres crates/http apps/worker openapi
 git commit -m "feat: add recoverable item deletion and safe blob GC"
 ```
 
@@ -1249,7 +1261,7 @@ git commit -m "feat: add secure EPUB reader and progress sync"
 
 **Files:**
 
-- Create: `migrations/0020_operations.sql`
+- Create: `migrations/0021_operations.sql`
 - Create: `crates/application/src/operations/{mod,health,bootstrap_admin,consistency_check}.rs`
 - Create: `crates/postgres/src/operations.rs`
 - Create: `crates/http/src/routes/health.rs`
@@ -1291,7 +1303,7 @@ Migration completes before API/Worker; runtime processes use distinct role secre
 Document PostgreSQL plus Blob volume as one business backup set, schema version and Blob watermark recording, restore ordering, and post-restore `storage check` for missing Blob, orphan location, and hash mismatch. Do not claim crash-consistent cross-volume snapshots unless the operator provides them. Run CLI/health/Compose config tests and workspace/Web gates. Commit:
 
 ```bash
-git add migrations/0020_operations.sql crates apps deploy docs/operations
+git add migrations/0021_operations.sql crates apps deploy docs/operations
 git commit -m "feat: add deployment operations and observability"
 ```
 

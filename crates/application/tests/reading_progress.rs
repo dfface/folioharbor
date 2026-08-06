@@ -1,9 +1,13 @@
 #![allow(clippy::expect_used)]
 
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use folioharbor_application::{
+    error::AppError,
     ports::{ReadingRepository, ReadingRepositoryError, UpdateProgressRecord},
     reader::{GetReadingProgress, UpdateReadingProgress, UpdateReadingProgressCommand},
 };
@@ -21,6 +25,7 @@ use uuid::Uuid;
 struct Repository {
     progress: Mutex<Option<ReadingProgress>>,
     seen: Mutex<Vec<UpdateProgressRecord>>,
+    error: Mutex<Option<ReadingRepositoryError>>,
 }
 
 #[async_trait]
@@ -39,6 +44,9 @@ impl ReadingRepository for Repository {
         command: UpdateProgressRecord,
     ) -> Result<ReadingUpdateOutcome, ReadingRepositoryError> {
         self.seen.lock().expect("seen").push(command.clone());
+        if let Some(error) = *self.error.lock().expect("error") {
+            return Err(error);
+        }
         let now = OffsetDateTime::now_utc();
         let global = ReadingProgress {
             manifestation_id: command.manifestation_id,
@@ -58,6 +66,32 @@ impl ReadingRepository for Repository {
             },
         })
     }
+}
+
+#[tokio::test]
+async fn mutation_capacity_preserves_the_repository_retry_interval() {
+    let repository = Arc::new(Repository::default());
+    *repository.error.lock().expect("error") = Some(ReadingRepositoryError::MutationCapacity {
+        retry_after: Duration::from_secs(123),
+    });
+    let result = UpdateReadingProgress::new(repository)
+        .execute(UpdateReadingProgressCommand {
+            actor: UserId::new(),
+            manifestation_id: ManifestationId::new(),
+            device_id: DeviceId::new(),
+            client_mutation_id: Uuid::now_v7(),
+            base_version: 0,
+            package_id: None,
+            content_unit_id: None,
+            locator: locator(0.2),
+            request_id: RequestId::new(),
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(AppError::RateLimited { retry_after })
+            if retry_after == Duration::from_secs(123)
+    ));
 }
 
 fn locator(progression: f64) -> ReadiumLocator {

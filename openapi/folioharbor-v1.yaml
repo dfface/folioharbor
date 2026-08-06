@@ -319,11 +319,11 @@ paths:
       responses:
         '200':
           description: Current global reading position
-          headers: {ETag: {schema: {type: string}, example: '"progress-v3"'}}
+          headers: {ETag: {schema: {type: string}, example: '"progress-v3"'}, Cache-Control: {schema: {type: string}, example: 'private, no-store'}}
           content: {application/json: {schema: {$ref: '#/components/schemas/ReadingProgress'}}}
         '204':
           description: No saved progress exists
-          headers: {ETag: {schema: {type: string}, example: '"progress-v0"'}}
+          headers: {ETag: {schema: {type: string}, example: '"progress-v0"'}, Cache-Control: {schema: {type: string}, example: 'private, no-store'}}
         '400': {$ref: '#/components/responses/InvalidIdentifierProblem'}
         '401': {$ref: '#/components/responses/Problem'}
         '404': {$ref: '#/components/responses/Problem'}
@@ -340,13 +340,14 @@ paths:
       responses:
         '200':
           description: Global progress advanced
-          headers: {ETag: {schema: {type: string}, example: '"progress-v4"'}}
+          headers: {ETag: {schema: {type: string}, example: '"progress-v4"'}, Cache-Control: {schema: {type: string}, example: 'private, no-store'}}
           content: {application/json: {schema: {$ref: '#/components/schemas/ReadingProgress'}}}
         '400': {$ref: '#/components/responses/InvalidIdentifierProblem'}
         '401': {$ref: '#/components/responses/Problem'}
         '403': {$ref: '#/components/responses/Problem'}
         '404': {$ref: '#/components/responses/Problem'}
         '409': {$ref: '#/components/responses/ProgressConflict'}
+        '429': {$ref: '#/components/responses/ProgressMutationCapacity'}
         '413': {$ref: '#/components/responses/Problem'}
         '415': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
@@ -438,12 +439,23 @@ components:
           example: {type: 'https://library.example/problems/invalid-json-body', title: Invalid request body, status: 422, detail: The request body could not be accepted as JSON for this operation., instance: /problems/01JREQ00000000000000000000, code: invalid_json_body, request_id: 01JREQ00000000000000000000}
     ProgressConflict:
       description: RFC 9457 stale-base conflict containing the current global (version 0 with a null locator when absent) and reporting-device positions, or a safe problem without positions when a mutation id is reused for a different command
+      headers:
+        Cache-Control: {schema: {type: string}, example: 'private, no-store'}
       content:
         application/problem+json:
           schema:
             anyOf:
               - {$ref: '#/components/schemas/ProgressConflictProblem'}
               - {$ref: '#/components/schemas/ProblemDetails'}
+    ProgressMutationCapacity:
+      description: The per-user 30-day mutation retention capacity is full; retry after the oldest retained mutation expires
+      headers:
+        Retry-After: {schema: {type: integer, minimum: 1}, description: Seconds until the oldest retained mutation expires}
+        Cache-Control: {schema: {type: string}, example: 'private, no-store'}
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/ProblemDetails'}
+          example: {type: 'https://library.example/problems/rate-limited', title: Too many requests, status: 429, detail: Too many requests have been made., instance: /problems/01JREQ00000000000000000000, code: rate_limited, request_id: 01JREQ00000000000000000000}
     InvalidSessionIdProblem:
       description: A malformed UUID was supplied for the session_id path parameter; the use case is not invoked
       content:

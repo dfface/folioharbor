@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use folioharbor_domain::{
     id::{ContentUnitId, DeviceId, ManifestationId, PublicationPackageId, RequestId, UserId},
@@ -25,6 +27,8 @@ pub enum ReadingRepositoryError {
     NotFound,
     #[error("reading mutation does not match its original command")]
     MutationMismatch,
+    #[error("reading mutation retention capacity is exhausted")]
+    MutationCapacity { retry_after: Duration },
     #[error("reading repository failed")]
     Persistence,
 }
