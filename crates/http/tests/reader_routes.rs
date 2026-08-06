@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use axum::{
     body::Body,
     http::{
-        Request, StatusCode,
+        HeaderValue, Request, StatusCode,
         header::{
             CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG, REFERRER_POLICY,
             X_CONTENT_TYPE_OPTIONS,
@@ -596,6 +596,144 @@ async fn download_routes_stream_ranges_head_conditionals_and_cancel_on_drop() {
             },
         ],
         "only successful GET responses record a download start"
+    );
+}
+
+#[tokio::test]
+async fn download_range_handles_repeated_fields_case_and_invalid_bytes() {
+    let (app, item, _, starts) = download_app();
+    let path = format!("/api/v1/items/{}/download", item.as_uuid());
+
+    for method in ["GET", "HEAD"] {
+        let repeated_range = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(&path)
+                    .header("Cookie", "folioharbor_session=allowed")
+                    .header("Range", "bytes=0-1")
+                    .header("Range", "bytes=4-5")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(repeated_range.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    }
+
+    let mixed_case = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&path)
+                .header("Cookie", "folioharbor_session=allowed")
+                .header("Range", "ByTeS=2-5")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(mixed_case.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(mixed_case.headers()["content-range"], "bytes 2-5/131089");
+
+    let invalid_range = HeaderValue::from_bytes(b"bytes=0-1\xff").expect("opaque header bytes");
+    let invalid_range = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(&path)
+                .header("Cookie", "folioharbor_session=allowed")
+                .header("Range", invalid_range)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(invalid_range.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+
+    assert_eq!(
+        *starts.lock().expect("download starts lock"),
+        [DownloadRange { start: 2, end: 5 }]
+    );
+}
+
+#[tokio::test]
+async fn download_validators_handle_repeated_fields_weak_wildcard_and_invalid_bytes() {
+    let (app, item, _, starts) = download_app();
+    let path = format!("/api/v1/items/{}/download", item.as_uuid());
+    let baseline = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(&path)
+                .header("Cookie", "folioharbor_session=allowed")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let etag = baseline.headers()[ETAG].clone();
+
+    let weak = HeaderValue::from_str(&format!(
+        "W/{}",
+        etag.to_str().expect("etag is visible ASCII")
+    ))
+    .expect("weak etag");
+    let validator_in_later_field = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&path)
+                .header("Cookie", "folioharbor_session=allowed")
+                .header("If-None-Match", "\"not-current\"")
+                .header("If-None-Match", weak)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(validator_in_later_field.status(), StatusCode::NOT_MODIFIED);
+
+    let wildcard_in_later_field = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(&path)
+                .header("Cookie", "folioharbor_session=allowed")
+                .header("If-None-Match", "\"not-current\"")
+                .header("If-None-Match", "*")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(wildcard_in_later_field.status(), StatusCode::NOT_MODIFIED);
+
+    let invalid_validator =
+        HeaderValue::from_bytes(b"W/\"opaque\xff\"").expect("opaque header bytes");
+    let invalid_validator = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(&path)
+                .header("Cookie", "folioharbor_session=allowed")
+                .header("If-None-Match", invalid_validator)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(invalid_validator.status(), StatusCode::OK);
+
+    assert_eq!(
+        *starts.lock().expect("download starts lock"),
+        [],
+        "conditional HEAD requests never record a download start"
     );
 }
 

@@ -789,8 +789,9 @@ the 10,000-row/64 MiB limits. Task 16 adds migration 0020 for the download autho
 projection, per-library reader-download setting, and audit boundary. Its review hardening adds
 migration 0021 for authoritative catalog capability projection and anti-enumerating denial audit
 semantics. Its code-quality hardening adds migration 0022 so authorization, allowed-start audit,
-and catalog capabilities all derive from persisted `item.download` RBAC. The remaining planned
-migrations are therefore numbered 0023 through 0025.
+and catalog capabilities all derive from persisted `item.download` RBAC. Its final hardening adds
+migration 0023 for the partition-compatible denied-download aggregation index. The remaining
+planned migrations are therefore numbered 0024 through 0026.
 
 - [ ] **Step 1: Write failing list/detail tests**
 
@@ -1038,17 +1039,18 @@ git commit -m "feat: synchronize versioned reading progress"
 - Create: `migrations/0020_download_authorization.sql`
 - Create: `migrations/0021_download_semantics.sql`
 - Create: `migrations/0022_download_rbac.sql`
+- Create: `migrations/0023_download_denial_audit_index.sql`
 - Modify: `openapi/folioharbor-v1.yaml`
 
 **Interfaces:**
 
 - Produces `DownloadItem::authorize(actor, item_id, request_id) -> Result<DownloadGrant, AppError>` containing only opaque storage identity, size, media type, safe filename, and ETag material.
 - The repository port returns a payload-free `DownloadAuthorization` decision and delivers persistence-only metadata through `DownloadSourceReceiver`; `Granted` must deliver exactly one source or fail closed, and no concrete secret carrier is exported by the catalog API.
-- Produces `GET/HEAD /api/v1/items/{item_id}/download` with single-range support.
+- Produces `GET/HEAD /api/v1/items/{item_id}/download` with exactly zero or one Range field-line, ASCII case-insensitive `bytes`, and validator matching across every `If-None-Match` field-line/list member.
 
 - [ ] **Step 1: Write failing authorization and HTTP range tests**
 
-Assert owner/editor can download, reader is denied by default, owner toggling the library setting grants reader download without changing read permission, and nonmember gets anti-enumerating 404. Cover full GET, HEAD, valid prefix/suffix/open ranges, unsatisfiable/multiple ranges, `If-None-Match`, interrupted client, and exact Content-Length/Content-Range.
+Assert owner/editor can download, reader is denied by default, owner toggling the library setting grants reader download without changing read permission, and nonmember gets anti-enumerating 404. Cover full GET, HEAD, valid prefix/suffix/open ranges, repeated field-lines, comma-separated/unsatisfiable ranges, mixed-case byte units, repeated/list/wildcard/weak `If-None-Match`, malformed header bytes, interrupted client, and exact Content-Length/Content-Range.
 
 - [ ] **Step 2: Separate read and download authorization**
 
@@ -1060,14 +1062,14 @@ Parse at most one byte range, cap chunk buffers, seek through `BlobStore`, and s
 
 - [ ] **Step 4: Audit downloads**
 
-Record allowed download start with actor/library/item/request and byte range; record denied action with a reason code subject to anti-abuse aggregation. Never write content or filename to persistent audit metadata.
+Record allowed download start with actor/library/item/request and byte range; record denied action with a reason code subject to anti-abuse aggregation. Back the one-minute denied lookup with a selective partition-compatible partial index and verify both concurrent aggregation and an index-eligible plan. Never write content or filename to persistent audit metadata.
 
 - [ ] **Step 5: Verify and commit**
 
 Run route/range tests using a file larger than the response buffer, authorization matrix, cancellation test, and workspace gate. Commit:
 
 ```bash
-git add migrations/0020_download_authorization.sql migrations/0021_download_semantics.sql migrations/0022_download_rbac.sql crates/application crates/postgres crates/storage-local crates/http apps/api openapi
+git add migrations/0020_download_authorization.sql migrations/0021_download_semantics.sql migrations/0022_download_rbac.sql migrations/0023_download_denial_audit_index.sql crates/application crates/postgres crates/storage-local crates/http apps/api openapi
 git commit -m "feat: stream authorized original EPUB downloads"
 ```
 
@@ -1075,7 +1077,7 @@ git commit -m "feat: stream authorized original EPUB downloads"
 
 **Files:**
 
-- Create: `migrations/0023_outbox.sql`
+- Create: `migrations/0024_outbox.sql`
 - Create: `crates/application/src/mail/{mod,enqueue,deliver}.rs`
 - Create: `crates/application/src/ports/mail_repository.rs`
 - Create: `crates/postgres/src/mail.rs`
@@ -1111,7 +1113,7 @@ Render one public, locale-negotiated explanation per stable problem code without
 Run against a local SMTP capture service in integration tests, inspect captured text/HTML, force retry/failure, scan logs for test token values, then run workspace gate. Commit:
 
 ```bash
-git add migrations/0023_outbox.sql crates/application crates/postgres crates/http apps/worker deploy
+git add migrations/0024_outbox.sql crates/application crates/postgres crates/http apps/worker deploy
 git commit -m "feat: deliver transactional account and invitation email"
 ```
 
@@ -1119,7 +1121,7 @@ git commit -m "feat: deliver transactional account and invitation email"
 
 **Files:**
 
-- Create: `migrations/0024_deletion_and_gc.sql`
+- Create: `migrations/0025_deletion_and_gc.sql`
 - Create: `crates/domain/src/catalog/lifecycle.rs`
 - Create: `crates/application/src/catalog/{delete_item,restore_item,garbage_collect}.rs`
 - Create: `crates/application/tests/item_lifecycle.rs`
@@ -1155,7 +1157,7 @@ Select a limited `SKIP LOCKED` batch, recheck authoritative references in the tr
 Run shared-Blob deletion, concurrent import-versus-GC, storage failure/retry, progress preservation, quota release, and audit retention tests. Run workspace gate. Commit:
 
 ```bash
-git add migrations/0024_deletion_and_gc.sql crates/domain crates/application crates/postgres crates/http apps/worker openapi
+git add migrations/0025_deletion_and_gc.sql crates/domain crates/application crates/postgres crates/http apps/worker openapi
 git commit -m "feat: add recoverable item deletion and safe blob GC"
 ```
 
@@ -1309,7 +1311,7 @@ git commit -m "feat: add secure EPUB reader and progress sync"
 
 **Files:**
 
-- Create: `migrations/0025_operations.sql`
+- Create: `migrations/0026_operations.sql`
 - Create: `crates/application/src/operations/{mod,health,bootstrap_admin,consistency_check}.rs`
 - Create: `crates/postgres/src/operations.rs`
 - Create: `crates/http/src/routes/health.rs`
@@ -1351,7 +1353,7 @@ Migration completes before API/Worker; runtime processes use distinct role secre
 Document PostgreSQL plus Blob volume as one business backup set, schema version and Blob watermark recording, restore ordering, and post-restore `storage check` for missing Blob, orphan location, and hash mismatch. Do not claim crash-consistent cross-volume snapshots unless the operator provides them. Run CLI/health/Compose config tests and workspace/Web gates. Commit:
 
 ```bash
-git add migrations/0025_operations.sql crates apps deploy docs/operations
+git add migrations/0026_operations.sql crates apps deploy docs/operations
 git commit -m "feat: add deployment operations and observability"
 ```
 

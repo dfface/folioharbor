@@ -328,7 +328,7 @@ paths:
       security: [{cookieAuth: []}]
       parameters:
         - {$ref: '#/components/parameters/ItemId'}
-        - {name: Range, in: header, schema: {type: string, pattern: '^bytes=(?:[0-9]+-[0-9]*|-[0-9]+)$'}, description: At most one byte range}
+        - {name: Range, in: header, schema: {type: string, pattern: '^[Bb][Yy][Tt][Ee][Ss]=(?:[0-9]+-[0-9]*|-[0-9]+)$'}, description: At most one byte range field-line}
         - {name: If-None-Match, in: header, schema: {type: string}, description: Immutable opaque Blob validator}
       responses:
         '200': {$ref: '#/components/responses/OriginalEpub'}
@@ -346,7 +346,7 @@ paths:
       security: [{cookieAuth: []}]
       parameters:
         - {$ref: '#/components/parameters/ItemId'}
-        - {name: Range, in: header, schema: {type: string, pattern: '^bytes=(?:[0-9]+-[0-9]*|-[0-9]+)$'}}
+        - {name: Range, in: header, schema: {type: string, pattern: '^[Bb][Yy][Tt][Ee][Ss]=(?:[0-9]+-[0-9]*|-[0-9]+)$'}, description: At most one byte range field-line}
         - {name: If-None-Match, in: header, schema: {type: string}}
       responses:
         '200': {$ref: '#/components/responses/OriginalEpub'}

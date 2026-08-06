@@ -98,12 +98,8 @@ async fn download(
         common_headers(response.headers_mut(), grant.etag());
         return response;
     }
-    let requested = match headers.get(RANGE) {
-        Some(value) => match value.to_str() {
-            Ok(value) => Some(value),
-            Err(_) => return range_not_satisfiable(grant.byte_size(), grant.etag()),
-        },
-        None => None,
+    let Ok(requested) = requested_range(&headers) else {
+        return range_not_satisfiable(grant.byte_size(), grant.etag());
     };
     let Ok(range) = resolve_range(requested, grant.byte_size()) else {
         return range_not_satisfiable(grant.byte_size(), grant.etag());
@@ -237,14 +233,26 @@ fn range_not_satisfiable(size: u64, etag: &str) -> Response {
 
 fn matches_validator(headers: &HeaderMap, etag: &str) -> bool {
     headers
-        .get(IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
+        .get_all(IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| {
             value.split(',').any(|candidate| {
                 let candidate = candidate.trim();
                 candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == etag
             })
         })
+}
+
+fn requested_range(headers: &HeaderMap) -> Result<Option<&str>, RangeError> {
+    let mut values = headers.get_all(RANGE).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(RangeError);
+    }
+    value.to_str().map(Some).map_err(|_| RangeError)
 }
 
 fn content_disposition(file_name: &str) -> String {
@@ -311,7 +319,10 @@ fn resolve_range(value: Option<&str>, size: u64) -> Result<ByteRange, RangeError
             end: size - 1,
         });
     };
-    let range = value.strip_prefix("bytes=").ok_or(RangeError)?;
+    let (unit, range) = value.split_once('=').ok_or(RangeError)?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return Err(RangeError);
+    }
     if range.contains(',') {
         return Err(RangeError);
     }
@@ -361,6 +372,10 @@ mod tests {
         assert_eq!(resolve_range(None, 10), Ok(ByteRange { start: 0, end: 9 }));
         assert_eq!(
             resolve_range(Some("bytes=2-5"), 10),
+            Ok(ByteRange { start: 2, end: 5 })
+        );
+        assert_eq!(
+            resolve_range(Some("ByTeS=2-5"), 10),
             Ok(ByteRange { start: 2, end: 5 })
         );
         assert_eq!(

@@ -28,12 +28,17 @@ async fn download_matrix_setting_and_audit_are_enforced_in_postgres() -> anyhow:
     let editor = UserId::new();
     let reader = UserId::new();
     let outsider = UserId::new();
+    let concurrent_outsider = UserId::new();
     let library = LibraryId::new();
     for (user, email) in [
         (owner, "owner-download@test.invalid"),
         (editor, "editor-download@test.invalid"),
         (reader, "reader-download@test.invalid"),
         (outsider, "outsider-download@test.invalid"),
+        (
+            concurrent_outsider,
+            "concurrent-outsider-download@test.invalid",
+        ),
     ] {
         sqlx::query("INSERT INTO folioharbor.user_accounts(user_id,normalized_email,display_email,status,created_at,verified_at) VALUES($1,$2,$2,'verified',$3,$3)")
             .bind(user.as_uuid()).bind(email).bind(now).execute(&pools.owner).await?;
@@ -99,6 +104,67 @@ async fn download_matrix_setting_and_audit_are_enforced_in_postgres() -> anyhow:
     assert_eq!(
         outsider_denials,
         vec![(library.as_uuid(), item.as_uuid(), serde_json::json!({}))]
+    );
+    let (first, second) = tokio::try_join!(
+        authorize(
+            &repository,
+            actor(concurrent_outsider),
+            item,
+            RequestId::new()
+        ),
+        authorize(
+            &repository,
+            actor(concurrent_outsider),
+            item,
+            RequestId::new()
+        )
+    )?;
+    assert!(matches!(first, DownloadAuthorization::NotFound));
+    assert!(matches!(second, DownloadAuthorization::NotFound));
+    let concurrent_denials: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM folioharbor.audit_events WHERE action_code='item.download' AND decision='denied' AND actor_id=$1 AND resource_id=$2",
+    )
+    .bind(concurrent_outsider.as_uuid())
+    .bind(item.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_eq!(concurrent_denials, 1);
+
+    let (index_kind, child_indexes): (String, i64) = sqlx::query_as(
+        "SELECT parent.relkind::text,count(child.oid) FROM pg_class parent JOIN pg_namespace namespace ON namespace.oid=parent.relnamespace LEFT JOIN pg_inherits inheritance ON inheritance.inhparent=parent.oid LEFT JOIN pg_class child ON child.oid=inheritance.inhrelid WHERE namespace.nspname='folioharbor' AND parent.relname='audit_events_download_denial_aggregation_idx' GROUP BY parent.relkind",
+    )
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_eq!(index_kind, "I");
+    assert!(
+        child_indexes >= 1,
+        "partitioned index must cover existing partitions"
+    );
+    let index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes WHERE schemaname='folioharbor' AND tablename='audit_events' AND indexname='audit_events_download_denial_aggregation_idx'",
+    )
+    .fetch_one(&pools.owner)
+    .await?;
+    assert!(index_definition.contains("(actor_id, resource_id, occurred_at DESC)"));
+    assert!(index_definition.contains("action_code = 'item.download'"));
+    assert!(index_definition.contains("decision = 'denied'"));
+
+    let mut explain = pools.owner.begin().await?;
+    sqlx::query("SET LOCAL enable_seqscan=off")
+        .execute(&mut *explain)
+        .await?;
+    let plan: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN (COSTS OFF) SELECT 1 FROM folioharbor.audit_events event WHERE event.actor_id=$1 AND event.resource_id=$2 AND event.action_code='item.download' AND event.decision='denied' AND event.occurred_at>clock_timestamp()-interval '1 minute'",
+    )
+    .bind(concurrent_outsider.as_uuid())
+    .bind(item.as_uuid())
+    .fetch_all(&mut *explain)
+    .await?;
+    explain.rollback().await?;
+    assert!(
+        plan.join("\n")
+            .contains("audit_events_default_actor_id_resource_id_occurred_at_idx"),
+        "denial aggregation must be eligible for the partition index: {plan:?}"
     );
     sqlx::query(
         "UPDATE folioharbor.libraries SET reader_download_enabled=true WHERE library_id=$1",
