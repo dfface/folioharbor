@@ -23,6 +23,25 @@ CREATE TABLE folioharbor.upload_sessions (
     ,CHECK ((state='receiving')=(receipt_token IS NOT NULL AND receipt_lease_expires_at IS NOT NULL))
 );
 CREATE INDEX upload_sessions_library_state_idx ON folioharbor.upload_sessions(library_id,state,updated_at);
+CREATE INDEX upload_sessions_abandoned_idx ON folioharbor.upload_sessions(expires_at,upload_id)
+ WHERE state IN('created','received');
+
+CREATE TABLE folioharbor.failed_upload_purges (
+ upload_id uuid PRIMARY KEY REFERENCES folioharbor.upload_sessions(upload_id) ON DELETE CASCADE,
+ storage_key text NOT NULL CHECK(length(storage_key) BETWEEN 1 AND 512),
+ delete_file boolean NOT NULL,
+ eligible_at timestamptz NOT NULL,
+ state text NOT NULL DEFAULT 'pending' CHECK(state IN('pending','leased','completed')),
+ lease_owner text,lease_expires_at timestamptz,completed_at timestamptz,
+ created_at timestamptz NOT NULL,updated_at timestamptz NOT NULL,
+ CHECK((state='leased')=(lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL))
+);
+CREATE INDEX failed_upload_purges_claim_idx ON folioharbor.failed_upload_purges(eligible_at,upload_id)
+ WHERE state IN('pending','leased');
+CREATE TABLE folioharbor.cleanup_boundaries (
+ cleanup_kind text PRIMARY KEY CHECK(cleanup_kind IN('expire_uploads','purge_failed_uploads','blob_gc')),
+ cursor_at timestamptz NOT NULL,updated_at timestamptz NOT NULL
+);
 
 CREATE TABLE folioharbor.upload_cleanups (
  upload_id uuid NOT NULL REFERENCES folioharbor.upload_sessions(upload_id) ON DELETE CASCADE,
@@ -62,6 +81,15 @@ CREATE POLICY upload_cleanups_worker_access ON folioharbor.upload_cleanups
  USING (folioharbor.is_worker()) WITH CHECK (folioharbor.is_worker());
 REVOKE ALL ON folioharbor.upload_cleanups FROM PUBLIC;
 GRANT SELECT,INSERT,UPDATE ON folioharbor.upload_cleanups TO folioharbor_worker;
+ALTER TABLE folioharbor.failed_upload_purges ENABLE ROW LEVEL SECURITY;
+ALTER TABLE folioharbor.failed_upload_purges FORCE ROW LEVEL SECURITY;
+ALTER TABLE folioharbor.cleanup_boundaries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE folioharbor.cleanup_boundaries FORCE ROW LEVEL SECURITY;
+CREATE POLICY failed_purges_owner_access ON folioharbor.failed_upload_purges
+ USING(current_user='folioharbor_owner') WITH CHECK(current_user='folioharbor_owner');
+CREATE POLICY cleanup_boundaries_owner_access ON folioharbor.cleanup_boundaries
+ USING(current_user='folioharbor_owner') WITH CHECK(current_user='folioharbor_owner');
+REVOKE ALL ON folioharbor.failed_upload_purges,folioharbor.cleanup_boundaries FROM PUBLIC;
 ALTER TABLE folioharbor.blob_reachability_candidates ENABLE ROW LEVEL SECURITY;
 ALTER TABLE folioharbor.blob_reachability_candidates FORCE ROW LEVEL SECURITY;
 CREATE POLICY blob_candidates_owner_access ON folioharbor.blob_reachability_candidates
@@ -376,7 +404,7 @@ BEGIN
  FOR candidate IN SELECT upload_id,library_id FROM folioharbor.upload_sessions
   WHERE (state='created' AND expires_at<=p_now)
      OR (state='receiving' AND receipt_lease_expires_at<=p_now)
-  ORDER BY COALESCE(receipt_lease_expires_at,expires_at) LIMIT p_limit LOOP
+  ORDER BY COALESCE(receipt_lease_expires_at,expires_at) LIMIT p_limit FOR UPDATE SKIP LOCKED LOOP
    PERFORM 1 FROM folioharbor.libraries WHERE library_id=candidate.library_id FOR UPDATE;
    SELECT * INTO upload FROM folioharbor.upload_sessions WHERE upload_id=candidate.upload_id FOR UPDATE;
    IF NOT ((upload.state='created' AND upload.expires_at<=p_now)
@@ -401,6 +429,116 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION folioharbor.upload_expire_worker(timestamptz,bigint) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION folioharbor.upload_expire_worker(timestamptz,bigint) TO folioharbor_worker;
+
+CREATE FUNCTION folioharbor.import_expire_abandoned_worker(p_boundary timestamptz,p_limit bigint)
+RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE candidate record;
+DECLARE reservation folioharbor.quota_reservations%ROWTYPE;
+DECLARE expired bigint := 0;
+BEGIN
+ IF session_user<>'folioharbor_worker' OR NOT folioharbor.is_worker()
+    OR p_limit<1 OR p_limit>1000 THEN RETURN 0; END IF;
+ FOR candidate IN SELECT upload_id,library_id,state,storage_key,dedup_scope,sha256,received_bytes FROM folioharbor.upload_sessions
+   WHERE state IN('created','received') AND expires_at<=p_boundary
+   ORDER BY expires_at,upload_id LIMIT p_limit FOR UPDATE SKIP LOCKED LOOP
+  PERFORM 1 FROM folioharbor.libraries WHERE library_id=candidate.library_id FOR UPDATE;
+  SELECT * INTO reservation FROM folioharbor.quota_reservations
+    WHERE upload_id=candidate.upload_id FOR UPDATE;
+  IF reservation.state='active' THEN
+   UPDATE folioharbor.libraries SET quota_reserved_bytes=quota_reserved_bytes-reservation.reserved_bytes
+     WHERE library_id=candidate.library_id;
+   UPDATE folioharbor.quota_reservations SET state='released',updated_at=p_boundary
+     WHERE upload_id=candidate.upload_id;
+  END IF;
+  IF candidate.state='received' THEN
+   IF candidate.dedup_scope='disabled' AND candidate.sha256 IS NOT NULL THEN
+    INSERT INTO folioharbor.blobs(blob_id,storage_namespace,sha256,byte_size,created_at)
+     VALUES(candidate.upload_id,'upload-'||replace(candidate.upload_id::text,'-',''),candidate.sha256,candidate.received_bytes,p_boundary)
+     ON CONFLICT(storage_namespace,sha256,byte_size) DO NOTHING;
+    INSERT INTO folioharbor.blob_locations(blob_id,storage_key,state,created_at,updated_at)
+     VALUES(candidate.upload_id,candidate.storage_key,'quarantined',p_boundary,p_boundary)
+     ON CONFLICT ON CONSTRAINT blob_locations_storage_key_key DO UPDATE SET state='quarantined',updated_at=p_boundary
+     WHERE folioharbor.blob_locations.blob_id=EXCLUDED.blob_id;
+   END IF;
+   INSERT INTO folioharbor.failed_upload_purges(upload_id,storage_key,delete_file,eligible_at,created_at,updated_at)
+    VALUES(candidate.upload_id,candidate.storage_key,candidate.dedup_scope='disabled',p_boundary+interval '24 hours',p_boundary,p_boundary)
+    ON CONFLICT(upload_id) DO NOTHING;
+   UPDATE folioharbor.upload_sessions SET state='failed',error_code='received_expired',updated_at=p_boundary
+    WHERE upload_id=candidate.upload_id;
+  ELSE
+   UPDATE folioharbor.upload_sessions SET state='expired',error_code='upload_expired',updated_at=p_boundary
+    WHERE upload_id=candidate.upload_id;
+  END IF;
+  expired := expired+1;
+ END LOOP;
+ INSERT INTO folioharbor.cleanup_boundaries(cleanup_kind,cursor_at,updated_at)
+  VALUES('expire_uploads',p_boundary,p_boundary)
+  ON CONFLICT(cleanup_kind) DO UPDATE SET cursor_at=GREATEST(folioharbor.cleanup_boundaries.cursor_at,EXCLUDED.cursor_at),updated_at=p_boundary;
+ RETURN expired;
+END $$;
+ALTER FUNCTION folioharbor.import_expire_abandoned_worker(timestamptz,bigint) OWNER TO folioharbor_owner;
+REVOKE ALL ON FUNCTION folioharbor.import_expire_abandoned_worker(timestamptz,bigint) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION folioharbor.import_expire_abandoned_worker(timestamptz,bigint) TO folioharbor_worker;
+
+CREATE FUNCTION folioharbor.import_schedule_failed_purge_worker(p_upload uuid,p_library uuid,p_now timestamptz)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE upload folioharbor.upload_sessions%ROWTYPE;
+BEGIN
+ IF session_user<>'folioharbor_worker' OR NOT folioharbor.is_worker()
+    OR p_library IS DISTINCT FROM folioharbor.current_library_id() THEN RETURN false; END IF;
+ SELECT * INTO upload FROM folioharbor.upload_sessions WHERE upload_id=p_upload AND library_id=p_library FOR UPDATE;
+ IF upload.upload_id IS NULL OR upload.state<>'failed' OR upload.storage_key IS NULL THEN RETURN false; END IF;
+ INSERT INTO folioharbor.failed_upload_purges(upload_id,storage_key,delete_file,eligible_at,created_at,updated_at)
+  VALUES(p_upload,upload.storage_key,upload.dedup_scope='disabled',p_now+interval '24 hours',p_now,p_now)
+  ON CONFLICT(upload_id) DO NOTHING;
+ IF upload.dedup_scope='disabled' THEN
+  UPDATE folioharbor.blob_locations SET state='quarantined',updated_at=p_now
+   WHERE storage_key=upload.storage_key;
+ END IF;
+ RETURN true;
+END $$;
+ALTER FUNCTION folioharbor.import_schedule_failed_purge_worker(uuid,uuid,timestamptz) OWNER TO folioharbor_owner;
+REVOKE ALL ON FUNCTION folioharbor.import_schedule_failed_purge_worker(uuid,uuid,timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION folioharbor.import_schedule_failed_purge_worker(uuid,uuid,timestamptz) TO folioharbor_worker;
+
+CREATE FUNCTION folioharbor.import_claim_failed_purges_worker(p_owner text,p_boundary timestamptz,p_limit bigint)
+RETURNS TABLE(upload_id uuid,storage_key text,delete_file boolean) LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+BEGIN
+ IF session_user<>'folioharbor_worker' OR NOT folioharbor.is_worker()
+    OR length(p_owner) NOT BETWEEN 1 AND 128 OR p_limit<1 OR p_limit>1000 THEN RETURN; END IF;
+ RETURN QUERY WITH candidates AS (
+  SELECT purge.upload_id FROM folioharbor.failed_upload_purges purge
+   WHERE purge.eligible_at<=p_boundary AND (purge.state='pending' OR (purge.state='leased' AND purge.lease_expires_at<=p_boundary))
+   ORDER BY purge.eligible_at,purge.upload_id LIMIT p_limit FOR UPDATE SKIP LOCKED
+ ), leased AS (
+  UPDATE folioharbor.failed_upload_purges purge SET state='leased',lease_owner=p_owner,
+   lease_expires_at=p_boundary+interval '5 minutes',updated_at=p_boundary
+   FROM candidates WHERE purge.upload_id=candidates.upload_id
+   RETURNING purge.upload_id,purge.storage_key,purge.delete_file
+ ) SELECT leased.upload_id,leased.storage_key,leased.delete_file FROM leased;
+ INSERT INTO folioharbor.cleanup_boundaries(cleanup_kind,cursor_at,updated_at)
+  VALUES('purge_failed_uploads',p_boundary,p_boundary)
+  ON CONFLICT(cleanup_kind) DO UPDATE SET cursor_at=GREATEST(folioharbor.cleanup_boundaries.cursor_at,EXCLUDED.cursor_at),updated_at=p_boundary;
+END $$;
+ALTER FUNCTION folioharbor.import_claim_failed_purges_worker(text,timestamptz,bigint) OWNER TO folioharbor_owner;
+REVOKE ALL ON FUNCTION folioharbor.import_claim_failed_purges_worker(text,timestamptz,bigint) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION folioharbor.import_claim_failed_purges_worker(text,timestamptz,bigint) TO folioharbor_worker;
+
+CREATE FUNCTION folioharbor.import_complete_failed_purge_worker(p_upload uuid,p_owner text,p_now timestamptz)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+BEGIN
+ IF session_user<>'folioharbor_worker' OR NOT folioharbor.is_worker() THEN RETURN false; END IF;
+ UPDATE folioharbor.blob_locations location SET state='purged',updated_at=p_now
+  FROM folioharbor.failed_upload_purges purge
+  WHERE purge.upload_id=p_upload AND purge.state='leased' AND purge.lease_owner=p_owner
+    AND purge.delete_file AND location.storage_key=purge.storage_key;
+ UPDATE folioharbor.failed_upload_purges SET state='completed',lease_owner=NULL,lease_expires_at=NULL,
+  completed_at=p_now,updated_at=p_now WHERE upload_id=p_upload AND state='leased' AND lease_owner=p_owner;
+ RETURN FOUND;
+END $$;
+ALTER FUNCTION folioharbor.import_complete_failed_purge_worker(uuid,text,timestamptz) OWNER TO folioharbor_owner;
+REVOKE ALL ON FUNCTION folioharbor.import_complete_failed_purge_worker(uuid,text,timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION folioharbor.import_complete_failed_purge_worker(uuid,text,timestamptz) TO folioharbor_worker;
 ALTER TABLE folioharbor.background_jobs ENABLE ROW LEVEL SECURITY; ALTER TABLE folioharbor.background_jobs FORCE ROW LEVEL SECURITY;
 ALTER TABLE folioharbor.job_attempts ENABLE ROW LEVEL SECURITY; ALTER TABLE folioharbor.job_attempts FORCE ROW LEVEL SECURITY;
 CREATE POLICY jobs_owner_access ON folioharbor.background_jobs USING(current_user='folioharbor_owner') WITH CHECK(current_user='folioharbor_owner');

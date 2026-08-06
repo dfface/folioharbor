@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT upload_id AS \"upload_id!\",storage_key AS \"storage_key!\",delete_file AS \"delete_file!\" FROM folioharbor.import_claim_failed_purges_worker($1,$2,$3)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "upload_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "storage_key!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "delete_file!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "e5928b4e43ebde2e2ac52a4576ce3a364c816ff27522f47f7b2902dce82fe884"
+}

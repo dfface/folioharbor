@@ -21,6 +21,7 @@ time.workspace = true
 tokio.workspace = true
 toml.workspace = true
 url.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 folioharbor-test-support = { path = "../test-support", version = "0.1.0" }

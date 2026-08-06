@@ -184,6 +184,16 @@ impl<P: CapacityProbe> LocalBlobStore<P> {
         root.sync()?;
         Ok(self.capacity.free_bytes(&self.root)?)
     }
+
+    pub(super) fn open_publication_sync(
+        &self,
+        key: &StorageKey,
+    ) -> Result<Box<dyn folioharbor_application::ports::PublicationSource>, BlobStoreError> {
+        let root = self.secure_root()?;
+        let relative = paths::stored_relative(key)?;
+        let (directory, name) = root.open_parent(&relative, false)?;
+        Ok(Box::new(directory.open_with(name, &read_options())?))
+    }
 }
 
 fn remove_source_if_present(root: &SecureRoot, relative: &Path) -> Result<(), BlobStoreError> {

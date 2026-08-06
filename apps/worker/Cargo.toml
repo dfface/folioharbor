@@ -7,8 +7,25 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
+folioharbor-application = { path = "../../crates/application", version = "0.1.0" }
+folioharbor-domain = { path = "../../crates/domain", version = "0.1.0" }
+folioharbor-epub = { path = "../../crates/epub", version = "0.1.0" }
+folioharbor-postgres = { path = "../../crates/postgres", version = "0.1.0" }
+folioharbor-storage-local = { path = "../../crates/storage-local", version = "0.1.0" }
+secrecy.workspace = true
+tokio.workspace = true
+time.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+folioharbor-test-support = { path = "../../crates/test-support", version = "0.1.0" }
+sha2.workspace = true
+sqlx.workspace = true
+tempfile = "3.20"
+zip.workspace = true
+uuid.workspace = true

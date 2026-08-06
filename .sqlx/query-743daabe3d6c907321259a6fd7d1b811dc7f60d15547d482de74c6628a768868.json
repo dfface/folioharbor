@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT folioharbor.import_schedule_failed_purge_worker($1,$2,$3) AS \"scheduled!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "scheduled!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "743daabe3d6c907321259a6fd7d1b811dc7f60d15547d482de74c6628a768868"
+}

@@ -311,4 +311,60 @@ ALTER FUNCTION folioharbor.catalog_item_visible(uuid,uuid,uuid,bigint) OWNER TO 
 REVOKE ALL ON FUNCTION folioharbor.catalog_item_visible(uuid,uuid,uuid,bigint) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION folioharbor.catalog_item_visible(uuid,uuid,uuid,bigint) TO folioharbor_api;
 
+CREATE FUNCTION folioharbor.import_reconcile_worker(
+    p_upload uuid, p_library uuid, p_blob_candidate uuid, p_request text, p_now timestamptz
+) RETURNS TABLE(
+    outcome text, actor_id uuid, blob_id uuid, logical_bytes bigint,
+    storage_key text, upload_state text
+) LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE upload folioharbor.upload_sessions%ROWTYPE;
+DECLARE resolved_blob uuid;
+DECLARE namespace text;
+BEGIN
+    IF session_user <> 'folioharbor_worker' OR NOT folioharbor.is_worker()
+       OR p_library IS DISTINCT FROM folioharbor.current_library_id()
+       OR p_request IS DISTINCT FROM folioharbor.current_request_id() THEN RETURN; END IF;
+    SELECT * INTO upload FROM folioharbor.upload_sessions
+      WHERE upload_id=p_upload AND library_id=p_library FOR UPDATE;
+    IF upload.upload_id IS NULL THEN RETURN; END IF;
+    IF upload.state IN ('ready','duplicate') THEN
+      RETURN QUERY SELECT 'complete'::text,upload.created_by,NULL::uuid,upload.received_bytes,
+        upload.storage_key,upload.state;
+      RETURN;
+    END IF;
+    IF upload.state='retry_wait' THEN
+      UPDATE folioharbor.upload_sessions SET state='queued',error_code=NULL,updated_at=p_now
+        WHERE upload_id=p_upload;
+      upload.state := 'queued';
+    END IF;
+    IF upload.state='queued' THEN
+      UPDATE folioharbor.upload_sessions SET state='validating',updated_at=p_now
+        WHERE upload_id=p_upload;
+      upload.state := 'validating';
+    END IF;
+    IF upload.state NOT IN ('validating','importing') OR upload.sha256 IS NULL
+       OR upload.storage_key IS NULL OR upload.received_bytes<1 THEN RETURN; END IF;
+    namespace := CASE upload.dedup_scope
+      WHEN 'instance' THEN 'instance-v1'
+      WHEN 'library' THEN 'library-'||replace(p_library::text,'-','')
+      WHEN 'disabled' THEN 'upload-'||replace(p_upload::text,'-','') END;
+    INSERT INTO folioharbor.blobs(blob_id,storage_namespace,sha256,byte_size,created_at)
+      VALUES(p_blob_candidate,namespace,upload.sha256,upload.received_bytes,p_now)
+      ON CONFLICT(storage_namespace,sha256,byte_size) DO NOTHING;
+    SELECT candidate.blob_id INTO resolved_blob FROM folioharbor.blobs candidate
+      WHERE candidate.storage_namespace=namespace AND candidate.sha256=upload.sha256
+        AND candidate.byte_size=upload.received_bytes FOR KEY SHARE;
+    IF resolved_blob IS NULL THEN RETURN; END IF;
+    INSERT INTO folioharbor.blob_locations(blob_id,storage_key,state,created_at,updated_at)
+      VALUES(resolved_blob,upload.storage_key,'ready',p_now,p_now)
+      ON CONFLICT ON CONSTRAINT blob_locations_storage_key_key DO UPDATE SET state='ready',updated_at=p_now
+      WHERE folioharbor.blob_locations.blob_id=EXCLUDED.blob_id;
+    IF NOT FOUND THEN RETURN; END IF;
+    RETURN QUERY SELECT 'work'::text,upload.created_by,resolved_blob,upload.received_bytes,
+      upload.storage_key,upload.state;
+END $$;
+ALTER FUNCTION folioharbor.import_reconcile_worker(uuid,uuid,uuid,text,timestamptz) OWNER TO folioharbor_owner;
+REVOKE ALL ON FUNCTION folioharbor.import_reconcile_worker(uuid,uuid,uuid,text,timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION folioharbor.import_reconcile_worker(uuid,uuid,uuid,text,timestamptz) TO folioharbor_worker;
+
 UPDATE folioharbor.schema_metadata SET schema_version=10,applied_at=clock_timestamp() WHERE singleton;

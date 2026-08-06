@@ -7,7 +7,20 @@ mod sanitize;
 
 use std::{
     io::{Read, Seek},
+    sync::Arc,
     time::Duration,
+};
+
+use async_trait::async_trait;
+use folioharbor_application::ports::{
+    BlobStore, BlobStoreError, PublicationParser, PublicationParserError,
+};
+use folioharbor_domain::{
+    catalog::{
+        CatalogMetadata, CatalogPublication, ParserMetadata,
+        PublicationResource as CatalogResource, SpineEntry as CatalogSpine, TocEntry as CatalogToc,
+    },
+    imports::blob::StorageKey,
 };
 
 pub use error::{EpubError, EpubErrorCode};
@@ -84,4 +97,82 @@ impl EpubParser {
         let package_path = container::package_path(&archive)?;
         package::parse(&archive, &package_path)
     }
+}
+
+pub struct EpubPublicationParser {
+    blobs: Arc<dyn BlobStore>,
+    limits: ParserLimits,
+}
+
+impl EpubPublicationParser {
+    #[must_use]
+    pub fn new(blobs: Arc<dyn BlobStore>, limits: ParserLimits) -> Self {
+        Self { blobs, limits }
+    }
+}
+
+#[async_trait]
+impl PublicationParser for EpubPublicationParser {
+    fn profile_version(&self) -> &'static str {
+        "epub3-v1"
+    }
+
+    async fn parse(&self, key: &StorageKey) -> Result<CatalogPublication, PublicationParserError> {
+        let mut source = self
+            .blobs
+            .open_publication(key)
+            .await
+            .map_err(|error| map_storage_error(&error))?;
+        let parsed = EpubParser::inspect(&mut source, self.limits)
+            .map_err(|_| PublicationParserError::Malformed)?;
+        map_publication(parsed)
+    }
+}
+
+fn map_storage_error(error: &BlobStoreError) -> PublicationParserError {
+    match error {
+        BlobStoreError::InsufficientCapacity => PublicationParserError::Capacity,
+        BlobStoreError::InvalidKey
+        | BlobStoreError::IdentityMismatch
+        | BlobStoreError::InvalidRange => PublicationParserError::Configuration,
+        BlobStoreError::Io(_) => PublicationParserError::Unavailable,
+    }
+}
+
+fn map_publication(
+    parsed: ParsedPublication,
+) -> Result<CatalogPublication, PublicationParserError> {
+    let metadata = CatalogMetadata::from_parser(&ParserMetadata {
+        titles: parsed.metadata.titles,
+        authors: parsed.metadata.authors,
+        languages: parsed.metadata.languages,
+        identifiers: parsed.metadata.identifiers,
+    })
+    .map_err(|_| PublicationParserError::Malformed)?;
+    let resources = parsed
+        .resources
+        .into_iter()
+        .map(|resource| CatalogResource::new(resource.href.as_str(), resource.media_type))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PublicationParserError::Malformed)?;
+    let spine = parsed
+        .spine
+        .into_iter()
+        .map(|item| CatalogSpine::new(item.href.as_str(), item.linear))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PublicationParserError::Malformed)?;
+    let toc = parsed
+        .toc
+        .into_iter()
+        .map(|entry| CatalogToc::new(entry.label, entry.href.as_str()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PublicationParserError::Malformed)?;
+    CatalogPublication::from_parser(
+        metadata,
+        resources,
+        spine,
+        toc,
+        parsed.cover.map(|path| path.as_str().to_owned()),
+    )
+    .map_err(|_| PublicationParserError::Malformed)
 }

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use folioharbor_domain::imports::blob::{BlobIdentity, StorageKey};
+use std::io::{Read, Seek};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -28,6 +29,9 @@ pub struct PromotedBlob {
     pub disposition: BlobDisposition,
 }
 
+pub trait PublicationSource: Read + Seek + Send {}
+impl<T: Read + Seek + Send> PublicationSource for T {}
+
 #[async_trait]
 pub trait BlobStore: Send + Sync {
     fn candidate_key(&self, identity: &BlobIdentity) -> StorageKey;
@@ -46,4 +50,10 @@ pub trait BlobStore: Send + Sync {
     ) -> Result<PromotedBlob, BlobStoreError>;
     async fn delete(&self, key: &StorageKey) -> Result<(), BlobStoreError>;
     async fn free_bytes(&self) -> Result<u64, BlobStoreError>;
+    async fn open_publication(
+        &self,
+        _key: &StorageKey,
+    ) -> Result<Box<dyn PublicationSource>, BlobStoreError> {
+        Err(BlobStoreError::InvalidKey)
+    }
 }

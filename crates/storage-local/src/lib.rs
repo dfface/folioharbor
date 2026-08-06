@@ -146,6 +146,15 @@ impl<P: CapacityProbe + 'static> BlobStore for LocalBlobStore<P> {
         let store = self.clone();
         run_blocking(move || store.free_bytes_sync()).await
     }
+
+    async fn open_publication(
+        &self,
+        key: &StorageKey,
+    ) -> Result<Box<dyn folioharbor_application::ports::PublicationSource>, BlobStoreError> {
+        let store = self.clone();
+        let key = key.clone();
+        run_blocking(move || store.open_publication_sync(&key)).await
+    }
 }
 
 async fn run_blocking<T>(

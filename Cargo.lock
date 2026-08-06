@@ -505,6 +505,7 @@ dependencies = [
  "tokio",
  "toml",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -538,6 +539,9 @@ name = "folioharbor-epub"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "folioharbor-application",
+ "folioharbor-domain",
  "html5ever",
  "markup5ever_rcdom",
  "proptest",
@@ -631,8 +635,23 @@ name = "folioharbor-worker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "folioharbor-application",
+ "folioharbor-domain",
+ "folioharbor-epub",
+ "folioharbor-postgres",
+ "folioharbor-storage-local",
+ "folioharbor-test-support",
+ "secrecy",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "time",
+ "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+ "zip",
 ]
 
 [[package]]

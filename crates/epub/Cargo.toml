@@ -6,6 +6,9 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+folioharbor-application = { path = "../application", version = "0.1.0" }
+folioharbor-domain = { path = "../domain", version = "0.1.0" }
 html5ever.workspace = true
 markup5ever_rcdom.workspace = true
 quick-xml.workspace = true
