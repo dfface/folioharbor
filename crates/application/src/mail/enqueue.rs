@@ -90,11 +90,15 @@ impl<R: MailRepository> MailOutbox<'_, R> {
         let current = self.secrets.current_for_encryption();
         let mut key = Sha256::digest(current.secret().expose_secret().as_bytes());
         let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| MailOutboxError::Encryption)?;
-        let nonce_source = uuid::Uuid::now_v7();
-        let nonce = Nonce::from_slice(&nonce_source.as_bytes()[..12]);
+        let mut nonce_bytes = [0_u8; 12];
+        getrandom::fill(&mut nonce_bytes).map_err(|_| MailOutboxError::Encryption)?;
+        let nonce = Nonce::from_slice(&nonce_bytes);
         let context = format!(
-            "{}:{}",
+            "{}:{}:{}",
             message.template.code(),
+            message
+                .recipient_account_id()
+                .map_or_else(String::new, |id| id.to_string()),
             message.recipient().as_str()
         );
         let ciphertext = cipher

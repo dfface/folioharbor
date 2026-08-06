@@ -552,6 +552,7 @@ dependencies = [
  "folioharbor-domain",
  "folioharbor-test-support",
  "futures-util",
+ "getrandom 0.3.4",
  "hmac",
  "secrecy",
  "serde",
