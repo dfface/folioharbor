@@ -44,6 +44,7 @@ impl EpubPath {
 #[derive(Clone, Copy, Debug)]
 pub struct ParserLimits {
     pub max_entries: usize,
+    pub max_central_directory_bytes: u64,
     pub max_total_uncompressed_bytes: u64,
     pub max_compression_ratio: u64,
     pub max_path_depth: usize,
@@ -56,6 +57,7 @@ impl Default for ParserLimits {
     fn default() -> Self {
         Self {
             max_entries: 4_096,
+            max_central_directory_bytes: 16 * 1024 * 1024,
             max_total_uncompressed_bytes: 512 * 1024 * 1024,
             max_compression_ratio: 200,
             max_path_depth: 32,

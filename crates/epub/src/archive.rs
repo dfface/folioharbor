@@ -19,6 +19,10 @@ impl BoundedArchive {
     ) -> Result<Self, EpubError> {
         let started = Instant::now();
         check_deadline(started, limits)?;
+        preflight(source, started, limits)?;
+        source
+            .seek(std::io::SeekFrom::Start(0))
+            .map_err(|_| error(EpubErrorCode::InvalidArchive))?;
         let mut zip =
             zip::ZipArchive::new(source).map_err(|_| error(EpubErrorCode::InvalidArchive))?;
         if zip.len() > limits.max_entries {
@@ -119,6 +123,105 @@ impl BoundedArchive {
         }
         Ok(())
     }
+}
+
+fn preflight<R: Read + Seek>(
+    source: &mut R,
+    started: Instant,
+    limits: ParserLimits,
+) -> Result<(), EpubError> {
+    const EOCD_SIZE: usize = 22;
+    const MAX_COMMENT: usize = u16::MAX as usize;
+    let source_len = source
+        .seek(std::io::SeekFrom::End(0))
+        .map_err(|_| error(EpubErrorCode::InvalidArchive))?;
+    let tail_len = usize::try_from(source_len.min((EOCD_SIZE + MAX_COMMENT) as u64))
+        .map_err(|_| error(EpubErrorCode::InvalidArchive))?;
+    if tail_len < EOCD_SIZE {
+        return Err(error(EpubErrorCode::InvalidArchive));
+    }
+    source
+        .seek(std::io::SeekFrom::Start(source_len - tail_len as u64))
+        .map_err(|_| error(EpubErrorCode::InvalidArchive))?;
+    let mut tail = vec![0_u8; tail_len];
+    source
+        .read_exact(&mut tail)
+        .map_err(|_| error(EpubErrorCode::InvalidArchive))?;
+    check_deadline(started, limits)?;
+
+    let (eocd_index, eocd) =
+        find_eocd(&tail).ok_or_else(|| error(EpubErrorCode::InvalidArchive))?;
+    if eocd_index >= 20 && tail.get(eocd_index - 20..eocd_index - 16) == Some(b"PK\x06\x07") {
+        return Err(error(EpubErrorCode::UnsupportedArchive));
+    }
+    let disk = read_u16(eocd, 4)?;
+    let central_disk = read_u16(eocd, 6)?;
+    let disk_entries = read_u16(eocd, 8)?;
+    let entries = read_u16(eocd, 10)?;
+    let central_size = read_u32(eocd, 12)?;
+    let central_offset = read_u32(eocd, 16)?;
+    if disk == u16::MAX
+        || central_disk == u16::MAX
+        || disk_entries == u16::MAX
+        || entries == u16::MAX
+        || central_size == u32::MAX
+        || central_offset == u32::MAX
+    {
+        return Err(error(EpubErrorCode::UnsupportedArchive));
+    }
+    if disk != 0 || central_disk != 0 {
+        return Err(error(EpubErrorCode::UnsupportedArchive));
+    }
+    if disk_entries != entries {
+        return Err(error(EpubErrorCode::InvalidArchive));
+    }
+    if usize::from(entries) > limits.max_entries {
+        return Err(error(EpubErrorCode::EntryLimit));
+    }
+    if u64::from(central_size) > limits.max_central_directory_bytes {
+        return Err(error(EpubErrorCode::CentralDirectoryLimit));
+    }
+    let comment = u64::from(read_u16(eocd, 20)?);
+    let eocd_absolute = source_len
+        .checked_sub(EOCD_SIZE as u64 + comment)
+        .ok_or_else(|| error(EpubErrorCode::InvalidArchive))?;
+    let central_end = u64::from(central_offset)
+        .checked_add(u64::from(central_size))
+        .ok_or_else(|| error(EpubErrorCode::InvalidArchive))?;
+    if central_end > eocd_absolute {
+        return Err(error(EpubErrorCode::InvalidArchive));
+    }
+    Ok(())
+}
+
+fn find_eocd(tail: &[u8]) -> Option<(usize, &[u8])> {
+    const SIGNATURE: &[u8] = b"PK\x05\x06";
+    tail.windows(4)
+        .enumerate()
+        .rev()
+        .find_map(|(index, window)| {
+            if window != SIGNATURE || index + 22 > tail.len() {
+                return None;
+            }
+            let comment = usize::from(u16::from_le_bytes([tail[index + 20], tail[index + 21]]));
+            (index + 22 + comment == tail.len()).then_some((index, &tail[index..index + 22]))
+        })
+}
+
+fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, EpubError> {
+    let field: [u8; 2] = bytes
+        .get(offset..offset + 2)
+        .and_then(|value| value.try_into().ok())
+        .ok_or_else(|| error(EpubErrorCode::InvalidArchive))?;
+    Ok(u16::from_le_bytes(field))
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, EpubError> {
+    let field: [u8; 4] = bytes
+        .get(offset..offset + 4)
+        .and_then(|value| value.try_into().ok())
+        .ok_or_else(|| error(EpubErrorCode::InvalidArchive))?;
+    Ok(u32::from_le_bytes(field))
 }
 
 pub(crate) fn normalize_path(path: &str, allow_fragment: bool) -> Result<EpubPath, EpubError> {

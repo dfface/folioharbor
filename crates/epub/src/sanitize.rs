@@ -1,10 +1,9 @@
+use cssparser::{Delimiter, Parser, ParserInput, ToCss, Token};
 use html5ever::{ParseOpts, parse_document, tendril::TendrilSink};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
-use crate::{EpubError, EpubPath};
-
 pub trait ResourceResolver {
-    fn resolve(&self, path: &EpubPath) -> Option<String>;
+    fn resolve(&self, reference: &str) -> Option<String>;
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -17,56 +16,41 @@ pub struct ContentSanitizer;
 
 impl ContentSanitizer {
     /// Removes active content and rewrites local references to opaque resource identifiers.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `document_path` is not a safe EPUB-internal path.
-    pub fn transform(
-        html: &str,
-        document_path: &str,
-        resolver: &impl ResourceResolver,
-    ) -> Result<SanitizedContent, EpubError> {
-        let document = EpubPath::new(document_path)?;
+    #[must_use]
+    pub fn transform(html: &str, resolver: &impl ResourceResolver) -> SanitizedContent {
         let dom = parse_document(RcDom::default(), ParseOpts::default()).one(html);
         let mut output = String::new();
         let mut warnings = Vec::new();
         for child in dom.document.children.borrow().iter() {
-            serialize(
-                child,
-                document.as_str(),
-                resolver,
-                &mut output,
-                &mut warnings,
-            )?;
+            serialize(child, resolver, &mut output, &mut warnings);
         }
-        Ok(SanitizedContent {
+        SanitizedContent {
             html: output,
             warnings,
-        })
+        }
     }
 }
 
 fn serialize(
     node: &Handle,
-    document_path: &str,
     resolver: &impl ResourceResolver,
     output: &mut String,
     warnings: &mut Vec<String>,
-) -> Result<(), EpubError> {
+) {
     match &node.data {
-        NodeData::Document => serialize_children(node, document_path, resolver, output, warnings),
+        NodeData::Document => serialize_children(node, resolver, output, warnings),
         NodeData::Text { contents } => {
             escape_text(contents.borrow().as_ref(), output);
-            Ok(())
         }
         NodeData::Element { name, attrs, .. } => {
             let tag = name.local.as_ref().to_ascii_lowercase();
             if is_forbidden_element(&tag) {
                 warnings.push(format!("removed element: {tag}"));
-                return Ok(());
+                return;
             }
             if !is_allowed_element(&tag) {
-                return serialize_children(node, document_path, resolver, output, warnings);
+                serialize_children(node, resolver, output, warnings);
+                return;
             }
             output.push('<');
             output.push_str(&tag);
@@ -77,9 +61,9 @@ fn serialize(
                 }
                 let raw = attribute.value.as_ref();
                 let value = if matches!(name.as_str(), "href" | "src" | "poster") {
-                    sanitize_url(raw, document_path, resolver)
+                    sanitize_url(raw, resolver)
                 } else if name == "style" {
-                    let css = sanitize_declarations(raw, document_path, resolver);
+                    let css = sanitize_declarations(raw, resolver);
                     (!css.is_empty()).then_some(css)
                 } else {
                     Some(raw.to_owned())
@@ -103,41 +87,34 @@ fn serialize(
                         _ => None,
                     })
                     .collect::<String>();
-                output.push_str(&sanitize_stylesheet(&css, document_path, resolver));
+                output.push_str(&sanitize_stylesheet(&css, resolver));
             } else {
-                serialize_children(node, document_path, resolver, output, warnings)?;
+                serialize_children(node, resolver, output, warnings);
             }
             if !is_void_element(&tag) {
                 output.push_str("</");
                 output.push_str(&tag);
                 output.push('>');
             }
-            Ok(())
         }
         NodeData::Doctype { .. }
         | NodeData::Comment { .. }
-        | NodeData::ProcessingInstruction { .. } => Ok(()),
+        | NodeData::ProcessingInstruction { .. } => {}
     }
 }
 
 fn serialize_children(
     node: &Handle,
-    document_path: &str,
     resolver: &impl ResourceResolver,
     output: &mut String,
     warnings: &mut Vec<String>,
-) -> Result<(), EpubError> {
+) {
     for child in node.children.borrow().iter() {
-        serialize(child, document_path, resolver, output, warnings)?;
+        serialize(child, resolver, output, warnings);
     }
-    Ok(())
 }
 
-fn sanitize_url(
-    raw: &str,
-    document_path: &str,
-    resolver: &impl ResourceResolver,
-) -> Option<String> {
+fn sanitize_url(raw: &str, resolver: &impl ResourceResolver) -> Option<String> {
     let value = raw.trim();
     if value.starts_with('#') {
         return safe_fragment(value).then(|| value.to_owned());
@@ -145,13 +122,15 @@ fn sanitize_url(
     if value.starts_with("//") || value.contains('\0') || has_scheme(value) {
         return None;
     }
-    let target = EpubPath::resolve_from(document_path, value).ok()?;
-    let fragment = target
-        .as_str()
+    let (reference, fragment) = value
         .split_once('#')
-        .map(|(_, fragment)| fragment.to_owned());
-    let resource_path = EpubPath::new(target.as_str().split('#').next()?).ok()?;
-    let opaque = resolver.resolve(&resource_path)?;
+        .map_or((value, None), |(reference, fragment)| {
+            (reference, Some(fragment))
+        });
+    if reference.is_empty() || reference.starts_with('/') || reference.contains(['\\', '\0']) {
+        return None;
+    }
+    let opaque = resolver.resolve(reference)?;
     if opaque.is_empty()
         || !opaque
             .chars()
@@ -162,7 +141,7 @@ fn sanitize_url(
     let mut rewritten = format!("resource:{opaque}");
     if let Some(fragment) = fragment.filter(|fragment| safe_fragment(fragment)) {
         rewritten.push('#');
-        rewritten.push_str(&fragment);
+        rewritten.push_str(fragment);
     }
     Some(rewritten)
 }
@@ -185,92 +164,178 @@ fn safe_fragment(fragment: &str) -> bool {
     })
 }
 
-fn sanitize_stylesheet(css: &str, document_path: &str, resolver: &impl ResourceResolver) -> String {
-    let mut without_imports = css.to_owned();
-    loop {
-        let lower = without_imports.to_ascii_lowercase();
-        let Some(start) = lower.find("@import") else {
-            break;
-        };
-        let end = without_imports[start..]
-            .find(';')
-            .map_or(without_imports.len(), |offset| start + offset + 1);
-        without_imports.replace_range(start..end, "");
-    }
+fn sanitize_stylesheet(css: &str, resolver: &impl ResourceResolver) -> String {
+    let mut input = ParserInput::new(css);
+    let mut parser = Parser::new(&mut input);
     let mut output = String::new();
-    for rule in without_imports.split('}') {
-        let Some((selector, declarations)) = rule.split_once('{') else {
-            continue;
-        };
-        if selector.contains('@') || selector.contains('<') || selector.contains('>') {
-            continue;
-        }
-        let declarations = sanitize_declarations(declarations, document_path, resolver);
-        if !selector.trim().is_empty() && !declarations.is_empty() {
-            output.push_str(selector.trim());
-            output.push('{');
-            output.push_str(&declarations);
-            output.push('}');
+    let mut selector = String::new();
+    let mut discard_rule = false;
+    while let Ok(token) = parser.next().cloned() {
+        match token {
+            Token::AtKeyword(_) => {
+                selector.clear();
+                discard_rule = true;
+            }
+            Token::Semicolon => {
+                selector.clear();
+                discard_rule = false;
+            }
+            Token::CurlyBracketBlock => {
+                let declarations = parser
+                    .parse_nested_block(|nested| {
+                        Ok::<_, cssparser::ParseError<'_, ()>>(sanitize_declarations_parser(
+                            nested, resolver,
+                        ))
+                    })
+                    .unwrap_or_default();
+                if !discard_rule && safe_selector(&selector) && !declarations.is_empty() {
+                    output.push_str(selector.trim());
+                    output.push('{');
+                    output.push_str(&declarations);
+                    output.push('}');
+                }
+                selector.clear();
+                discard_rule = false;
+            }
+            _ if !discard_rule && !token.is_parse_error() => {
+                selector.push_str(&token.to_css_string());
+            }
+            _ => {}
         }
     }
     output
 }
 
-fn sanitize_declarations(
-    css: &str,
-    document_path: &str,
+fn sanitize_declarations(css: &str, resolver: &impl ResourceResolver) -> String {
+    let mut input = ParserInput::new(css);
+    sanitize_declarations_parser(&mut Parser::new(&mut input), resolver)
+}
+
+fn sanitize_declarations_parser(
+    parser: &mut Parser<'_, '_>,
     resolver: &impl ResourceResolver,
 ) -> String {
     let mut output = Vec::new();
-    for declaration in css.split(';') {
-        let Some((property, raw_value)) = declaration.split_once(':') else {
+    while let Ok(token) = parser.next().cloned() {
+        let Token::Ident(property) = token else {
+            skip_declaration(parser);
             continue;
         };
-        let property = property.trim().to_ascii_lowercase();
+        if parser.expect_colon().is_err() {
+            skip_declaration(parser);
+            continue;
+        }
+        let property = property.to_ascii_lowercase();
         if !is_allowed_css_property(&property) {
+            skip_declaration(parser);
             continue;
         }
-        let mut value = raw_value.trim().to_owned();
-        let lower = value.to_ascii_lowercase();
-        if lower.contains("expression(")
-            || lower.contains("javascript:")
-            || lower.contains("-moz-binding")
-        {
-            continue;
-        }
-        if lower.contains("url(") {
-            let Some(rewritten) = rewrite_single_css_url(&value, document_path, resolver) else {
-                continue;
-            };
-            value = rewritten;
-        }
-        if !value.is_empty() {
+        let value = parser
+            .parse_until_after(Delimiter::Semicolon, |declaration| {
+                Ok::<_, cssparser::ParseError<'_, ()>>(parse_css_value(declaration, resolver))
+            })
+            .ok()
+            .flatten();
+        if let Some(value) = value {
             output.push(format!("{property}:{value}"));
         }
     }
     output.join(";")
 }
 
-fn rewrite_single_css_url(
-    value: &str,
-    document_path: &str,
+fn parse_css_value(
+    parser: &mut Parser<'_, '_>,
     resolver: &impl ResourceResolver,
 ) -> Option<String> {
-    let lower = value.to_ascii_lowercase();
-    let start = lower.find("url(")?;
-    if lower[start + 4..].contains("url(") {
-        return None;
+    let mut value = String::new();
+    while let Ok(token) = parser.next().cloned() {
+        match token {
+            Token::Semicolon => break,
+            Token::UnquotedUrl(url) => append_css_url(&mut value, &url, resolver)?,
+            Token::Function(name) if name.eq_ignore_ascii_case("url") => {
+                let raw = parser
+                    .parse_nested_block(|nested| {
+                        let token = nested.next()?.clone();
+                        let raw = match token {
+                            Token::QuotedString(value) | Token::Ident(value) => value.to_string(),
+                            _ => return Err(nested.new_custom_error::<(), ()>(())),
+                        };
+                        nested.expect_exhausted()?;
+                        Ok(raw)
+                    })
+                    .ok()?;
+                append_css_url(&mut value, &raw, resolver)?;
+            }
+            Token::Function(name) if safe_css_function(&name) => {
+                let nested = parser
+                    .parse_nested_block(|nested| {
+                        parse_css_value(nested, resolver)
+                            .ok_or_else(|| nested.new_custom_error::<(), ()>(()))
+                    })
+                    .ok()?;
+                value.push_str(&name.to_ascii_lowercase());
+                value.push('(');
+                value.push_str(&nested);
+                value.push(')');
+            }
+            Token::Function(_)
+            | Token::ParenthesisBlock
+            | Token::SquareBracketBlock
+            | Token::CurlyBracketBlock => {
+                consume_nested_block(parser);
+                return None;
+            }
+            Token::AtKeyword(_)
+            | Token::BadUrl(_)
+            | Token::BadString(_)
+            | Token::CloseParenthesis
+            | Token::CloseSquareBracket
+            | Token::CloseCurlyBracket => return None,
+            _ => {
+                if !value.is_empty() {
+                    value.push(' ');
+                }
+                value.push_str(&token.to_css_string());
+            }
+        }
     }
-    let end_relative = value[start + 4..].find(')')?;
-    let end = start + 4 + end_relative;
-    let raw = value[start + 4..end].trim().trim_matches(['\'', '"']);
-    let rewritten = sanitize_url(raw, document_path, resolver)?;
-    let mut result = value[..start].to_owned();
-    result.push_str("url('");
-    result.push_str(&rewritten);
-    result.push_str("')");
-    result.push_str(&value[end + 1..]);
-    Some(result)
+    (!value.is_empty()).then_some(value)
+}
+
+fn consume_nested_block(parser: &mut Parser<'_, '_>) {
+    let _ = parser.parse_nested_block(|nested| {
+        while nested.next().is_ok() {}
+        Ok::<(), cssparser::ParseError<'_, ()>>(())
+    });
+}
+
+fn append_css_url(output: &mut String, raw: &str, resolver: &impl ResourceResolver) -> Option<()> {
+    let rewritten = sanitize_url(raw, resolver)?;
+    output.push_str("url('");
+    output.push_str(&rewritten);
+    output.push_str("')");
+    Some(())
+}
+
+fn skip_declaration(parser: &mut Parser<'_, '_>) {
+    while let Ok(token) = parser.next() {
+        if matches!(token, Token::Semicolon) {
+            break;
+        }
+    }
+}
+
+fn safe_selector(selector: &str) -> bool {
+    let selector = selector.trim();
+    !selector.is_empty()
+        && !selector.contains(['@', '<', '>'])
+        && !selector.to_ascii_lowercase().contains("url(")
+}
+
+fn safe_css_function(name: &str) -> bool {
+    ["rgb", "rgba", "hsl", "hsla", "calc", "min", "max", "clamp"]
+        .iter()
+        .any(|safe| name.eq_ignore_ascii_case(safe))
 }
 
 fn is_forbidden_element(tag: &str) -> bool {

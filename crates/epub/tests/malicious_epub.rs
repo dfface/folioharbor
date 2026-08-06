@@ -1,7 +1,10 @@
 #[path = "../../../tests/fixtures/epub/generate-fixtures.rs"]
 mod fixtures;
 
-use std::{io::Cursor, time::Duration};
+use std::{
+    io::{Cursor, Read, Seek, SeekFrom},
+    time::Duration,
+};
 
 use fixtures::{FixtureEntry, epub};
 use folioharbor_epub::{EpubErrorCode, EpubParser, ParserLimits};
@@ -291,4 +294,186 @@ fn patch_first_zip_u32(
         .ok_or_else(|| anyhow::anyhow!("fixture ZIP header truncated"))?;
     field.copy_from_slice(&value.to_le_bytes());
     Ok(())
+}
+
+#[test]
+fn preflights_hostile_entry_count_before_zip_constructor() -> anyhow::Result<()> {
+    let source = raw_eocd(2, 0, 0, 0, 0);
+    let mut reader = CountingReader::new(source);
+    let error = EpubParser::inspect(
+        &mut reader,
+        ParserLimits {
+            max_entries: 1,
+            ..ParserLimits::default()
+        },
+    )
+    .err()
+    .ok_or_else(|| anyhow::anyhow!("hostile central count was accepted"))?;
+    assert_eq!(error.code(), EpubErrorCode::EntryLimit);
+    assert_eq!(reader.bytes_read, 22);
+    assert_eq!(reader.seek_calls, 2, "ZIP constructor must not be reached");
+    Ok(())
+}
+
+#[test]
+fn preflights_central_directory_size_zip64_split_and_malformed_metadata() -> anyhow::Result<()> {
+    assert_eq!(
+        inspect(
+            &fixtures::valid_epub()?,
+            ParserLimits {
+                max_central_directory_bytes: 1,
+                ..ParserLimits::default()
+            }
+        )?,
+        EpubErrorCode::CentralDirectoryLimit
+    );
+    assert_eq!(
+        inspect(&raw_eocd(u16::MAX, 0, 0, 0, 0), ParserLimits::default())?,
+        EpubErrorCode::UnsupportedArchive
+    );
+    let mut zip64_locator = Vec::from(b"PK\x06\x07".as_slice());
+    zip64_locator.extend_from_slice(&[0; 16]);
+    zip64_locator.extend_from_slice(&raw_eocd(0, 0, 0, 0, 0));
+    assert_eq!(
+        inspect(&zip64_locator, ParserLimits::default())?,
+        EpubErrorCode::UnsupportedArchive
+    );
+    assert_eq!(
+        inspect(&raw_eocd(0, 1, 0, 0, 0), ParserLimits::default())?,
+        EpubErrorCode::UnsupportedArchive
+    );
+    assert_eq!(
+        inspect(&raw_eocd(0, 0, 0, 10, 99), ParserLimits::default())?,
+        EpubErrorCode::InvalidArchive
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_container_and_package_elements_hidden_in_wrappers() -> anyhow::Result<()> {
+    let wrapped_container = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: br#"<wrapper xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><container><rootfiles><rootfile full-path="book.opf"/></rootfiles></container></wrapper>"#, compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: minimal_opf(), compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>ok</body></html>", compression: Stored },
+    ])?;
+    assert_eq!(
+        inspect(&wrapped_container, ParserLimits::default())?,
+        EpubErrorCode::InvalidContainer
+    );
+
+    let wrapped_package = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<wrapper xmlns="http://www.idpf.org/2007/opf"><package version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Wrapped</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package></wrapper>"#, compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>ok</body></html>", compression: Stored },
+    ])?;
+    assert_eq!(
+        inspect(&wrapped_package, ParserLimits::default())?,
+        EpubErrorCode::InvalidPackage
+    );
+    Ok(())
+}
+
+#[test]
+fn requires_valid_nonempty_navigation_with_existing_internal_targets() -> anyhow::Result<()> {
+    for nav in [
+        br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>no toc</p></body></html>"#.as_slice(),
+        br#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol/></nav></body></html>"#.as_slice(),
+        br#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><a href="missing.xhtml#x">Missing</a></nav></body></html>"#.as_slice(),
+    ] {
+        let source = epub(&[
+            FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
+            FixtureEntry { path: "book.opf", bytes: nav_opf(), compression: Stored },
+            FixtureEntry { path: "chapter.xhtml", bytes: b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>ok</body></html>", compression: Stored },
+            FixtureEntry { path: "nav.xhtml", bytes: nav, compression: Stored },
+        ])?;
+        assert_eq!(
+            inspect(&source, ParserLimits::default())?,
+            EpubErrorCode::InvalidNavigation
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn spine_requires_readable_content_or_a_readable_fallback() -> anyhow::Result<()> {
+    let image_only = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Image spine</dc:title></metadata><manifest><item id="image" href="cover.png" media-type="image/png"/></manifest><spine><itemref idref="image"/></spine></package>"#, compression: Stored },
+        FixtureEntry { path: "cover.png", bytes: b"png", compression: Stored },
+    ])?;
+    assert_eq!(
+        inspect(&image_only, ParserLimits::default())?,
+        EpubErrorCode::InvalidSpine
+    );
+
+    let fallback = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Fallback spine</dc:title></metadata><manifest><item id="image" href="cover.png" media-type="image/png" fallback="chapter"/><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="image"/></spine></package>"#, compression: Stored },
+        FixtureEntry { path: "cover.png", bytes: b"png", compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>ok</body></html>", compression: Stored },
+    ])?;
+    let publication = EpubParser::inspect(&mut Cursor::new(fallback), ParserLimits::default())?;
+    assert_eq!(publication.spine[0].href.as_str(), "chapter.xhtml");
+    Ok(())
+}
+
+struct CountingReader {
+    inner: Cursor<Vec<u8>>,
+    bytes_read: usize,
+    seek_calls: usize,
+}
+
+impl CountingReader {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            inner: Cursor::new(bytes),
+            bytes_read: 0,
+            seek_calls: 0,
+        }
+    }
+}
+
+impl Read for CountingReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        self.bytes_read = self.bytes_read.saturating_add(read);
+        Ok(read)
+    }
+}
+
+impl Seek for CountingReader {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.seek_calls = self.seek_calls.saturating_add(1);
+        self.inner.seek(position)
+    }
+}
+
+fn raw_eocd(
+    entries: u16,
+    disk: u16,
+    central_disk: u16,
+    central_size: u32,
+    central_offset: u32,
+) -> Vec<u8> {
+    let mut bytes = Vec::from(b"PK\x05\x06".as_slice());
+    bytes.extend_from_slice(&disk.to_le_bytes());
+    bytes.extend_from_slice(&central_disk.to_le_bytes());
+    bytes.extend_from_slice(&entries.to_le_bytes());
+    bytes.extend_from_slice(&entries.to_le_bytes());
+    bytes.extend_from_slice(&central_size.to_le_bytes());
+    bytes.extend_from_slice(&central_offset.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes
+}
+
+fn standard_container() -> &'static [u8] {
+    br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#
+}
+
+fn minimal_opf() -> &'static [u8] {
+    br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Book</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#
+}
+
+fn nav_opf() -> &'static [u8] {
+    br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Book</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine><itemref idref="chapter"/></spine></package>"#
 }
