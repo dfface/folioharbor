@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use folioharbor_application::{
     actor::Actor,
-    catalog::{
+    ports::{
         DownloadAuthorization, DownloadRange, DownloadRepository, DownloadRepositoryError,
-        DownloadSource,
+        DownloadSourceReceiver,
     },
 };
 use folioharbor_domain::{
@@ -33,6 +33,7 @@ impl DownloadRepository for PgDownloadRepository {
         actor: Actor,
         item_id: ItemId,
         request_id: RequestId,
+        source: &mut dyn DownloadSourceReceiver,
     ) -> Result<DownloadAuthorization, DownloadRepositoryError> {
         let mut transaction = self
             .pool
@@ -59,23 +60,26 @@ impl DownloadRepository for PgDownloadRepository {
             .await
             .map_err(|_| DownloadRepositoryError)?;
         match row.try_get::<String, _>("outcome").as_deref() {
-            Ok("granted") => Ok(DownloadAuthorization::Granted(DownloadSource::new(
-                BlobId::from_uuid(
-                    row.try_get("blob_id")
-                        .map_err(|_| DownloadRepositoryError)?,
-                ),
-                StorageKey::from_opaque(
-                    row.try_get("storage_key")
-                        .map_err(|_| DownloadRepositoryError)?,
-                ),
-                u64::try_from(
-                    row.try_get::<i64, _>("byte_size")
-                        .map_err(|_| DownloadRepositoryError)?,
-                )
-                .map_err(|_| DownloadRepositoryError)?,
-                row.try_get("file_name")
+            Ok("granted") => {
+                source.receive(
+                    BlobId::from_uuid(
+                        row.try_get("blob_id")
+                            .map_err(|_| DownloadRepositoryError)?,
+                    ),
+                    StorageKey::from_opaque(
+                        row.try_get("storage_key")
+                            .map_err(|_| DownloadRepositoryError)?,
+                    ),
+                    u64::try_from(
+                        row.try_get::<i64, _>("byte_size")
+                            .map_err(|_| DownloadRepositoryError)?,
+                    )
                     .map_err(|_| DownloadRepositoryError)?,
-            ))),
+                    row.try_get("file_name")
+                        .map_err(|_| DownloadRepositoryError)?,
+                );
+                Ok(DownloadAuthorization::Granted)
+            }
             Ok("forbidden") => Ok(DownloadAuthorization::Forbidden),
             Ok("not_found") => Ok(DownloadAuthorization::NotFound),
             _ => Err(DownloadRepositoryError),

@@ -821,7 +821,6 @@ git commit -m "feat: expose authorized library catalog queries"
 
 **Files:**
 
-- Create: `migrations/0020_download_authorization.sql`
 - Create: `.sqlx/query-f5227dcc927da07bef1f71f2e39ef09ef6e75b3001dcbd1d8113109a12620afc.json`
 - Create: `.sqlx/query-1157cf6212889484f3e59dbc1121d53c173a3f9d9fe70582704bb204ebf2a9d4.json`
 - Create: `migrations/0012_reader_projection.sql`
@@ -996,18 +995,29 @@ git commit -m "feat: synchronize versioned reading progress"
 **Files:**
 
 - Create: `crates/application/src/catalog/download_item.rs`
+- Create: `crates/application/src/ports/download_repository.rs`
 - Create: `crates/http/src/routes/download.rs`
 - Create: `crates/http/tests/download_routes.rs`
 - Create: `migrations/0020_download_authorization.sql`
 - Create: `migrations/0021_download_semantics.sql`
 - Create: `migrations/0022_download_rbac.sql`
+- Modify: `Cargo.toml`
+- Modify: `Cargo.lock`
+- Modify: `crates/application/Cargo.toml`
+- Modify: `crates/application/src/catalog/mod.rs`
+- Modify: `crates/application/src/ports/mod.rs`
 - Modify: `crates/application/src/authorization.rs`
+- Modify: `crates/application/tests/download_item.rs`
+- Modify: `crates/http/tests/reader_routes.rs`
+- Modify: `crates/postgres/src/download.rs`
+- Modify: `crates/postgres/tests/download_authorization.rs`
 - Modify: `crates/storage-local/src/lib.rs`
 - Modify: `openapi/folioharbor-v1.yaml`
 
 **Interfaces:**
 
-- Produces `DownloadItem::authorize(actor, item_id) -> DownloadGrant` containing only opaque storage identity, size, media type, safe filename, and ETag material.
+- Produces `DownloadItem::authorize(actor, item_id, request_id) -> Result<DownloadGrant, AppError>` containing only opaque storage identity, size, media type, safe filename, and ETag material.
+- The repository port returns a payload-free `DownloadAuthorization` decision and delivers persistence-only metadata through `DownloadSourceReceiver`; `Granted` must deliver exactly one source or fail closed, and no concrete secret carrier is exported by the catalog API.
 - Produces `GET/HEAD /api/v1/items/{item_id}/download` with single-range support.
 
 - [ ] **Step 1: Write failing authorization and HTTP range tests**

@@ -13,10 +13,7 @@ use axum::{
 };
 use folioharbor_application::{
     actor::Actor,
-    catalog::{
-        DownloadAuthorization, DownloadRange, DownloadRepository, DownloadRepositoryError,
-        DownloadService, DownloadSource,
-    },
+    catalog::{DownloadRange, DownloadService},
     error::AppError,
     identity::{
         AuthenticateSessionCommand, AuthenticateSessionUseCase, AuthenticatedSession,
@@ -28,8 +25,9 @@ use folioharbor_application::{
         RevokeSessionUseCase, SafeSession, VerifiedAccount, VerifyEmailCommand, VerifyEmailUseCase,
     },
     ports::{
-        BlobStore, BlobStoreError, PromotedBlob, ReaderCatalogError, ReaderCatalogRepository,
-        ReaderPublication, ReaderResource, ReaderSpineEntry,
+        BlobStore, BlobStoreError, DownloadAuthorization, DownloadRepository,
+        DownloadRepositoryError, DownloadSourceReceiver, PromotedBlob, ReaderCatalogError,
+        ReaderCatalogRepository, ReaderPublication, ReaderResource, ReaderSpineEntry,
     },
     rate_limit::{CheckRateLimit, RateLimitDecision, RateLimitUseCase},
     reader::{
@@ -89,16 +87,18 @@ impl DownloadRepository for DownloadFixture {
         actor: Actor,
         item: ItemId,
         _: RequestId,
+        source: &mut dyn DownloadSourceReceiver,
     ) -> Result<DownloadAuthorization, DownloadRepositoryError> {
         if actor.user_id != self.allowed || item != self.item {
             return Ok(DownloadAuthorization::NotFound);
         }
-        Ok(DownloadAuthorization::Granted(DownloadSource::new(
+        source.receive(
             self.blob,
             self.key.clone(),
             self.byte_size,
             "危 险.epub".to_owned(),
-        )))
+        );
+        Ok(DownloadAuthorization::Granted)
     }
 
     async fn record_download_start(

@@ -6,38 +6,52 @@ use folioharbor_domain::{
 };
 use sha2::{Digest as _, Sha256};
 use std::fmt;
-use thiserror::Error;
+use unicode_properties::{GeneralCategory, UnicodeGeneralCategory as _};
 
-use crate::{actor::Actor, error::AppError};
+use crate::{
+    actor::Actor,
+    error::AppError,
+    ports::{DownloadAuthorization, DownloadRange, DownloadRepository, DownloadSourceReceiver},
+};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DownloadRange {
-    pub start: u64,
-    pub end: u64,
-}
-
-#[derive(Clone, Eq, PartialEq)]
-pub struct DownloadSource {
+struct DownloadSource {
     blob_id: BlobId,
     storage_identity: StorageKey,
     byte_size: u64,
     file_name: String,
 }
 
-impl DownloadSource {
-    #[must_use]
-    pub fn new(
+#[derive(Default)]
+struct DownloadSourceCollector(DownloadSourceCollection);
+
+#[derive(Default)]
+enum DownloadSourceCollection {
+    #[default]
+    Missing,
+    One(DownloadSource),
+    Invalid,
+}
+
+impl DownloadSourceReceiver for DownloadSourceCollector {
+    fn receive(
+        &mut self,
         blob_id: BlobId,
         storage_identity: StorageKey,
         byte_size: u64,
         file_name: String,
-    ) -> Self {
-        Self {
+    ) {
+        let source = DownloadSource {
             blob_id,
             storage_identity,
             byte_size,
             file_name,
-        }
+        };
+        self.0 = match std::mem::replace(&mut self.0, DownloadSourceCollection::Invalid) {
+            DownloadSourceCollection::Missing => DownloadSourceCollection::One(source),
+            DownloadSourceCollection::One(_) | DownloadSourceCollection::Invalid => {
+                DownloadSourceCollection::Invalid
+            }
+        };
     }
 }
 
@@ -47,47 +61,6 @@ impl fmt::Debug for DownloadSource {
             .debug_struct("DownloadSource")
             .field("byte_size", &self.byte_size)
             .finish_non_exhaustive()
-    }
-}
-
-#[derive(Debug, Error)]
-#[error("download repository failed")]
-pub struct DownloadRepositoryError;
-
-#[derive(Clone, Eq, PartialEq)]
-pub enum DownloadAuthorization {
-    Granted(DownloadSource),
-    Forbidden,
-    NotFound,
-}
-
-impl fmt::Debug for DownloadAuthorization {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Granted(source) => formatter.debug_tuple("Granted").field(source).finish(),
-            Self::Forbidden => formatter.write_str("Forbidden"),
-            Self::NotFound => formatter.write_str("NotFound"),
-        }
-    }
-}
-
-#[async_trait]
-pub trait DownloadRepository: Send + Sync {
-    async fn authorize_download(
-        &self,
-        actor: Actor,
-        item_id: ItemId,
-        request_id: RequestId,
-    ) -> Result<DownloadAuthorization, DownloadRepositoryError>;
-
-    async fn record_download_start(
-        &self,
-        _actor: Actor,
-        _item_id: ItemId,
-        _request_id: RequestId,
-        _range: DownloadRange,
-    ) -> Result<bool, DownloadRepositoryError> {
-        Err(DownloadRepositoryError)
     }
 }
 
@@ -247,15 +220,16 @@ impl<R: DownloadRepository + ?Sized> DownloadItem<'_, R> {
         item_id: ItemId,
         request_id: RequestId,
     ) -> Result<DownloadGrant, AppError> {
+        let mut source = DownloadSourceCollector::default();
         let authorization = self
             .repository
-            .authorize_download(actor, item_id, request_id)
+            .authorize_download(actor, item_id, request_id, &mut source)
             .await
             .map_err(|_| AppError::DependencyUnavailable {
                 code: "download_repository_unavailable",
             })?;
-        let source = match authorization {
-            DownloadAuthorization::Granted(source) => source,
+        match authorization {
+            DownloadAuthorization::Granted => {}
             DownloadAuthorization::Forbidden => {
                 return Err(AppError::Forbidden {
                     code: "item_download_forbidden",
@@ -266,6 +240,11 @@ impl<R: DownloadRepository + ?Sized> DownloadItem<'_, R> {
                     code: "item_not_found",
                 });
             }
+        }
+        let DownloadSourceCollection::One(source) = source.0 else {
+            return Err(AppError::DependencyUnavailable {
+                code: "download_repository_unavailable",
+            });
         };
         Ok(DownloadGrant {
             storage_identity: source.storage_identity,
@@ -298,13 +277,27 @@ pub fn sanitize_download_file_name(value: &str) -> String {
 }
 
 fn is_unsafe_filename_character(character: char) -> bool {
-    character.is_control()
-        || matches!(
-            character,
-            '\u{061c}'
-                | '\u{200b}'..='\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2060}'..='\u{206f}'
-                | '\u{feff}'
-        )
+    character.is_control() || character.general_category() == GeneralCategory::Format
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_download_source_debug_is_redacted() {
+        let blob_id = BlobId::new();
+        let source = DownloadSource {
+            blob_id,
+            storage_identity: StorageKey::from_opaque("blob:secret-debug-location".to_owned()),
+            byte_size: 16,
+            file_name: "secret-debug-name.epub".to_owned(),
+        };
+
+        let debug = format!("{source:?}");
+        assert!(!debug.contains(&blob_id.as_uuid().to_string()));
+        assert!(!debug.contains("secret-debug-location"));
+        assert!(!debug.contains("secret-debug-name"));
+        assert!(debug.contains("byte_size: 16"));
+    }
 }

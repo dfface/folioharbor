@@ -393,12 +393,23 @@ mod tests {
         assert!(!value.contains('\n'));
         assert!(!value.contains('/'));
 
-        let bidi = content_disposition("safe\u{202e}gpj\u{2066}\u{2069}\u{200e}.epub");
+        let bidi = content_disposition(
+            "安\u{00ad}全\u{180e}e\u{301}😀\u{fff9}\u{e0001}\u{202e}gpj\u{2066}\u{2069}\u{200e}.epub",
+        );
         assert_eq!(
             bidi,
-            "attachment; filename=\"safegpj.epub\"; filename*=UTF-8''safegpj.epub"
+            "attachment; filename=\"__e__gpj.epub\"; filename*=UTF-8''%E5%AE%89%E5%85%A8e%CC%81%F0%9F%98%80gpj.epub"
         );
-        for encoded_control in ["%E2%80%AE", "%E2%81%A6", "%E2%81%A9", "%E2%80%8E"] {
+        for encoded_control in [
+            "%C2%AD",
+            "%E1%A0%8E",
+            "%EF%BF%B9",
+            "%F3%A0%80%81",
+            "%E2%80%AE",
+            "%E2%81%A6",
+            "%E2%81%A9",
+            "%E2%80%8E",
+        ] {
             assert!(!bidi.contains(encoded_control));
         }
     }

@@ -2,7 +2,8 @@
 
 use folioharbor_application::{
     actor::Actor,
-    catalog::{DownloadAuthorization, DownloadRange, DownloadRepository},
+    catalog::DownloadRange,
+    ports::{DownloadAuthorization, DownloadRepository, DownloadSourceReceiver},
 };
 use folioharbor_domain::id::{
     BlobId, HoldingId, ItemId, LibraryId, ManifestationId, PublicationPackageId, RequestId,
@@ -47,10 +48,8 @@ async fn download_matrix_setting_and_audit_are_enforced_in_postgres() -> anyhow:
     let repository = PgDownloadRepository::new(pools.api.clone());
     for (role, user) in [("owner", owner), ("editor", editor)] {
         assert!(matches!(
-            repository
-                .authorize_download(actor(user), item, RequestId::new())
-                .await?,
-            DownloadAuthorization::Granted(_)
+            authorize(&repository, actor(user), item, RequestId::new()).await?,
+            DownloadAuthorization::Granted
         ));
         sqlx::query(
             "DELETE FROM folioharbor.role_permissions WHERE role_code=$1 AND permission_code='item.download'",
@@ -58,12 +57,10 @@ async fn download_matrix_setting_and_audit_are_enforced_in_postgres() -> anyhow:
         .bind(role)
         .execute(&pools.owner)
         .await?;
-        assert_eq!(
-            repository
-                .authorize_download(actor(user), item, RequestId::new())
-                .await?,
+        assert!(matches!(
+            authorize(&repository, actor(user), item, RequestId::new()).await?,
             DownloadAuthorization::Forbidden
-        );
+        ));
         sqlx::query(
             "INSERT INTO folioharbor.role_permissions(role_code,permission_code) VALUES($1,'item.download')",
         )
@@ -71,30 +68,28 @@ async fn download_matrix_setting_and_audit_are_enforced_in_postgres() -> anyhow:
         .execute(&pools.owner)
         .await?;
     }
-    assert_eq!(
-        repository
-            .authorize_download(actor(reader), item, RequestId::new())
-            .await?,
+    assert!(matches!(
+        authorize(&repository, actor(reader), item, RequestId::new()).await?,
         DownloadAuthorization::Forbidden
-    );
-    assert_eq!(
-        repository
-            .authorize_download(actor(outsider), item, RequestId::new())
-            .await?,
+    ));
+    assert!(matches!(
+        authorize(&repository, actor(outsider), item, RequestId::new()).await?,
         DownloadAuthorization::NotFound
-    );
-    assert_eq!(
-        repository
-            .authorize_download(actor(outsider), item, RequestId::new())
-            .await?,
+    ));
+    assert!(matches!(
+        authorize(&repository, actor(outsider), item, RequestId::new()).await?,
         DownloadAuthorization::NotFound
-    );
-    assert_eq!(
-        repository
-            .authorize_download(actor(outsider), ItemId::new(), RequestId::new())
-            .await?,
+    ));
+    assert!(matches!(
+        authorize(
+            &repository,
+            actor(outsider),
+            ItemId::new(),
+            RequestId::new()
+        )
+        .await?,
         DownloadAuthorization::NotFound
-    );
+    ));
     let outsider_denials: Vec<(uuid::Uuid, uuid::Uuid, serde_json::Value)> = sqlx::query_as(
         "SELECT library_id,resource_id,metadata FROM folioharbor.audit_events WHERE action_code='item.download' AND decision='denied' AND actor_id=$1",
     )
@@ -112,22 +107,18 @@ async fn download_matrix_setting_and_audit_are_enforced_in_postgres() -> anyhow:
     .execute(&pools.owner)
     .await?;
     assert!(matches!(
-        repository
-            .authorize_download(actor(reader), item, RequestId::new())
-            .await?,
-        DownloadAuthorization::Granted(_)
+        authorize(&repository, actor(reader), item, RequestId::new()).await?,
+        DownloadAuthorization::Granted
     ));
     sqlx::query(
         "DELETE FROM folioharbor.role_permissions WHERE role_code='reader' AND permission_code='item.download'",
     )
     .execute(&pools.owner)
     .await?;
-    assert_eq!(
-        repository
-            .authorize_download(actor(reader), item, RequestId::new())
-            .await?,
+    assert!(matches!(
+        authorize(&repository, actor(reader), item, RequestId::new()).await?,
         DownloadAuthorization::Forbidden
-    );
+    ));
     assert!(
         !repository
             .record_download_start(
@@ -166,6 +157,31 @@ async fn download_matrix_setting_and_audit_are_enforced_in_postgres() -> anyhow:
     assert_eq!(denied, 1);
     database.cleanup().await?;
     Ok(())
+}
+
+struct DiscardDownloadSource;
+
+impl DownloadSourceReceiver for DiscardDownloadSource {
+    fn receive(
+        &mut self,
+        _: BlobId,
+        _: folioharbor_domain::imports::blob::StorageKey,
+        _: u64,
+        _: String,
+    ) {
+    }
+}
+
+async fn authorize(
+    repository: &PgDownloadRepository,
+    actor: Actor,
+    item_id: ItemId,
+    request_id: RequestId,
+) -> Result<DownloadAuthorization, folioharbor_application::ports::DownloadRepositoryError> {
+    let mut source = DiscardDownloadSource;
+    repository
+        .authorize_download(actor, item_id, request_id, &mut source)
+        .await
 }
 
 fn actor(user_id: UserId) -> Actor {
