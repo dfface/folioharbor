@@ -21,11 +21,16 @@ use crate::{DatabaseContext, PgTransactionContext};
 const MAX_PROJECTION_CACHE_ENTRIES: usize = 16;
 const MAX_PROJECTION_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
+type ProjectionResult = Result<Option<Arc<ReaderPublication>>, ReaderCatalogError>;
+type ProjectionSender = tokio::sync::watch::Sender<Option<ProjectionResult>>;
+type ProjectionReceiver = tokio::sync::watch::Receiver<Option<ProjectionResult>>;
+
+#[derive(Clone)]
 pub struct PgReaderCatalogRepository {
     pool: sqlx::PgPool,
-    cache: Mutex<ProjectionCache>,
-    access_checks: AtomicUsize,
-    projection_loads: AtomicUsize,
+    state: Arc<Mutex<ProjectionState>>,
+    access_checks: Arc<AtomicUsize>,
+    projection_loads: Arc<AtomicUsize>,
 }
 
 impl PgReaderCatalogRepository {
@@ -33,24 +38,31 @@ impl PgReaderCatalogRepository {
     pub fn new(pool: sqlx::PgPool) -> Self {
         Self {
             pool,
-            cache: Mutex::new(ProjectionCache::new(
-                MAX_PROJECTION_CACHE_ENTRIES,
-                MAX_PROJECTION_CACHE_BYTES,
-            )),
-            access_checks: AtomicUsize::new(0),
-            projection_loads: AtomicUsize::new(0),
+            state: Arc::new(Mutex::new(ProjectionState {
+                cache: ProjectionCache::new(
+                    MAX_PROJECTION_CACHE_ENTRIES,
+                    MAX_PROJECTION_CACHE_BYTES,
+                ),
+                inflight: ProjectionInflight::default(),
+            })),
+            access_checks: Arc::new(AtomicUsize::new(0)),
+            projection_loads: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     #[must_use]
     pub fn cache_metrics(&self) -> ReaderProjectionCacheMetrics {
-        let (entries, bytes) = self
-            .cache
-            .lock()
-            .map_or((0, 0), |cache| (cache.entries.len(), cache.bytes));
+        let (entries, bytes, inflight_loads) = self.state.lock().map_or((0, 0, 0), |state| {
+            (
+                state.cache.entries.len(),
+                state.cache.bytes,
+                state.inflight.len(),
+            )
+        });
         ReaderProjectionCacheMetrics {
             entries,
             bytes,
+            inflight_loads,
             access_checks: self.access_checks.load(Ordering::SeqCst),
             projection_loads: self.projection_loads.load(Ordering::SeqCst),
         }
@@ -61,6 +73,7 @@ impl PgReaderCatalogRepository {
 pub struct ReaderProjectionCacheMetrics {
     pub entries: usize,
     pub bytes: usize,
+    pub inflight_loads: usize,
     pub access_checks: usize,
     pub projection_loads: usize,
 }
@@ -80,6 +93,48 @@ struct ProjectionCache {
     bytes: usize,
     max_entries: usize,
     max_bytes: usize,
+}
+
+struct ProjectionState {
+    cache: ProjectionCache,
+    inflight: ProjectionInflight,
+}
+
+#[derive(Default)]
+struct ProjectionInflight {
+    entries: HashMap<ProjectionKey, ProjectionSender>,
+}
+
+impl ProjectionInflight {
+    fn subscribe(&self, key: &ProjectionKey) -> Option<ProjectionReceiver> {
+        self.entries.get(key).map(ProjectionSender::subscribe)
+    }
+
+    fn insert(&mut self, key: ProjectionKey) -> (ProjectionSender, ProjectionReceiver) {
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        self.entries.insert(key, sender.clone());
+        (sender, receiver)
+    }
+
+    fn complete(
+        &mut self,
+        key: &ProjectionKey,
+        sender: &ProjectionSender,
+        result: ProjectionResult,
+    ) {
+        sender.send_replace(Some(result));
+        if self
+            .entries
+            .get(key)
+            .is_some_and(|current| current.same_channel(sender))
+        {
+            self.entries.remove(key);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 impl ProjectionCache {
@@ -139,6 +194,7 @@ fn projection_weight(publication: &ReaderPublication) -> usize {
             .sum::<usize>()
 }
 
+#[derive(Clone)]
 struct ReaderAccessRow {
     library_id: Uuid,
     item_id: Uuid,
@@ -195,6 +251,10 @@ impl ReaderCatalogRepository for PgReaderCatalogRepository {
             transaction.commit().await.map_err(|_| ReaderCatalogError)?;
             return Ok(None);
         };
+        transaction.commit().await.map_err(|_| ReaderCatalogError)?;
+        if access.membership_version <= 0 {
+            return Err(ReaderCatalogError);
+        }
         let key = ProjectionKey {
             manifestation_id: access.manifestation_id,
             package_id: access.package_id,
@@ -202,16 +262,90 @@ impl ReaderCatalogRepository for PgReaderCatalogRepository {
             parser_profile_version: access.parser_profile_version.clone(),
             format_version: 1,
         };
-        let cached = self.cache.lock().map_err(|_| ReaderCatalogError)?.get(&key);
-        if let Some(cached) = cached {
-            transaction.commit().await.map_err(|_| ReaderCatalogError)?;
-            let mut publication = (*cached).clone();
-            publication.library_id = LibraryId::from_uuid(access.library_id);
-            publication.item_id = ItemId::from_uuid(access.item_id);
-            publication.blob_id = BlobId::from_uuid(access.blob_id);
-            publication.storage_key = StorageKey::from_opaque(access.storage_key);
-            return Ok(Some(Arc::new(publication)));
-        }
+        let lookup = {
+            let mut state = self.state.lock().map_err(|_| ReaderCatalogError)?;
+            if let Some(cached) = state.cache.get(&key) {
+                ProjectionLookup::Cached(Some(cached))
+            } else if let Some(receiver) = state.inflight.subscribe(&key) {
+                ProjectionLookup::Wait(receiver)
+            } else {
+                let (sender, receiver) = state.inflight.insert(key.clone());
+                ProjectionLookup::Load { sender, receiver }
+            }
+        };
+        let projection = match lookup {
+            ProjectionLookup::Cached(projection) => projection,
+            ProjectionLookup::Wait(receiver) => wait_for_projection(receiver).await?,
+            ProjectionLookup::Load { sender, receiver } => {
+                self.spawn_projection_loader(
+                    key,
+                    access.clone(),
+                    actor,
+                    item_id,
+                    request_id,
+                    sender,
+                );
+                wait_for_projection(receiver).await?
+            }
+        };
+        Ok(projection.map(|publication| publication_for_access(&publication, access)))
+    }
+}
+
+enum ProjectionLookup {
+    Cached(Option<Arc<ReaderPublication>>),
+    Wait(ProjectionReceiver),
+    Load {
+        sender: ProjectionSender,
+        receiver: ProjectionReceiver,
+    },
+}
+
+impl PgReaderCatalogRepository {
+    fn spawn_projection_loader(
+        &self,
+        key: ProjectionKey,
+        access: ReaderAccessRow,
+        actor: UserId,
+        item_id: ItemId,
+        request_id: RequestId,
+        sender: ProjectionSender,
+    ) {
+        let loader = self.clone();
+        let worker = tokio::spawn(async move {
+            loader
+                .load_projection(access, actor, item_id, request_id)
+                .await
+        });
+        let state = self.state.clone();
+        drop(tokio::spawn(async move {
+            let result = worker.await.unwrap_or(Err(ReaderCatalogError));
+            if let Ok(mut state) = state.lock() {
+                if let Ok(Some(publication)) = &result {
+                    state.cache.insert(key.clone(), publication.clone());
+                }
+                state.inflight.complete(&key, &sender, result);
+            } else {
+                sender.send_replace(Some(Err(ReaderCatalogError)));
+            }
+        }));
+    }
+
+    async fn load_projection(
+        &self,
+        access: ReaderAccessRow,
+        actor: UserId,
+        item_id: ItemId,
+        request_id: RequestId,
+    ) -> ProjectionResult {
+        self.projection_loads.fetch_add(1, Ordering::SeqCst);
+        let mut transaction = self.pool.begin().await.map_err(|_| ReaderCatalogError)?;
+        PgTransactionContext::apply(
+            &mut transaction,
+            &DatabaseContext::api(actor, LibraryId::from_uuid(Uuid::nil()), request_id),
+        )
+        .await
+        .map_err(|_| ReaderCatalogError)?;
         let row = sqlx::query_as!(
             ReaderProjectionRow,
             r#"SELECT library_id AS "library_id!",item_id AS "item_id!",manifestation_id AS "manifestation_id!",package_id AS "package_id!",blob_id AS "blob_id!",storage_key AS "storage_key!",parser_profile_version AS "parser_profile_version!",primary_title AS "primary_title!",authors AS "authors!",languages AS "languages!",resources::text AS "resources!",reading_order::text AS "reading_order!",toc::text AS "toc!" FROM folioharbor.reader_publication_visible($1,$2)"#,
@@ -221,7 +355,6 @@ impl ReaderCatalogRepository for PgReaderCatalogRepository {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|_| ReaderCatalogError)?;
-        self.projection_loads.fetch_add(1, Ordering::SeqCst);
         transaction.commit().await.map_err(|_| ReaderCatalogError)?;
         let Some(row) = row else {
             return Ok(None);
@@ -233,16 +366,33 @@ impl ReaderCatalogRepository for PgReaderCatalogRepository {
             || row.blob_id != access.blob_id
             || row.storage_key != access.storage_key
             || row.parser_profile_version != access.parser_profile_version
-            || access.membership_version <= 0
         {
             return Err(ReaderCatalogError);
         }
-        let publication = Arc::new(reader_publication(row)?);
-        self.cache
-            .lock()
-            .map_err(|_| ReaderCatalogError)?
-            .insert(key, publication.clone());
-        Ok(Some(publication))
+        Ok(Some(Arc::new(reader_publication(row)?)))
+    }
+}
+
+fn publication_for_access(
+    cached: &ReaderPublication,
+    access: ReaderAccessRow,
+) -> Arc<ReaderPublication> {
+    let mut publication = cached.clone();
+    publication.library_id = LibraryId::from_uuid(access.library_id);
+    publication.item_id = ItemId::from_uuid(access.item_id);
+    publication.blob_id = BlobId::from_uuid(access.blob_id);
+    publication.storage_key = StorageKey::from_opaque(access.storage_key);
+    Arc::new(publication)
+}
+
+async fn wait_for_projection(mut receiver: ProjectionReceiver) -> ProjectionResult {
+    loop {
+        if let Some(result) = receiver.borrow().clone() {
+            return result;
+        }
+        if receiver.changed().await.is_err() {
+            return Err(ReaderCatalogError);
+        }
     }
 }
 
@@ -378,5 +528,21 @@ mod tests {
         assert_eq!(cache.order.len(), 1);
         assert!(cache.entries.contains_key(&key(20)));
         assert_eq!(cache.bytes, projection_weight(&second));
+    }
+
+    #[test]
+    fn projection_inflight_cleans_failed_cancelled_waiter_and_allows_retry() {
+        let key = key(30);
+        let mut inflight = ProjectionInflight::default();
+        let (failed_sender, failed_receiver) = inflight.insert(key.clone());
+        drop(failed_receiver);
+        inflight.complete(&key, &failed_sender, Err(ReaderCatalogError));
+        assert_eq!(inflight.len(), 0);
+
+        let (retry_sender, retry_receiver) = inflight.insert(key.clone());
+        let expected = publication("retry");
+        inflight.complete(&key, &retry_sender, Ok(Some(expected.clone())));
+        assert_eq!(inflight.len(), 0);
+        assert_eq!(retry_receiver.borrow().clone(), Some(Ok(Some(expected))));
     }
 }

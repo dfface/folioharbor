@@ -107,6 +107,12 @@ fn request(href: &str, media_type: &str) -> ResourceReadRequest {
     }
 }
 
+fn request_for_item(item: u128, href: &str, media_type: &str) -> ResourceReadRequest {
+    let mut request = request(href, media_type);
+    request.item_id = ItemId::from_uuid(uuid::Uuid::from_u128(item));
+    request
+}
+
 struct BlockingGate {
     started: tokio::sync::mpsc::UnboundedSender<()>,
     released: (Mutex<bool>, Condvar),
@@ -375,4 +381,74 @@ async fn concurrent_same_key_misses_are_single_flight_with_exact_cache_accountin
         .await
         .expect("evicted chapter reloads");
     assert_eq!(blobs.opens.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_waiters_do_not_leak_bounded_owned_loaders_or_corrupt_cache_accounting() {
+    let blobs = Arc::new(Blobs {
+        archive: archive(),
+        opens: AtomicUsize::new(0),
+    });
+    let (gate, mut started) = blocking_gate();
+    let reader = Arc::new(EpubResourceReader::new_with_hook(
+        blobs.clone(),
+        ResourceCacheLimits {
+            max_entries: 8,
+            max_bytes: 1024 * 1024,
+            max_resource_bytes: 1024 * 1024,
+            max_concurrent_blocking: 2,
+        },
+        gate.clone(),
+    ));
+    let mut tasks = Vec::new();
+    for item in 10..18 {
+        let reader = reader.clone();
+        tasks.push(tokio::spawn(async move {
+            reader
+                .read(request_for_item(
+                    item,
+                    "OPS/chapter.xhtml",
+                    "application/xhtml+xml",
+                ))
+                .await
+        }));
+    }
+    started.recv().await.expect("first owned loader");
+    started.recv().await.expect("second owned loader");
+    for task in &tasks {
+        task.abort();
+    }
+    for task in tasks {
+        assert!(task.await.expect_err("waiter is cancelled").is_cancelled());
+    }
+    gate.release();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if reader
+                .cache_metrics()
+                .expect("cache metrics")
+                .inflight_reads
+                == 0
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("owned loaders finish and clean their state");
+    let bytes = reader
+        .read(request_for_item(
+            10,
+            "OPS/chapter.xhtml",
+            "application/xhtml+xml",
+        ))
+        .await
+        .expect("completed loader populated cache");
+    let metrics = reader.cache_metrics().expect("cache metrics");
+    assert_eq!(metrics.inflight_reads, 0);
+    assert_eq!(metrics.entries, 2);
+    assert_eq!(metrics.order_records, 2);
+    assert_eq!(metrics.bytes, bytes.len() * 2);
+    assert_eq!(blobs.opens.load(Ordering::SeqCst), 2);
 }

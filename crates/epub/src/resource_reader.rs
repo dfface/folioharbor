@@ -58,13 +58,14 @@ struct Cache {
 }
 
 type ResourceResult = Result<Vec<u8>, ResourceReaderError>;
-type InflightRead = Arc<tokio::sync::OnceCell<ResourceResult>>;
+type InflightRead = tokio::sync::watch::Sender<Option<ResourceResult>>;
 
+#[derive(Clone)]
 pub struct EpubResourceReader {
     blobs: Arc<dyn BlobStore>,
     limits: ResourceCacheLimits,
-    cache: Mutex<Cache>,
-    inflight: Mutex<HashMap<CacheKey, InflightRead>>,
+    cache: Arc<Mutex<Cache>>,
+    inflight: Arc<Mutex<HashMap<CacheKey, InflightRead>>>,
     blocking: Arc<tokio::sync::Semaphore>,
     hook: Arc<dyn BlockingWorkHook>,
 }
@@ -74,6 +75,7 @@ pub struct CacheMetrics {
     pub entries: usize,
     pub order_records: usize,
     pub bytes: usize,
+    pub inflight_reads: usize,
 }
 
 impl EpubResourceReader {
@@ -94,8 +96,8 @@ impl EpubResourceReader {
         Self {
             blobs,
             limits,
-            cache: Mutex::new(Cache::default()),
-            inflight: Mutex::new(HashMap::new()),
+            cache: Arc::new(Mutex::new(Cache::default())),
+            inflight: Arc::new(Mutex::new(HashMap::new())),
             blocking,
             hook,
         }
@@ -115,6 +117,11 @@ impl EpubResourceReader {
             entries: cache.entries.len(),
             order_records: cache.order.len(),
             bytes: cache.bytes,
+            inflight_reads: self
+                .inflight
+                .lock()
+                .map_err(|_| ResourceReaderError::Unavailable)?
+                .len(),
         })
     }
 
@@ -157,58 +164,108 @@ impl EpubResourceReader {
         key: CacheKey,
         request: ResourceReadRequest,
     ) -> Result<Vec<u8>, ResourceReaderError> {
-        let cell = {
+        if let Some(receiver) = self.subscribe(&key)? {
+            return wait_for_loader(receiver).await;
+        }
+        let permit = self
+            .blocking
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ResourceReaderError::Unavailable)?;
+        let receiver = {
             let mut inflight = self
                 .inflight
                 .lock()
                 .map_err(|_| ResourceReaderError::Unavailable)?;
-            inflight
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
-                .clone()
-        };
-        let result = cell
-            .get_or_init(|| async {
-                let permit = self
-                    .blocking
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .map_err(|_| ResourceReaderError::Unavailable)?;
-                let source = self
-                    .blobs
-                    .open_publication(&request.storage_key)
-                    .await
-                    .map_err(|_| ResourceReaderError::Unavailable)?;
-                let limit = self.limits.max_resource_bytes;
-                let hook = self.hook.clone();
-                let transformed = tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    hook.before();
-                    let result = read_entry(source, &request.normalized_href, limit)
-                        .and_then(|bytes| transform(bytes, &request));
-                    hook.after();
-                    result
-                })
-                .await
-                .map_err(|_| ResourceReaderError::Unavailable)??;
-                if transformed.len() > limit {
-                    return Err(ResourceReaderError::Malformed);
-                }
-                self.insert(key.clone(), transformed.clone())?;
-                Ok(transformed)
-            })
-            .await
-            .clone();
-        if let Ok(mut inflight) = self.inflight.lock() {
-            if inflight
-                .get(&key)
-                .is_some_and(|current| Arc::ptr_eq(current, &cell))
-            {
-                inflight.remove(&key);
+            if let Some(sender) = inflight.get(&key) {
+                drop(permit);
+                sender.subscribe()
+            } else {
+                let (sender, receiver) = tokio::sync::watch::channel(None);
+                inflight.insert(key.clone(), sender.clone());
+                self.spawn_owned_loader(key, request, permit, sender);
+                receiver
             }
+        };
+        wait_for_loader(receiver).await
+    }
+
+    fn subscribe(
+        &self,
+        key: &CacheKey,
+    ) -> Result<Option<tokio::sync::watch::Receiver<Option<ResourceResult>>>, ResourceReaderError>
+    {
+        Ok(self
+            .inflight
+            .lock()
+            .map_err(|_| ResourceReaderError::Unavailable)?
+            .get(key)
+            .map(tokio::sync::watch::Sender::subscribe))
+    }
+
+    fn spawn_owned_loader(
+        &self,
+        key: CacheKey,
+        request: ResourceReadRequest,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        sender: InflightRead,
+    ) {
+        let loader = self.clone();
+        let worker = tokio::spawn(async move { loader.load_owned(key, request, permit).await });
+        let inflight = self.inflight.clone();
+        drop(tokio::spawn(async move {
+            let result = worker
+                .await
+                .unwrap_or(Err(ResourceReaderError::Unavailable));
+            sender.send_replace(Some(result));
+            if let Ok(mut reads) = inflight.lock() {
+                reads.retain(|_, current| !current.same_channel(&sender));
+            }
+        }));
+    }
+
+    async fn load_owned(
+        &self,
+        key: CacheKey,
+        request: ResourceReadRequest,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> ResourceResult {
+        let source = self
+            .blobs
+            .open_publication(&request.storage_key)
+            .await
+            .map_err(|_| ResourceReaderError::Unavailable)?;
+        let limit = self.limits.max_resource_bytes;
+        let hook = self.hook.clone();
+        let transformed = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            hook.before();
+            let result = read_entry(source, &request.normalized_href, limit)
+                .and_then(|bytes| transform(bytes, &request));
+            hook.after();
+            result
+        })
+        .await
+        .map_err(|_| ResourceReaderError::Unavailable)??;
+        if transformed.len() > limit {
+            return Err(ResourceReaderError::Malformed);
         }
-        result
+        self.insert(key, transformed.clone())?;
+        Ok(transformed)
+    }
+}
+
+async fn wait_for_loader(
+    mut receiver: tokio::sync::watch::Receiver<Option<ResourceResult>>,
+) -> ResourceResult {
+    loop {
+        if let Some(result) = receiver.borrow().clone() {
+            return result;
+        }
+        if receiver.changed().await.is_err() {
+            return Err(ResourceReaderError::Unavailable);
+        }
     }
 }
 

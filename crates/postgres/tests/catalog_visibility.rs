@@ -10,6 +10,7 @@ use folioharbor_postgres::{
 };
 use folioharbor_test_support::postgres::TestPostgres;
 use sqlx::PgPool;
+use std::sync::Arc;
 use time::OffsetDateTime;
 
 #[tokio::test]
@@ -85,6 +86,13 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
     .fetch_one(&pools.owner)
     .await?;
     assert!(!public_can_read);
+    let reader_definition: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(function.oid) FROM pg_proc function JOIN pg_namespace namespace ON namespace.oid=function.pronamespace WHERE namespace.nspname='folioharbor' AND function.proname='reader_publication_visible'",
+    )
+    .fetch_one(&pools.owner)
+    .await?;
+    assert!(reader_definition.contains("JOIN LATERAL"));
+    assert!(reader_definition.contains("ORDER BY candidate.storage_key"));
     let (access_security_definer, access_settings): (bool, Option<Vec<String>>) = sqlx::query_as(
         "SELECT prosecdef,proconfig FROM pg_proc JOIN pg_namespace ON pg_namespace.oid=pronamespace WHERE nspname='folioharbor' AND proname='reader_item_read_access'",
     )
@@ -113,6 +121,13 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
     sqlx::query("INSERT INTO folioharbor.library_memberships(library_id,user_id,role_code,status,joined_at) VALUES($1,$2,'reader','active',$3)").bind(library.as_uuid()).bind(allowed.as_uuid()).bind(now).execute(&pools.owner).await?;
     let (item, intended_package, manifestation, blob) =
         seed_item(&pools.owner, library, allowed, now).await?;
+    let stable_storage_key = "blob:000-reader-copy";
+    sqlx::query("INSERT INTO folioharbor.blob_locations(blob_id,storage_key,state,created_at,updated_at) VALUES($1,$2,'ready',$3,$3)")
+        .bind(blob.as_uuid())
+        .bind(stable_storage_key)
+        .bind(now)
+        .execute(&pools.owner)
+        .await?;
     sqlx::query("INSERT INTO folioharbor.publication_packages(package_id,manifestation_id,blob_id,parser_profile_version,created_at) VALUES($1,$2,$3,'epub-v2',$4)")
         .bind(PublicationPackageId::new().as_uuid()).bind(manifestation.as_uuid()).bind(blob.as_uuid()).bind(now).execute(&pools.owner).await?;
     let associated_package: uuid::Uuid =
@@ -191,7 +206,7 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
     assert_eq!(visible, Some(item.as_uuid()));
     tx.rollback().await?;
     let catalog = PgCatalogRepository::new(pools.api.clone());
-    let reader_catalog = PgReaderCatalogRepository::new(pools.api.clone());
+    let reader_catalog = Arc::new(PgReaderCatalogRepository::new(pools.api.clone()));
     let grant = Authorization::new(&PgAuthorizationRepository::new(pools.api.clone()))
         .require(allowed, Action::ViewLibrary, ResourceRef::Library(library))
         .await?;
@@ -221,10 +236,24 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
     .bind(blob.as_uuid())
     .execute(&pools.owner)
     .await?;
-    let readable = reader_catalog
-        .find_readable_publication(allowed, item, RequestId::new())
-        .await?
-        .expect("active member can read the package projection");
+    let barrier = Arc::new(tokio::sync::Barrier::new(9));
+    let mut reader_tasks = Vec::new();
+    for _ in 0..8 {
+        let barrier = barrier.clone();
+        let reader_catalog = reader_catalog.clone();
+        reader_tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            reader_catalog
+                .find_readable_publication(allowed, item, RequestId::new())
+                .await
+        }));
+    }
+    barrier.wait().await;
+    let mut readable = None;
+    for task in reader_tasks {
+        readable = task.await.expect("reader task")?.or(readable);
+    }
+    let readable = readable.expect("active member can read the package projection");
     assert_eq!(readable.manifestation_id, manifestation);
     assert_eq!(readable.package_id, intended_package);
     assert_eq!(readable.resources[0].normalized_href, "OPS/chapter.xhtml");
@@ -233,19 +262,14 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
         "OPS/chapter.xhtml"
     );
     assert_eq!(readable.toc[0].label, "Chapter");
-    assert!(!readable.storage_key.as_str().is_empty());
+    assert_eq!(readable.storage_key.as_str(), stable_storage_key);
     assert_eq!(readable.resources.len(), 4096);
-    assert!(
-        reader_catalog
-            .find_readable_publication(allowed, item, RequestId::new())
-            .await?
-            .is_some()
-    );
     let cache_metrics = reader_catalog.cache_metrics();
     assert_eq!(cache_metrics.entries, 1);
     assert!(cache_metrics.bytes > 0);
-    assert_eq!(cache_metrics.access_checks, 2);
+    assert_eq!(cache_metrics.access_checks, 8);
     assert_eq!(cache_metrics.projection_loads, 1);
+    assert_eq!(cache_metrics.inflight_loads, 0);
 
     sqlx::query(
         "INSERT INTO folioharbor.roles(role_code,display_name) VALUES('reader-test','Reader test')",

@@ -67,7 +67,7 @@ async fn migrations_from_zero_preserve_least_privilege_roles_and_are_idempotent(
             .await?;
     assert_eq!(
         first_versions,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     );
 
     run_migrations(&pools.owner).await?;
@@ -77,7 +77,7 @@ async fn migrations_from_zero_preserve_least_privilege_roles_and_are_idempotent(
             .await?;
     assert_eq!(
         second_versions,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     );
 
     pools.close().await;
