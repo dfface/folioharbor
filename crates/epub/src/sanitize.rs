@@ -151,6 +151,7 @@ impl DeadlineBudget for WallClockBudget {
 struct BoundedDomSink {
     dom: RcDom,
     limits: SanitizerLimits,
+    started: Instant,
     nodes: Cell<usize>,
     depths: RefCell<HashMap<usize, usize>>,
     failure: Cell<Option<SanitizeFailure>>,
@@ -169,6 +170,7 @@ impl BoundedDomSink {
         Self {
             dom,
             limits,
+            started: Instant::now(),
             nodes: Cell::new(1),
             depths: RefCell::new(depths),
             failure: Cell::new(None),
@@ -176,26 +178,84 @@ impl BoundedDomSink {
     }
 
     fn count_node(&self) {
+        if !self.check_callback_deadline() {
+            return;
+        }
         let nodes = self.nodes.get().saturating_add(1);
         self.nodes.set(nodes);
-        if nodes > self.limits.max_nodes && self.failure.get().is_none() {
-            self.failure.set(Some(SanitizeFailure::Nodes));
+        if nodes > self.limits.max_nodes {
+            self.record_failure(SanitizeFailure::Nodes);
         }
     }
 
-    fn observe_attachment(&self, parent: &Handle, child: Option<&Handle>) {
-        let depth = self
-            .depths
+    fn parent_child_depth(&self, parent: &Handle) -> usize {
+        self.depths
             .borrow()
             .get(&handle_key(parent))
             .copied()
             .unwrap_or(0)
-            .saturating_add(1);
-        if depth > self.limits.max_dom_depth && self.failure.get().is_none() {
-            self.failure.set(Some(SanitizeFailure::Depth));
+            .saturating_add(1)
+    }
+
+    fn prepare_text_attachment(&self, parent: &Handle) {
+        if self.parent_child_depth(parent) > self.limits.max_dom_depth {
+            self.record_failure(SanitizeFailure::Depth);
         }
-        if let Some(child) = child {
-            self.depths.borrow_mut().insert(handle_key(child), depth);
+    }
+
+    fn rebase_subtrees<'a>(
+        &self,
+        roots: impl IntoIterator<Item = &'a Handle>,
+        root_depth: usize,
+    ) -> bool {
+        if !self.accepting() {
+            return false;
+        }
+        let mut work = roots
+            .into_iter()
+            .map(|root| (root.clone(), root_depth))
+            .collect::<Vec<_>>();
+        let mut updates = Vec::new();
+        while let Some((node, depth)) = work.pop() {
+            if !self.check_callback_deadline() {
+                return false;
+            }
+            if updates.len() >= self.limits.max_nodes {
+                self.record_failure(SanitizeFailure::Nodes);
+                return false;
+            }
+            if depth > self.limits.max_dom_depth {
+                self.record_failure(SanitizeFailure::Depth);
+                return false;
+            }
+            updates.push((handle_key(&node), depth));
+            work.extend(
+                node.children
+                    .borrow()
+                    .iter()
+                    .map(|child| (child.clone(), depth.saturating_add(1))),
+            );
+        }
+        self.depths.borrow_mut().extend(updates);
+        true
+    }
+
+    fn prepare_node_attachment(&self, parent: &Handle, child: &Handle) -> bool {
+        self.rebase_subtrees([child], self.parent_child_depth(parent))
+    }
+
+    fn check_callback_deadline(&self) -> bool {
+        if self.started.elapsed() >= self.limits.deadline {
+            self.record_failure(SanitizeFailure::Deadline);
+            false
+        } else {
+            true
+        }
+    }
+
+    fn record_failure(&self, reason: SanitizeFailure) {
+        if self.failure.get().is_none() {
+            self.failure.set(Some(reason));
         }
     }
 
@@ -254,14 +314,15 @@ impl TreeSink for BoundedDomSink {
     }
 
     fn append(&self, parent: &Handle, child: NodeOrText<Handle>) {
-        if matches!(&child, NodeOrText::AppendText(_)) {
-            self.count_node();
+        match &child {
+            NodeOrText::AppendNode(handle) => {
+                self.prepare_node_attachment(parent, handle);
+            }
+            NodeOrText::AppendText(_) => {
+                self.count_node();
+                self.prepare_text_attachment(parent);
+            }
         }
-        let child_handle = match &child {
-            NodeOrText::AppendNode(handle) => Some(handle),
-            NodeOrText::AppendText(_) => None,
-        };
-        self.observe_attachment(parent, child_handle);
         if self.accepting() {
             self.dom.append(parent, child);
         }
@@ -273,20 +334,21 @@ impl TreeSink for BoundedDomSink {
         prev_element: &Handle,
         child: NodeOrText<Handle>,
     ) {
-        if matches!(&child, NodeOrText::AppendText(_)) {
-            self.count_node();
-        }
         let parent = element.parent.take();
         let actual_parent = parent
             .as_ref()
             .and_then(std::rc::Weak::upgrade)
             .unwrap_or_else(|| prev_element.clone());
         element.parent.set(parent);
-        let child_handle = match &child {
-            NodeOrText::AppendNode(handle) => Some(handle),
-            NodeOrText::AppendText(_) => None,
-        };
-        self.observe_attachment(&actual_parent, child_handle);
+        match &child {
+            NodeOrText::AppendNode(handle) => {
+                self.prepare_node_attachment(&actual_parent, handle);
+            }
+            NodeOrText::AppendText(_) => {
+                self.count_node();
+                self.prepare_text_attachment(&actual_parent);
+            }
+        }
         if self.accepting() {
             self.dom
                 .append_based_on_parent_node(element, prev_element, child);
@@ -319,16 +381,17 @@ impl TreeSink for BoundedDomSink {
     }
 
     fn append_before_sibling(&self, sibling: &Handle, child: NodeOrText<Handle>) {
-        if matches!(&child, NodeOrText::AppendText(_)) {
-            self.count_node();
-        }
         if let Some(parent) = sibling.parent.take() {
             if let Some(parent_handle) = parent.upgrade() {
-                let child_handle = match &child {
-                    NodeOrText::AppendNode(handle) => Some(handle),
-                    NodeOrText::AppendText(_) => None,
-                };
-                self.observe_attachment(&parent_handle, child_handle);
+                match &child {
+                    NodeOrText::AppendNode(handle) => {
+                        self.prepare_node_attachment(&parent_handle, handle);
+                    }
+                    NodeOrText::AppendText(_) => {
+                        self.count_node();
+                        self.prepare_text_attachment(&parent_handle);
+                    }
+                }
             }
             sibling.parent.set(Some(parent));
         }
@@ -344,13 +407,14 @@ impl TreeSink for BoundedDomSink {
     }
 
     fn remove_from_parent(&self, target: &Handle) {
-        if self.accepting() {
+        if self.rebase_subtrees([target], 0) {
             self.dom.remove_from_parent(target);
         }
     }
 
     fn reparent_children(&self, node: &Handle, new_parent: &Handle) {
-        if self.accepting() {
+        let children = node.children.borrow().clone();
+        if self.rebase_subtrees(children.iter(), self.parent_child_depth(new_parent)) {
             self.dom.reparent_children(node, new_parent);
         }
     }
@@ -1165,6 +1229,7 @@ fn escape_attribute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use html5ever::{local_name, ns};
 
     struct EmptyResolver {
         base: EpubPath,
@@ -1209,6 +1274,123 @@ mod tests {
         EmptyResolver {
             base: EpubPath::new("EPUB/chapter.xhtml").unwrap_or_else(|_| std::process::abort()),
         }
+    }
+
+    fn element(sink: &BoundedDomSink) -> Handle {
+        sink.create_element(
+            QualName::new(None, ns!(html), local_name!("div")),
+            Vec::new(),
+            ElementFlags::default(),
+        )
+    }
+
+    fn sink_with_depth(max_dom_depth: usize) -> BoundedDomSink {
+        BoundedDomSink::new(SanitizerLimits {
+            max_dom_depth,
+            max_nodes: 128,
+            deadline: Duration::from_secs(30),
+            ..SanitizerLimits::default()
+        })
+    }
+
+    fn recorded_depth(sink: &BoundedDomSink, node: &Handle) -> Option<usize> {
+        sink.depths.borrow().get(&handle_key(node)).copied()
+    }
+
+    #[test]
+    fn moving_subtree_deeper_rebases_descendants_and_trips_depth_in_callback() {
+        let sink = sink_with_depth(4);
+        let document = sink.get_document();
+        let subtree = element(&sink);
+        let child = element(&sink);
+        let grandchild = element(&sink);
+        sink.append(&document, NodeOrText::AppendNode(subtree.clone()));
+        sink.append(&subtree, NodeOrText::AppendNode(child.clone()));
+        sink.append(&child, NodeOrText::AppendNode(grandchild));
+        let parent = element(&sink);
+        let deeper_parent = element(&sink);
+        let sibling = element(&sink);
+        sink.append(&document, NodeOrText::AppendNode(parent.clone()));
+        sink.append(&parent, NodeOrText::AppendNode(deeper_parent.clone()));
+        sink.append(&deeper_parent, NodeOrText::AppendNode(sibling.clone()));
+
+        sink.append_before_sibling(&sibling, NodeOrText::AppendNode(subtree));
+
+        assert!(matches!(sink.failure.get(), Some(SanitizeFailure::Depth)));
+    }
+
+    #[test]
+    fn moving_subtree_shallower_rebases_descendants_without_stale_false_positive() {
+        let sink = sink_with_depth(4);
+        let document = sink.get_document();
+        let parent = element(&sink);
+        let deeper_parent = element(&sink);
+        let subtree = element(&sink);
+        let child = element(&sink);
+        let grandchild = element(&sink);
+        let sibling = element(&sink);
+        sink.append(&document, NodeOrText::AppendNode(parent.clone()));
+        sink.append(&parent, NodeOrText::AppendNode(deeper_parent.clone()));
+        sink.append(&deeper_parent, NodeOrText::AppendNode(subtree.clone()));
+        sink.append(&subtree, NodeOrText::AppendNode(child.clone()));
+        sink.append(&document, NodeOrText::AppendNode(sibling.clone()));
+
+        sink.append_before_sibling(&sibling, NodeOrText::AppendNode(subtree.clone()));
+        let grandchild_for_depth = grandchild.clone();
+        sink.append(&child, NodeOrText::AppendNode(grandchild));
+
+        assert_eq!(recorded_depth(&sink, &subtree), Some(1));
+        assert_eq!(recorded_depth(&sink, &child), Some(2));
+        assert_eq!(recorded_depth(&sink, &grandchild_for_depth), Some(3));
+        assert!(sink.failure.get().is_none());
+    }
+
+    #[test]
+    fn removing_subtree_rebases_detached_depth_state() {
+        let sink = sink_with_depth(3);
+        let document = sink.get_document();
+        let subtree = element(&sink);
+        let child = element(&sink);
+        let grandchild = element(&sink);
+        sink.append(&document, NodeOrText::AppendNode(subtree.clone()));
+        sink.append(&subtree, NodeOrText::AppendNode(child.clone()));
+        sink.append(&child, NodeOrText::AppendNode(grandchild.clone()));
+
+        sink.remove_from_parent(&subtree);
+        let leaf = element(&sink);
+        sink.append(&grandchild, NodeOrText::AppendNode(leaf));
+
+        assert_eq!(recorded_depth(&sink, &subtree), Some(0));
+        assert_eq!(recorded_depth(&sink, &child), Some(1));
+        assert_eq!(recorded_depth(&sink, &grandchild), Some(2));
+        assert!(sink.failure.get().is_none());
+    }
+
+    #[test]
+    fn reparent_children_checks_every_subtree_and_failure_stays_sticky() {
+        let sink = sink_with_depth(4);
+        let document = sink.get_document();
+        let source = element(&sink);
+        let shallow_child = element(&sink);
+        let deep_child = element(&sink);
+        let descendant = element(&sink);
+        let grandchild = element(&sink);
+        sink.append(&document, NodeOrText::AppendNode(source.clone()));
+        sink.append(&source, NodeOrText::AppendNode(shallow_child));
+        sink.append(&source, NodeOrText::AppendNode(deep_child.clone()));
+        sink.append(&deep_child, NodeOrText::AppendNode(descendant.clone()));
+        sink.append(&descendant, NodeOrText::AppendNode(grandchild));
+        let parent = element(&sink);
+        let new_parent = element(&sink);
+        sink.append(&document, NodeOrText::AppendNode(parent.clone()));
+        sink.append(&parent, NodeOrText::AppendNode(new_parent.clone()));
+
+        sink.reparent_children(&source, &new_parent);
+        let child_count = document.children.borrow().len();
+        sink.append(&document, NodeOrText::AppendNode(element(&sink)));
+
+        assert!(matches!(sink.failure.get(), Some(SanitizeFailure::Depth)));
+        assert_eq!(document.children.borrow().len(), child_count);
     }
 
     #[test]
