@@ -924,6 +924,16 @@ git commit -m "feat: serve authorized EPUB reading resources"
 - Produces `GetReadingProgress` and `UpdateReadingProgress` using `device_id`, `client_mutation_id`, and `base_version`.
 - Produces `GET/PUT /api/v1/manifestations/{manifestation_id}/progress`.
 
+**Task 15 composition amendment (2026-08-06):** The file list is extended to the existing
+composition and adapter seams required to expose this use case: `crates/domain/src/lib.rs`,
+`crates/application/src/{lib,reader/mod}.rs`, `crates/application/src/ports/mod.rs`,
+`crates/postgres/src/lib.rs`, `crates/http/src/{lib,problem}.rs`,
+`crates/http/src/routes/mod.rs`, `apps/api/src/{lib,main}.rs`, their Cargo/SQLx metadata, and
+focused contract tests. Migration `0016_reading_state.sql` remains the only schema change and
+migrations 0015 and older stay immutable. Progress access is resolved from an active readable
+Item/Holding for the requested Manifestation, while the retained progress rows themselves remain
+user-scoped rather than library-scoped.
+
 - [ ] **Step 1: Write failing state-machine tests**
 
 Assert first write creates version 1; matching base version advances global/device state; repeating one mutation ID returns the original result; stale base version updates device state but not global state and returns both positions as a conflict; client timestamps do not order writes; “largest percentage wins” is never used. Assert progress is user-private and retained but unreadable as content after access loss.

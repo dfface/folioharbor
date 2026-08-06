@@ -1,6 +1,7 @@
 mod auth;
 mod catalog;
 mod libraries;
+mod progress;
 mod reader;
 mod uploads;
 use crate::middleware;
@@ -15,7 +16,7 @@ use folioharbor_application::{
     imports::{UnavailableUploadApi, UploadApi},
     libraries::{LibraryApi, UnavailableLibraryApi},
     rate_limit::RateLimitUseCase,
-    reader::{ReaderApi, UnavailableReaderApi},
+    reader::{ProgressApi, ReaderApi, UnavailableProgressApi, UnavailableReaderApi},
 };
 use std::sync::Arc;
 use url::Url;
@@ -38,6 +39,7 @@ pub struct AppState {
     pub upload_api: Arc<dyn UploadApi>,
     pub catalog_api: Arc<dyn CatalogApi>,
     pub reader_api: Arc<dyn ReaderApi>,
+    pub progress_api: Arc<dyn ProgressApi>,
 }
 impl AppState {
     #[allow(clippy::too_many_arguments)]
@@ -73,6 +75,7 @@ impl AppState {
             upload_api: Arc::new(UnavailableUploadApi),
             catalog_api: Arc::new(UnavailableCatalogApi),
             reader_api: Arc::new(UnavailableReaderApi),
+            progress_api: Arc::new(UnavailableProgressApi),
         }
     }
 
@@ -99,6 +102,12 @@ impl AppState {
         self.reader_api = reader_api;
         self
     }
+
+    #[must_use]
+    pub fn with_progress_api(mut self, progress_api: Arc<dyn ProgressApi>) -> Self {
+        self.progress_api = progress_api;
+        self
+    }
 }
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -110,6 +119,7 @@ pub fn router(state: AppState) -> Router {
                 .merge(catalog::router()),
         )
         .nest("/api/v1/items", reader::router())
+        .nest("/api/v1/manifestations", progress::router())
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),
             middleware::csrf::authenticate_and_protect,

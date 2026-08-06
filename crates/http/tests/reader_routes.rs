@@ -29,17 +29,22 @@ use folioharbor_application::{
     },
     rate_limit::{CheckRateLimit, RateLimitDecision, RateLimitUseCase},
     reader::{
-        ManifestLink, ManifestMetadata, PublicationManifest, ReaderApi, ReaderService, ResourceId,
-        ResourceResponse,
+        ManifestLink, ManifestMetadata, ProgressApi, PublicationManifest, ReaderApi, ReaderService,
+        ResourceId, ResourceResponse, UpdateReadingProgressCommand,
     },
 };
 use folioharbor_domain::{
     id::{
-        BlobId, ItemId, LibraryId, ManifestationId, PublicationPackageId, RequestId, SessionId,
-        UserId,
+        BlobId, DeviceId, ItemId, LibraryId, ManifestationId, PublicationPackageId, RequestId,
+        SessionId, UserId,
     },
     identity::CsrfToken,
     imports::blob::{BlobIdentity, StorageKey},
+    reader::{
+        DeviceReadingState, LocatorExtensions, LocatorLocations, ReadingProgress,
+        ReadingUpdateOutcome, ReadiumLocator,
+    },
+    time::OffsetDateTime,
 };
 use folioharbor_epub::{EpubResourceReader, ResourceCacheLimits};
 use folioharbor_http::{AppState, router};
@@ -52,6 +57,7 @@ use std::{
 };
 use tower::ServiceExt as _;
 use url::Url;
+use uuid::Uuid;
 use zip::{ZipWriter, write::SimpleFileOptions};
 
 struct Identity(HashMap<String, UserId>);
@@ -229,6 +235,60 @@ impl ReaderApi for Reader {
     }
 }
 
+fn progress_locator(progression: f64) -> ReadiumLocator {
+    ReadiumLocator::new(
+        "OPS/chapter.xhtml".to_owned(),
+        Some("application/xhtml+xml".to_owned()),
+        LocatorLocations::new(Some(progression), None, None, Vec::new()).expect("locations"),
+        None,
+        LocatorExtensions::empty_v1(),
+    )
+    .expect("locator")
+}
+
+#[async_trait]
+impl ProgressApi for Reader {
+    async fn get_progress(
+        &self,
+        actor: UserId,
+        manifestation_id: ManifestationId,
+        _: RequestId,
+    ) -> Result<Option<ReadingProgress>, AppError> {
+        if actor != self.allowed || manifestation_id != self.manifestation {
+            return Err(AppError::NotFound {
+                code: "manifestation_not_found",
+            });
+        }
+        Ok(Some(ReadingProgress {
+            manifestation_id,
+            package_id: None,
+            content_unit_id: None,
+            locator: progress_locator(0.4),
+            version: 3,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+        }))
+    }
+    async fn update_progress(
+        &self,
+        command: UpdateReadingProgressCommand,
+    ) -> Result<ReadingUpdateOutcome, AppError> {
+        let global = ReadingProgress {
+            manifestation_id: command.manifestation_id,
+            package_id: None,
+            content_unit_id: None,
+            locator: progress_locator(0.4),
+            version: 3,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        let device = DeviceReadingState {
+            device_id: command.device_id,
+            locator: command.locator,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        Ok(ReadingUpdateOutcome::Conflict { global, device })
+    }
+}
+
 fn app() -> (axum::Router, ItemId, ManifestationId) {
     let allowed = UserId::new();
     let item = ItemId::new();
@@ -255,8 +315,111 @@ fn app() -> (axum::Router, ItemId, ManifestationId) {
         allowed,
         item,
         manifestation,
+    }))
+    .with_progress_api(Arc::new(Reader {
+        allowed,
+        item,
+        manifestation,
     }));
     (router(state), item, manifestation)
+}
+
+#[tokio::test]
+async fn progress_routes_return_etag_and_correlated_safe_conflict_positions() {
+    let (app, _, manifestation) = app();
+    let response = app
+        .clone()
+        .oneshot(request(
+            &format!(
+                "/api/v1/manifestations/{}/progress",
+                manifestation.as_uuid()
+            ),
+            "allowed",
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(ETAG).and_then(|v| v.to_str().ok()),
+        Some("\"progress-v3\"")
+    );
+
+    let body = serde_json::json!({
+        "deviceId":DeviceId::new().as_uuid().to_string(),"clientMutationId":Uuid::now_v7().to_string(),"baseVersion":2,
+        "locator":{"href":"OPS/chapter.xhtml","type":"application/xhtml+xml","locations":{"progression":0.9},"extensions":{"version":1,"values":{}}}
+    });
+    let request = Request::builder()
+        .method("PUT")
+        .uri(format!(
+            "/api/v1/manifestations/{}/progress",
+            manifestation.as_uuid()
+        ))
+        .header("Cookie", "folioharbor_session=allowed")
+        .header("X-CSRF-Token", "reader-csrf")
+        .header("If-Match", "\"progress-v2\"")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request");
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response.headers().get(ETAG).and_then(|v| v.to_str().ok()),
+        Some("\"progress-v3\"")
+    );
+    let body: serde_json::Value = serde_json::from_slice(
+        &response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes(),
+    )
+    .expect("json");
+    assert_eq!(body["code"], "progress_conflict");
+    assert_eq!(
+        body["instance"]
+            .as_str()
+            .expect("instance")
+            .split('/')
+            .count(),
+        3
+    );
+    assert_eq!(body["global"]["version"], 3);
+    assert_eq!(body["global"]["locator"]["locations"]["progression"], 0.4);
+    assert_eq!(body["device"]["locator"]["locations"]["progression"], 0.9);
+    assert!(body.get("userId").is_none());
+}
+
+#[tokio::test]
+async fn progress_put_requires_if_match_to_equal_json_base_version() {
+    let (app, _, manifestation) = app();
+    let body = serde_json::json!({"deviceId":DeviceId::new().as_uuid().to_string(),"clientMutationId":Uuid::now_v7().to_string(),"baseVersion":2,"locator":{"href":"OPS/chapter.xhtml","locations":{"progression":0.5},"extensions":{"version":1,"values":{}}}});
+    let request = Request::builder()
+        .method("PUT")
+        .uri(format!(
+            "/api/v1/manifestations/{}/progress",
+            manifestation.as_uuid()
+        ))
+        .header("Cookie", "folioharbor_session=allowed")
+        .header("X-CSRF-Token", "reader-csrf")
+        .header("If-Match", "\"progress-v1\"")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request");
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = serde_json::from_slice(
+        &response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes(),
+    )
+    .expect("json");
+    assert_eq!(body["code"], "invalid_progress_request");
+    assert_eq!(body["fields"][0]["field"], "base_version");
+    assert_eq!(body["fields"][0]["code"], "if_match_mismatch");
 }
 
 fn request(uri: &str, actor: &str) -> Request<Body> {

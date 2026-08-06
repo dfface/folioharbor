@@ -16,6 +16,7 @@ mod publication_resource_reader;
 mod quota_repository;
 mod random;
 mod rate_limit_repository;
+mod reading_repository;
 mod upload_repository;
 
 pub use audit_repository::*;
@@ -36,4 +37,5 @@ pub use publication_resource_reader::*;
 pub use quota_repository::*;
 pub use random::RandomSource;
 pub use rate_limit_repository::*;
+pub use reading_repository::*;
 pub use upload_repository::*;

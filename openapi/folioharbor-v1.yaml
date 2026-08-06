@@ -310,6 +310,47 @@ paths:
         '404': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
         '503': {$ref: '#/components/responses/Problem'}
+  /api/v1/manifestations/{manifestation_id}/progress:
+    get:
+      operationId: getReadingProgress
+      description: Returns the authenticated user's retained progress only while this Manifestation is readable through an active Holding and Item.
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ManifestationId'}]
+      responses:
+        '200':
+          description: Current global reading position
+          headers: {ETag: {schema: {type: string}, example: '"progress-v3"'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/ReadingProgress'}}}
+        '204':
+          description: No saved progress exists
+          headers: {ETag: {schema: {type: string}, example: '"progress-v0"'}}
+        '400': {$ref: '#/components/responses/InvalidIdentifierProblem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '503': {$ref: '#/components/responses/Problem'}
+    put:
+      operationId: updateReadingProgress
+      description: Atomically records one idempotent device mutation. Matching base versions advance global state; stale bases update only device state and return both positions.
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/ManifestationId'}
+        - {$ref: '#/components/parameters/CsrfToken'}
+        - {name: If-Match, in: header, required: true, schema: {type: string, pattern: '^"progress-v[0-9]+"$'}, description: Must encode the same version as JSON baseVersion}
+      requestBody: {$ref: '#/components/requestBodies/UpdateReadingProgress'}
+      responses:
+        '200':
+          description: Global progress advanced
+          headers: {ETag: {schema: {type: string}, example: '"progress-v4"'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/ReadingProgress'}}}
+        '400': {$ref: '#/components/responses/InvalidIdentifierProblem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/ProgressConflict'}
+        '413': {$ref: '#/components/responses/Problem'}
+        '415': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+        '503': {$ref: '#/components/responses/Problem'}
 components:
   securitySchemes:
     cookieAuth: {type: apiKey, in: cookie, name: folioharbor_session}
@@ -338,6 +379,11 @@ components:
       schema: {type: string, format: uuid}
     ItemId:
       name: item_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    ManifestationId:
+      name: manifestation_id
       in: path
       required: true
       schema: {type: string, format: uuid}
@@ -378,6 +424,11 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/CreateUploadRequest'}
           example: {file_name: book.epub, media_type: application/epub+zip, declared_bytes: 1048576}
+    UpdateReadingProgress:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/UpdateReadingProgressRequest'}
   responses:
     Problem:
       description: RFC 9457 problem details
@@ -385,6 +436,11 @@ components:
         application/problem+json:
           schema: {$ref: '#/components/schemas/ProblemDetails'}
           example: {type: 'https://library.example/problems/invalid-json-body', title: Invalid request body, status: 422, detail: The request body could not be accepted as JSON for this operation., instance: /problems/01JREQ00000000000000000000, code: invalid_json_body, request_id: 01JREQ00000000000000000000}
+    ProgressConflict:
+      description: RFC 9457 conflict containing only the current global and reporting-device positions
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/ProgressConflictProblem'}
     InvalidSessionIdProblem:
       description: A malformed UUID was supplied for the session_id path parameter; the use case is not invoked
       content:
@@ -559,6 +615,70 @@ components:
         type: {type: string}
         rel: {type: string}
         title: {type: string}
+    Locator:
+      type: object
+      additionalProperties: false
+      required: [href, locations, extensions]
+      properties:
+        href: {type: string, minLength: 1, maxLength: 2048}
+        type: {type: string, minLength: 1, maxLength: 255}
+        locations:
+          type: object
+          additionalProperties: false
+          properties:
+            progression: {type: number, minimum: 0, maximum: 1}
+            position: {type: integer, minimum: 0}
+            totalProgression: {type: number, minimum: 0, maximum: 1}
+            fragments: {type: array, maxItems: 16, items: {type: string, maxLength: 2048}}
+        text:
+          type: object
+          additionalProperties: false
+          properties: {before: {type: string, maxLength: 4096}, highlight: {type: string, maxLength: 4096}, after: {type: string, maxLength: 4096}}
+        extensions:
+          type: object
+          additionalProperties: false
+          required: [version, values]
+          properties:
+            version: {type: integer, const: 1}
+            values: {type: object, maxProperties: 16, additionalProperties: {type: [boolean, integer, number, string]}}
+    ReadingProgress:
+      type: object
+      additionalProperties: false
+      required: [manifestationId, locator, version, updatedAt]
+      properties:
+        manifestationId: {type: string, format: uuid}
+        packageId: {type: [string, 'null'], format: uuid}
+        contentUnitId: {type: [string, 'null'], format: uuid}
+        locator: {$ref: '#/components/schemas/Locator'}
+        version: {type: integer, minimum: 1}
+        updatedAt: {type: string, format: date-time}
+    DeviceReadingProgress:
+      type: object
+      additionalProperties: false
+      required: [deviceId, locator, updatedAt]
+      properties:
+        deviceId: {type: string, format: uuid}
+        locator: {$ref: '#/components/schemas/Locator'}
+        updatedAt: {type: string, format: date-time}
+    UpdateReadingProgressRequest:
+      type: object
+      additionalProperties: false
+      required: [deviceId, clientMutationId, baseVersion, locator]
+      properties:
+        deviceId: {type: string, format: uuid}
+        clientMutationId: {type: string, format: uuid}
+        baseVersion: {type: integer, minimum: 0}
+        packageId: {type: [string, 'null'], format: uuid}
+        contentUnitId: {type: [string, 'null'], format: uuid}
+        locator: {$ref: '#/components/schemas/Locator'}
+    ProgressConflictProblem:
+      allOf:
+        - {$ref: '#/components/schemas/ProblemDetails'}
+        - type: object
+          required: [global, device]
+          properties:
+            global: {$ref: '#/components/schemas/ReadingProgress'}
+            device: {$ref: '#/components/schemas/DeviceReadingProgress'}
     ProblemDetails:
       type: object
       required: [type, title, status, detail, instance, code, request_id]

@@ -5,12 +5,13 @@ use folioharbor_application::{
     config::Settings,
     imports::{UploadApi, UploadService},
     ports::Clock,
-    reader::{ReaderApi, ReaderService},
+    reader::{ProgressApi, ProgressService, ReaderApi, ReaderService},
 };
 use folioharbor_domain::imports::blob::DedupScope as DomainDedupScope;
 use folioharbor_epub::{EpubResourceReader, ResourceCacheLimits};
 use folioharbor_postgres::{
-    PgAuthorizationRepository, PgCatalogRepository, PgReaderCatalogRepository, PgUploadRepository,
+    PgAuthorizationRepository, PgCatalogRepository, PgReaderCatalogRepository, PgReadingRepository,
+    PgUploadRepository,
 };
 use folioharbor_storage_local::LocalBlobStore;
 use sqlx::PgPool;
@@ -55,4 +56,11 @@ pub fn build_reader_api(settings: &Settings, pool: PgPool) -> Arc<dyn ReaderApi>
         PgReaderCatalogRepository::new(pool),
         EpubResourceReader::new(blobs, ResourceCacheLimits::default()),
     ))
+}
+
+#[must_use]
+pub fn build_progress_api(pool: PgPool) -> Arc<dyn ProgressApi> {
+    Arc::new(ProgressService::new(Arc::new(PgReadingRepository::new(
+        pool,
+    ))))
 }

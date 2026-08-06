@@ -1,13 +1,13 @@
 #![allow(clippy::expect_used)]
 
 use bytes::Bytes;
-use folioharbor_api::{build_catalog_api, build_reader_api, build_upload_api};
+use folioharbor_api::{build_catalog_api, build_progress_api, build_reader_api, build_upload_api};
 use folioharbor_application::{
     catalog::PageRequest,
     config::{ConfigSources, Settings},
     imports::{CreateUploadRequest, ReceiveUploadRequest},
 };
-use folioharbor_domain::id::{ItemId, LibraryId, RequestId, UserId};
+use folioharbor_domain::id::{ItemId, LibraryId, ManifestationId, RequestId, UserId};
 use folioharbor_domain::time::OffsetDateTime;
 use folioharbor_postgres::{PgPools, run_migrations};
 use folioharbor_test_support::postgres::TestPostgres;
@@ -95,6 +95,15 @@ async fn production_upload_composition_uses_postgres_and_local_blob_storage() ->
             .await,
         Err(folioharbor_application::error::AppError::NotFound {
             code: "item_not_found"
+        })
+    ));
+    let progress = build_progress_api(pools.api.clone());
+    assert!(matches!(
+        progress
+            .get_progress(actor, ManifestationId::new(), RequestId::new())
+            .await,
+        Err(folioharbor_application::error::AppError::NotFound {
+            code: "manifestation_not_found"
         })
     ));
     pools.close().await;

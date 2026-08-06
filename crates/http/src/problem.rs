@@ -241,6 +241,31 @@ pub fn response(error: &AppError, context: &ProblemContext) -> Response {
 }
 
 #[must_use]
+pub(crate) fn progress_conflict_response(
+    context: &ProblemContext,
+    global: &serde_json::Value,
+    device: &serde_json::Value,
+) -> Response {
+    let request_id = context.request_id.to_public_string();
+    let problem = serde_json::json!({
+        "type": format!("{}progress-conflict", context.problem_base),
+        "title": "Reading progress conflict",
+        "status": 409,
+        "detail": "The global reading position changed before this device update.",
+        "instance": format!("/problems/{request_id}"),
+        "code": "progress_conflict",
+        "request_id": request_id,
+        "global": global,
+        "device": device,
+    });
+    let mut response = (StatusCode::CONFLICT, axum::Json(problem)).into_response();
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(PROBLEM_CONTENT_TYPE));
+    response
+}
+
+#[must_use]
 pub(crate) fn request_validation_response(
     status: StatusCode,
     code: &'static str,

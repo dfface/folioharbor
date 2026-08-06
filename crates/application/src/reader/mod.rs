@@ -1,8 +1,14 @@
 mod get_manifest;
+mod get_progress;
 mod get_resource;
+mod update_progress;
 
 use async_trait::async_trait;
-use folioharbor_domain::id::{ItemId, RequestId, UserId};
+use folioharbor_domain::{
+    id::{ItemId, ManifestationId, RequestId, UserId},
+    reader::{ReadingProgress, ReadingUpdateOutcome},
+};
+use std::sync::Arc;
 
 use crate::{
     error::AppError,
@@ -12,7 +18,9 @@ use crate::{
 pub use get_manifest::{
     GetPublicationManifest, ManifestLink, ManifestMetadata, PublicationManifest,
 };
+pub use get_progress::GetReadingProgress;
 pub use get_resource::{GetPublicationResource, ResourceId, ResourceIdError, ResourceResponse};
+pub use update_progress::{UpdateReadingProgress, UpdateReadingProgressCommand};
 
 #[async_trait]
 pub trait ReaderApi: Send + Sync {
@@ -61,6 +69,74 @@ impl ReaderApi for UnavailableReaderApi {
 pub struct ReaderService<C, R> {
     catalog: C,
     resources: R,
+}
+
+#[async_trait]
+pub trait ProgressApi: Send + Sync {
+    async fn get_progress(
+        &self,
+        actor: UserId,
+        manifestation_id: ManifestationId,
+        request_id: RequestId,
+    ) -> Result<Option<ReadingProgress>, AppError>;
+    async fn update_progress(
+        &self,
+        command: UpdateReadingProgressCommand,
+    ) -> Result<ReadingUpdateOutcome, AppError>;
+}
+
+pub struct ProgressService {
+    repository: Arc<dyn crate::ports::ReadingRepository>,
+}
+impl ProgressService {
+    #[must_use]
+    pub fn new(repository: Arc<dyn crate::ports::ReadingRepository>) -> Self {
+        Self { repository }
+    }
+}
+#[async_trait]
+impl ProgressApi for ProgressService {
+    async fn get_progress(
+        &self,
+        actor: UserId,
+        manifestation_id: ManifestationId,
+        request_id: RequestId,
+    ) -> Result<Option<ReadingProgress>, AppError> {
+        GetReadingProgress::new(self.repository.clone())
+            .execute(actor, manifestation_id, request_id)
+            .await
+    }
+    async fn update_progress(
+        &self,
+        command: UpdateReadingProgressCommand,
+    ) -> Result<ReadingUpdateOutcome, AppError> {
+        UpdateReadingProgress::new(self.repository.clone())
+            .execute(command)
+            .await
+    }
+}
+
+pub struct UnavailableProgressApi;
+#[async_trait]
+impl ProgressApi for UnavailableProgressApi {
+    async fn get_progress(
+        &self,
+        _: UserId,
+        _: ManifestationId,
+        _: RequestId,
+    ) -> Result<Option<ReadingProgress>, AppError> {
+        Err(AppError::DependencyUnavailable {
+            code: "reading_repository_unavailable",
+        })
+    }
+    async fn update_progress(
+        &self,
+        _: UpdateReadingProgressCommand,
+    ) -> Result<ReadingUpdateOutcome, AppError> {
+        Err(AppError::DependencyUnavailable {
+            code: "reading_repository_unavailable",
+        })
+    }
 }
 impl<C, R> ReaderService<C, R> {
     #[must_use]
