@@ -697,8 +697,11 @@ git commit -m "feat: persist WEMI catalog and logical library items"
 - Create: `crates/application/tests/{process_import,cleanup}.rs`
 - Create: `apps/worker/src/{main,runner,handlers}.rs`
 - Create: `apps/worker/tests/import_recovery.rs`
+- Create: `crates/postgres/src/imports.rs`
 - Modify: `crates/epub/src/lib.rs`
 - Modify: `crates/storage-local/src/lib.rs`
+- Modify: `migrations/0009_uploads_and_jobs.sql`
+- Modify: `migrations/0010_catalog.sql`
 
 **Interfaces:**
 
@@ -708,7 +711,7 @@ git commit -m "feat: persist WEMI catalog and logical library items"
 
 - [ ] **Step 1: Write failing saga and crash-recovery tests**
 
-For each boundary—received record, Blob promotion, parser completion, catalog transaction, quota consume, job success—inject one crash/failure, restart a Worker, and assert one visible Item, one logical quota charge, no lost ready Blob, and an eventually terminal job. Assert malformed EPUB fails permanently, transient I/O/database errors retry with jittered exponential backoff, and persistent configuration/schema/space errors become operator-required.
+For each boundary—received record, Blob promotion, parser completion, catalog transaction, quota consume, job success—inject one crash/failure, recreate the persisted Worker service, and assert one visible Item, one logical quota charge, no lost ready Blob, and an eventually terminal job. Include at least one real operating-system multi-process Worker race. Assert malformed EPUB fails permanently, transient I/O/database errors retry with jittered exponential backoff, and persistent configuration/schema/space errors become a distinct durable operator-required state.
 
 - [ ] **Step 2: Implement a narrow Worker runner**
 
@@ -716,11 +719,11 @@ The runner leases one job, opens a tracing span, dispatches by a closed `JobKind
 
 - [ ] **Step 3: Implement idempotent import orchestration**
 
-Use the upload/job ID as the saga identity. Reconcile existing staging/location/catalog state before each action. Promote Blob idempotently, parse or reuse `(blob, parser_profile_version)`, finalize catalog and consume quota in one database transaction, then clean staging. Never mark Ready before the catalog transaction commits. Duplicate consumes no new logical bytes and releases the reservation.
+Use the upload/job ID as the saga identity. Reconcile existing staging/location/catalog state before each action. Task 9 owns the physical, idempotent staging-to-Blob promotion boundary; this Worker must validate and reconcile that durable promotion outcome rather than repeat or bypass it. Parse or reuse `(blob, parser_profile_version)`, finalize catalog and consume quota in one database transaction, then clean staging. Never mark Ready before the catalog transaction commits. Duplicate consumes no new logical bytes and releases the reservation.
 
 - [ ] **Step 4: Add bounded cleanup handlers**
 
-Expire abandoned Created/Received uploads, release expired reservations, and purge quarantined failed bytes after 24 hours. Each pass uses a limited batch, `SKIP LOCKED`, idempotent storage deletion, and a persisted cursor/time boundary; it must not scan or lock the whole table.
+Expire abandoned Created/Received uploads, release expired reservations, and purge quarantined failed bytes after 24 hours. Cleanup kinds are durable closed job kinds dispatched by the Worker. Each pass resumes a persisted cursor/time boundary, uses a limited batch and `SKIP LOCKED`, performs idempotent storage deletion, and advances the boundary only after the stable pass completes; it must not scan or lock the whole table.
 
 - [ ] **Step 5: Verify and commit**
 
