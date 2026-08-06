@@ -33,7 +33,9 @@ impl PgCatalogRepository {
         lock_identity(connection, command).await?;
         validate_import_identity(connection, command).await?;
         if let Some(item_id) = find_duplicate(connection, command).await? {
-            finish_import(connection, command, item_id, true).await?;
+            if finish_import(connection, command, item_id).await? != CatalogCompletion::Duplicate {
+                return Err(CatalogRepositoryError::Persistence);
+            }
             return Ok(ImportCatalogResult::Duplicate { item_id });
         }
         let package = find_package(connection, command).await?;
@@ -43,7 +45,9 @@ impl PgCatalogRepository {
         };
         let item_id =
             create_library_item(connection, command, package_id, manifestation_id).await?;
-        finish_import(connection, command, item_id, false).await?;
+        if finish_import(connection, command, item_id).await? != CatalogCompletion::Created {
+            return Err(CatalogRepositoryError::Persistence);
+        }
         Ok(ImportCatalogResult::Created {
             item_id,
             package_id,
@@ -249,7 +253,7 @@ async fn create_library_item(
     let item = ItemId::new();
     sqlx::query!("INSERT INTO folioharbor.holdings(holding_id,library_id,manifestation_id,state,created_at) VALUES($1,$2,$3,'active',$4)", holding.as_uuid(), command.library_id.as_uuid(), manifestation.as_uuid(), command.now)
         .execute(&mut *connection).await.map_err(persistence)?;
-    sqlx::query!("INSERT INTO folioharbor.items(item_id,holding_id,manifestation_id,package_id,state,created_at) VALUES($1,$2,$3,$4,'active',$5)", item.as_uuid(), holding.as_uuid(), manifestation.as_uuid(), package.as_uuid(), command.now)
+    sqlx::query!("INSERT INTO folioharbor.items(item_id,holding_id,manifestation_id,package_id,source_upload_id,state,created_at) VALUES($1,$2,$3,$4,$5,'active',$6)", item.as_uuid(), holding.as_uuid(), manifestation.as_uuid(), package.as_uuid(), command.upload_id.as_uuid(), command.now)
         .execute(&mut *connection).await.map_err(persistence)?;
     sqlx::query!("INSERT INTO folioharbor.item_assets(item_id,blob_id,asset_kind,created_at) VALUES($1,$2,'original',$3)", item.as_uuid(), command.original_blob_id.as_uuid(), command.now)
         .execute(&mut *connection).await.map_err(persistence)?;
@@ -260,8 +264,7 @@ async fn finish_import(
     connection: &mut PgConnection,
     command: &FinalizeCatalog,
     item: ItemId,
-    duplicate: bool,
-) -> Result<(), CatalogRepositoryError> {
+) -> Result<CatalogCompletion, CatalogRepositoryError> {
     let outcome: String = sqlx::query_scalar!(
         "SELECT folioharbor.catalog_finish_import($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) AS \"outcome!\"",
         command.library_id.as_uuid(),
@@ -270,8 +273,8 @@ async fn finish_import(
         command.original_blob_id.as_uuid(),
         i64::try_from(command.logical_bytes.get())
             .map_err(|_| CatalogRepositoryError::Persistence)?,
+        command.parser_profile_version.as_str(),
         item.as_uuid(),
-        duplicate,
         Uuid::now_v7(),
         command.request_id.as_ulid().to_string(),
         command.now
@@ -279,10 +282,17 @@ async fn finish_import(
     .fetch_one(&mut *connection)
     .await
     .map_err(persistence)?;
-    if outcome != "applied" {
-        return Err(CatalogRepositoryError::ReservationNotActive);
+    match outcome.as_str() {
+        "created" => Ok(CatalogCompletion::Created),
+        "duplicate" => Ok(CatalogCompletion::Duplicate),
+        _ => Err(CatalogRepositoryError::ReservationNotActive),
     }
-    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CatalogCompletion {
+    Created,
+    Duplicate,
 }
 
 fn order_i32(order: usize) -> Result<i32, CatalogRepositoryError> {

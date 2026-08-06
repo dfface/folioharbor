@@ -16,8 +16,8 @@
         "Uuid",
         "Uuid",
         "Int8",
+        "Text",
         "Uuid",
-        "Bool",
         "Uuid",
         "Text",
         "Timestamptz"

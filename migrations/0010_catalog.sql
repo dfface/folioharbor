@@ -95,6 +95,8 @@ CREATE TABLE folioharbor.items (
     holding_id uuid NOT NULL,
     manifestation_id uuid NOT NULL,
     package_id uuid NOT NULL,
+    source_upload_id uuid NOT NULL UNIQUE
+      REFERENCES folioharbor.upload_sessions(upload_id) ON DELETE RESTRICT,
     state text NOT NULL CHECK (state IN ('active','deleted')),
     created_at timestamptz NOT NULL,
     deleted_at timestamptz,
@@ -105,6 +107,21 @@ CREATE TABLE folioharbor.items (
       REFERENCES folioharbor.publication_packages(package_id, manifestation_id) ON DELETE RESTRICT
 );
 CREATE INDEX items_package_id_idx ON folioharbor.items(package_id);
+CREATE UNIQUE INDEX items_one_active_per_holding
+    ON folioharbor.items(holding_id) WHERE state='active';
+
+CREATE FUNCTION folioharbor.reject_item_provenance_change()
+RETURNS trigger LANGUAGE plpgsql SET search_path TO '' AS $$
+BEGIN
+    IF NEW.source_upload_id IS DISTINCT FROM OLD.source_upload_id THEN
+        RAISE EXCEPTION 'item provenance is immutable' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION folioharbor.reject_item_provenance_change() FROM PUBLIC;
+CREATE TRIGGER items_immutable_provenance
+    BEFORE UPDATE OF source_upload_id ON folioharbor.items
+    FOR EACH ROW EXECUTE FUNCTION folioharbor.reject_item_provenance_change();
 
 CREATE TABLE folioharbor.item_assets (
     item_id uuid NOT NULL REFERENCES folioharbor.items(item_id) ON DELETE CASCADE,
@@ -214,36 +231,56 @@ GRANT EXECUTE ON FUNCTION folioharbor.catalog_validate_import(uuid,uuid,uuid,uui
 
 CREATE FUNCTION folioharbor.catalog_finish_import(
     p_library uuid, p_upload uuid, p_actor uuid, p_blob uuid, p_logical bigint,
-    p_item uuid, p_duplicate boolean,
+    p_profile text, p_item uuid,
     p_audit uuid, p_request text, p_now timestamptz
 ) RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 DECLARE quota_outcome text;
+DECLARE completion_outcome text;
 BEGIN
     IF NOT folioharbor.catalog_validate_import(
       p_library,p_upload,p_actor,p_blob,p_logical,p_request
     ) THEN RETURN 'not_active'; END IF;
-    IF NOT EXISTS (
-      SELECT 1 FROM folioharbor.items item JOIN folioharbor.holdings holding USING(holding_id)
+    SELECT CASE WHEN item.source_upload_id=p_upload THEN 'created' ELSE 'duplicate' END
+      INTO completion_outcome
+      FROM folioharbor.items item
+      JOIN folioharbor.holdings holding
+        ON holding.holding_id=item.holding_id
+       AND holding.manifestation_id=item.manifestation_id
+      JOIN folioharbor.publication_packages package
+        ON package.package_id=item.package_id
+       AND package.manifestation_id=item.manifestation_id
+      JOIN folioharbor.item_assets asset
+        ON asset.item_id=item.item_id AND asset.asset_kind='original'
+      JOIN folioharbor.upload_sessions provenance
+        ON provenance.upload_id=item.source_upload_id
+      JOIN folioharbor.blobs blob ON blob.blob_id=p_blob
       WHERE item.item_id=p_item AND item.state='active' AND holding.state='active'
-        AND holding.library_id=p_library
-    ) THEN RETURN 'not_active'; END IF;
-    quota_outcome := CASE WHEN p_duplicate
+        AND holding.library_id=p_library AND package.blob_id=p_blob
+        AND package.parser_profile_version=p_profile AND asset.blob_id=p_blob
+        AND provenance.library_id=p_library
+        AND provenance.sha256 IS NOT DISTINCT FROM blob.sha256
+        AND provenance.received_bytes=blob.byte_size
+        AND ((item.source_upload_id=p_upload AND provenance.state='importing')
+          OR (item.source_upload_id<>p_upload AND provenance.state='ready'))
+      FOR UPDATE OF item;
+    IF completion_outcome IS NULL THEN RETURN 'not_active'; END IF;
+    quota_outcome := CASE WHEN completion_outcome='duplicate'
       THEN folioharbor.quota_release(p_library,p_upload)
       ELSE folioharbor.quota_consume(p_library,p_upload) END;
     IF quota_outcome <> 'applied' THEN RETURN 'not_active'; END IF;
     UPDATE folioharbor.upload_sessions SET
-      state=CASE WHEN p_duplicate THEN 'duplicate' ELSE 'ready' END,
+      state=CASE WHEN completion_outcome='duplicate' THEN 'duplicate' ELSE 'ready' END,
       updated_at=p_now WHERE upload_id=p_upload;
     INSERT INTO folioharbor.audit_events(
       audit_event_id,actor_id,effective_actor_id,library_id,action_code,resource_type,
       resource_id,decision,reason_code,request_id,source,occurred_at,network_hmac
     ) VALUES (p_audit,p_actor,p_actor,p_library,'publication.import','upload',p_upload,
       'allowed',NULL,p_request,'worker',p_now,NULL);
-    RETURN 'applied';
+    RETURN completion_outcome;
 END $$;
-ALTER FUNCTION folioharbor.catalog_finish_import(uuid,uuid,uuid,uuid,bigint,uuid,boolean,uuid,text,timestamptz) OWNER TO folioharbor_owner;
-REVOKE ALL ON FUNCTION folioharbor.catalog_finish_import(uuid,uuid,uuid,uuid,bigint,uuid,boolean,uuid,text,timestamptz) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION folioharbor.catalog_finish_import(uuid,uuid,uuid,uuid,bigint,uuid,boolean,uuid,text,timestamptz) TO folioharbor_worker;
+ALTER FUNCTION folioharbor.catalog_finish_import(uuid,uuid,uuid,uuid,bigint,text,uuid,uuid,text,timestamptz) OWNER TO folioharbor_owner;
+REVOKE ALL ON FUNCTION folioharbor.catalog_finish_import(uuid,uuid,uuid,uuid,bigint,text,uuid,uuid,text,timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION folioharbor.catalog_finish_import(uuid,uuid,uuid,uuid,bigint,text,uuid,uuid,text,timestamptz) TO folioharbor_worker;
 
 CREATE FUNCTION folioharbor.catalog_item_visible(
     p_actor uuid, p_library uuid, p_item uuid, p_membership_version bigint

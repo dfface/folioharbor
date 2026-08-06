@@ -115,6 +115,12 @@ async fn exact_blob_is_idempotent_per_library_but_shared_across_libraries() -> a
     .fetch_one(&pools.owner)
     .await?;
     assert_eq!(successful_audits, 3);
+    let source_upload: uuid::Uuid =
+        sqlx::query_scalar("SELECT source_upload_id FROM folioharbor.items WHERE item_id=$1")
+            .bind(first_item.as_uuid())
+            .fetch_one(&pools.owner)
+            .await?;
+    assert_eq!(source_upload, first_upload.as_uuid());
     pools.close().await;
     database.cleanup().await?;
     Ok(())
@@ -163,6 +169,49 @@ async fn similar_metadata_on_distinct_blobs_never_auto_merges() -> anyhow::Resul
         .await?;
     let counts: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM folioharbor.works),(SELECT count(*) FROM folioharbor.expressions),(SELECT count(*) FROM folioharbor.manifestations)").fetch_one(&pools.owner).await?;
     assert_eq!(counts, (2, 2, 2));
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn toc_fragment_locator_is_persisted_without_weakening_resource_paths() -> anyhow::Result<()>
+{
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let now = OffsetDateTime::now_utc();
+    let actor = UserId::new();
+    let library = LibraryId::new();
+    seed_user(&pools, actor, now).await?;
+    seed_library(&pools, library, actor, now).await?;
+    let blob = seed_blob(&pools, 19, now).await?;
+    let upload = seed_upload(&pools, library, actor, blob, 19, now).await?;
+
+    let result = ImportPublicationCatalog::new(&PgCatalogRepository::new(pools.worker.clone()))
+        .execute(command_with_toc_locator(
+            library,
+            upload,
+            actor,
+            blob,
+            19,
+            "Fragment",
+            "OPS/chapter.xhtml#section-1",
+        ))
+        .await?;
+    assert!(matches!(result, ImportCatalogResult::Created { .. }));
+    let locator: String = sqlx::query_scalar(
+        "SELECT toc.locator_href FROM folioharbor.package_toc_entries toc JOIN folioharbor.publication_packages package USING(package_id) WHERE package.blob_id=$1",
+    )
+    .bind(blob.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_eq!(locator, "OPS/chapter.xhtml#section-1");
     pools.close().await;
     database.cleanup().await?;
     Ok(())
@@ -384,6 +433,210 @@ async fn upload_blob_and_reservation_identity_mismatches_roll_back_everything() 
 }
 
 #[tokio::test]
+async fn catalog_completion_rejects_unproven_item_package_and_original_asset() -> anyhow::Result<()>
+{
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let now = OffsetDateTime::now_utc();
+    let actor = UserId::new();
+    let library = LibraryId::new();
+    seed_user(&pools, actor, now).await?;
+    seed_library(&pools, library, actor, now).await?;
+    let blob = seed_blob(&pools, 29, now).await?;
+    let first_upload = seed_upload(&pools, library, actor, blob, 29, now).await?;
+    let repository = PgCatalogRepository::new(pools.worker.clone());
+    let ImportCatalogResult::Created { item_id, .. } = ImportPublicationCatalog::new(&repository)
+        .execute(command(
+            library,
+            first_upload,
+            actor,
+            blob,
+            29,
+            "Provenance",
+        ))
+        .await?
+    else {
+        panic!("first item must be created")
+    };
+    let other_blob = seed_blob(&pools, 31, now).await?;
+    let other_upload = seed_upload(&pools, library, actor, other_blob, 31, now).await?;
+    let ImportCatalogResult::Created {
+        item_id: other_item,
+        ..
+    } = ImportPublicationCatalog::new(&repository)
+        .execute(command(
+            library,
+            other_upload,
+            actor,
+            other_blob,
+            31,
+            "Other",
+        ))
+        .await?
+    else {
+        panic!("other item must be created")
+    };
+
+    let wrong_item_upload = seed_upload(&pools, library, actor, blob, 29, now).await?;
+    assert_rejected_completion(
+        &pools,
+        library,
+        wrong_item_upload,
+        actor,
+        blob,
+        29,
+        other_item,
+        now,
+    )
+    .await?;
+
+    sqlx::query(
+        "UPDATE folioharbor.item_assets SET blob_id=$2 WHERE item_id=$1 AND asset_kind='original'",
+    )
+    .bind(item_id.as_uuid())
+    .bind(other_blob.as_uuid())
+    .execute(&pools.owner)
+    .await?;
+    let wrong_asset_upload = seed_upload(&pools, library, actor, blob, 29, now).await?;
+    assert_rejected_completion(
+        &pools,
+        library,
+        wrong_asset_upload,
+        actor,
+        blob,
+        29,
+        item_id,
+        now,
+    )
+    .await?;
+    sqlx::query("UPDATE folioharbor.item_assets SET blob_id=$2 WHERE item_id=$1")
+        .bind(item_id.as_uuid())
+        .bind(blob.as_uuid())
+        .execute(&pools.owner)
+        .await?;
+
+    let (manifestation, original_package): (uuid::Uuid, uuid::Uuid) = sqlx::query_as(
+        "SELECT item.manifestation_id,item.package_id FROM folioharbor.items item WHERE item.item_id=$1",
+    )
+    .bind(item_id.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    let wrong_package = uuid::Uuid::now_v7();
+    sqlx::query("INSERT INTO folioharbor.publication_packages(package_id,manifestation_id,blob_id,parser_profile_version,created_at) VALUES($1,$2,$3,'epub-v2',$4)")
+        .bind(wrong_package).bind(manifestation).bind(blob.as_uuid()).bind(now).execute(&pools.owner).await?;
+    sqlx::query("UPDATE folioharbor.items SET package_id=$2 WHERE item_id=$1")
+        .bind(item_id.as_uuid())
+        .bind(wrong_package)
+        .execute(&pools.owner)
+        .await?;
+    let wrong_package_upload = seed_upload(&pools, library, actor, blob, 29, now).await?;
+    assert_rejected_completion(
+        &pools,
+        library,
+        wrong_package_upload,
+        actor,
+        blob,
+        29,
+        item_id,
+        now,
+    )
+    .await?;
+    sqlx::query("UPDATE folioharbor.items SET package_id=$2 WHERE item_id=$1")
+        .bind(item_id.as_uuid())
+        .bind(original_package)
+        .execute(&pools.owner)
+        .await?;
+
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn catalog_completion_exposes_no_caller_controlled_duplicate_flag() -> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let now = OffsetDateTime::now_utc();
+    let actor = UserId::new();
+    let library = LibraryId::new();
+    seed_user(&pools, actor, now).await?;
+    seed_library(&pools, library, actor, now).await?;
+    let blob = seed_blob(&pools, 37, now).await?;
+    let first_upload = seed_upload(&pools, library, actor, blob, 37, now).await?;
+    let repository = PgCatalogRepository::new(pools.worker.clone());
+    let ImportCatalogResult::Created { item_id, .. } = ImportPublicationCatalog::new(&repository)
+        .execute(command(library, first_upload, actor, blob, 37, "Flags"))
+        .await?
+    else {
+        panic!("first item must be created")
+    };
+    let late_upload = seed_upload(&pools, library, actor, blob, 37, now).await?;
+
+    let mut provenance_rewrite = pools.owner.begin().await?;
+    let rewrite_result =
+        sqlx::query("UPDATE folioharbor.items SET source_upload_id=$2 WHERE item_id=$1")
+            .bind(item_id.as_uuid())
+            .bind(late_upload.as_uuid())
+            .execute(&mut *provenance_rewrite)
+            .await;
+    provenance_rewrite.rollback().await?;
+    assert!(rewrite_result.is_err(), "Item provenance must be immutable");
+
+    for forged_duplicate in [false, true] {
+        let request = RequestId::new();
+        let mut tx = pools.worker.begin().await?;
+        PgTransactionContext::apply(&mut tx, &DatabaseContext::worker(request, Some(library)))
+            .await?;
+        let result = sqlx::query_scalar::<_, String>(
+            "SELECT folioharbor.catalog_finish_import($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+        )
+        .bind(library.as_uuid())
+        .bind(late_upload.as_uuid())
+        .bind(actor.as_uuid())
+        .bind(blob.as_uuid())
+        .bind(37_i64)
+        .bind(item_id.as_uuid())
+        .bind(forged_duplicate)
+        .bind(uuid::Uuid::now_v7())
+        .bind(request.as_ulid().to_string())
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await;
+        tx.rollback().await?;
+        assert!(
+            result.is_err(),
+            "catalog completion must not expose a caller-controlled duplicate flag"
+        );
+    }
+    let state: (String, i64, i64, String, i64) = sqlx::query_as(
+        "SELECT upload.state,library.quota_used_bytes,library.quota_reserved_bytes,reservation.state,(SELECT count(*) FROM folioharbor.audit_events WHERE resource_id=$1 AND action_code='publication.import') FROM folioharbor.upload_sessions upload JOIN folioharbor.libraries library USING(library_id) JOIN folioharbor.quota_reservations reservation USING(upload_id) WHERE upload.upload_id=$1",
+    )
+    .bind(late_upload.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_eq!(
+        (state.0, state.1, state.2, state.3),
+        ("importing".into(), 37, 37, "active".into())
+    );
+    assert_eq!(state.4, 0);
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn catalog_finalization_and_late_upload_finalization_share_library_first_lock_order()
 -> anyhow::Result<()> {
     let database = TestPostgres::provision().await?;
@@ -452,8 +705,8 @@ async fn catalog_finalization_and_late_upload_finalization_share_library_first_l
             .bind(actor.as_uuid())
             .bind(blob.as_uuid())
             .bind(23_i64)
+            .bind("epub-v1")
             .bind(item_id.as_uuid())
-            .bind(true)
             .bind(uuid::Uuid::now_v7())
             .bind(request.as_ulid().to_string())
             .bind(now)
@@ -494,7 +747,7 @@ async fn catalog_finalization_and_late_upload_finalization_share_library_first_l
         assert!(!late_finalize, "an importing upload cannot be finalized by the API");
         api.rollback().await?;
         let catalog_outcome = worker.await??;
-        assert_eq!(catalog_outcome, "applied");
+        assert_eq!(catalog_outcome, "duplicate");
         anyhow::Ok(())
     })
     .await??;
@@ -611,6 +864,53 @@ async fn schema_rejects_ambiguous_catalog_relations_and_ordering() -> anyhow::Re
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn assert_rejected_completion(
+    pools: &PgPools,
+    library: LibraryId,
+    upload: UploadId,
+    actor: UserId,
+    blob: BlobId,
+    bytes: i64,
+    item: ItemId,
+    now: OffsetDateTime,
+) -> anyhow::Result<()> {
+    let before: (String, i64, i64, String, i64, i64, i64) = sqlx::query_as(
+        "SELECT upload.state,library.quota_used_bytes,library.quota_reserved_bytes,reservation.state,(SELECT count(*) FROM folioharbor.items),(SELECT count(*) FROM folioharbor.holdings),(SELECT count(*) FROM folioharbor.audit_events WHERE resource_id=$1 AND action_code='publication.import') FROM folioharbor.upload_sessions upload JOIN folioharbor.libraries library USING(library_id) JOIN folioharbor.quota_reservations reservation USING(upload_id) WHERE upload.upload_id=$1",
+    )
+    .bind(upload.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    let request = RequestId::new();
+    let mut tx = pools.worker.begin().await?;
+    PgTransactionContext::apply(&mut tx, &DatabaseContext::worker(request, Some(library))).await?;
+    let outcome: String = sqlx::query_scalar(
+        "SELECT folioharbor.catalog_finish_import($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    )
+    .bind(library.as_uuid())
+    .bind(upload.as_uuid())
+    .bind(actor.as_uuid())
+    .bind(blob.as_uuid())
+    .bind(bytes)
+    .bind("epub-v1")
+    .bind(item.as_uuid())
+    .bind(uuid::Uuid::now_v7())
+    .bind(request.as_ulid().to_string())
+    .bind(now)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    assert_eq!(outcome, "not_active");
+    let after: (String, i64, i64, String, i64, i64, i64) = sqlx::query_as(
+        "SELECT upload.state,library.quota_used_bytes,library.quota_reserved_bytes,reservation.state,(SELECT count(*) FROM folioharbor.items),(SELECT count(*) FROM folioharbor.holdings),(SELECT count(*) FROM folioharbor.audit_events WHERE resource_id=$1 AND action_code='publication.import') FROM folioharbor.upload_sessions upload JOIN folioharbor.libraries library USING(library_id) JOIN folioharbor.quota_reservations reservation USING(upload_id) WHERE upload.upload_id=$1",
+    )
+    .bind(upload.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_eq!(after, before, "rejected completion must be mutation-free");
+    Ok(())
+}
+
 fn command(
     library_id: LibraryId,
     upload_id: UploadId,
@@ -618,6 +918,26 @@ fn command(
     blob_id: BlobId,
     bytes: u64,
     title: &str,
+) -> ImportCatalogCommand {
+    command_with_toc_locator(
+        library_id,
+        upload_id,
+        actor_id,
+        blob_id,
+        bytes,
+        title,
+        "OPS/chapter.xhtml",
+    )
+}
+
+fn command_with_toc_locator(
+    library_id: LibraryId,
+    upload_id: UploadId,
+    actor_id: UserId,
+    blob_id: BlobId,
+    bytes: u64,
+    title: &str,
+    toc_locator: &str,
 ) -> ImportCatalogCommand {
     let metadata = CatalogMetadata::from_parser(&ParserMetadata {
         titles: vec![title.into()],
@@ -634,7 +954,7 @@ fn command(
             PublicationResource::new("OPS/cover.jpg", "image/jpeg").expect("cover resource"),
         ],
         vec![SpineEntry::new("OPS/chapter.xhtml", true).expect("spine")],
-        vec![TocEntry::new("Chapter", "OPS/chapter.xhtml").expect("toc")],
+        vec![TocEntry::new("Chapter", toc_locator).expect("toc")],
         Some("OPS/cover.jpg".to_owned()),
     )
     .expect("publication");

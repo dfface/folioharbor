@@ -47,7 +47,7 @@ impl TocEntry {
         }
         Ok(Self {
             label: label.to_owned(),
-            href: normalized_href(href.into())?,
+            href: normalized_locator(href.into())?,
         })
     }
 
@@ -63,7 +63,36 @@ impl TocEntry {
 }
 
 pub(crate) fn normalized_href(value: String) -> Result<String, CatalogValueError> {
-    let decoded = percent_decoded(&value)?;
+    validate_path(&value)?;
+    Ok(value)
+}
+
+fn normalized_locator(value: String) -> Result<String, CatalogValueError> {
+    if value.len() > 2_048 {
+        return Err(CatalogValueError::InvalidMetadata);
+    }
+    let Some((path, fragment)) = value.split_once('#') else {
+        validate_path(&value)?;
+        return Ok(value);
+    };
+    validate_path(path)?;
+    if fragment.is_empty() || fragment.contains('#') {
+        return Err(CatalogValueError::InvalidMetadata);
+    }
+    let decoded_fragment = percent_decoded(fragment)?;
+    if decoded_fragment.is_empty()
+        || decoded_fragment.contains(['\\', ':', '/', '?', '#'])
+        || decoded_fragment
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(CatalogValueError::InvalidMetadata);
+    }
+    Ok(value)
+}
+
+fn validate_path(value: &str) -> Result<(), CatalogValueError> {
+    let decoded = percent_decoded(value)?;
     if value.is_empty()
         || value.len() > 2_048
         || value.contains(['?', '#'])
@@ -76,7 +105,7 @@ pub(crate) fn normalized_href(value: String) -> Result<String, CatalogValueError
     {
         return Err(CatalogValueError::InvalidMetadata);
     }
-    Ok(value)
+    Ok(())
 }
 
 fn percent_decoded(value: &str) -> Result<String, CatalogValueError> {

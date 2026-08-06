@@ -103,8 +103,6 @@ fn catalog_hrefs_reject_transport_and_ambiguous_epub_paths() {
         "mailto:reader@example.test",
         "data:text/html,chapter",
         "scheme:value",
-        "OPS/chapter.xhtml?mode=raw",
-        "OPS/chapter.xhtml#fragment",
         "OPS/chapter\0.xhtml",
         "OPS/chapter\n.xhtml",
         "/OPS/chapter.xhtml",
@@ -127,5 +125,32 @@ fn catalog_hrefs_reject_transport_and_ambiguous_epub_paths() {
         assert!(SpineEntry::new(invalid, true).is_err());
         assert!(TocEntry::new("Chapter", invalid).is_err());
     }
+    for invalid_resource in ["OPS/chapter.xhtml?mode=raw", "OPS/chapter.xhtml#fragment"] {
+        assert!(
+            PublicationResource::new(invalid_resource, "application/xhtml+xml").is_err(),
+            "resource href must be a fragment-free manifest path"
+        );
+        assert!(SpineEntry::new(invalid_resource, true).is_err());
+    }
+    for invalid_locator in [
+        "OPS/chapter.xhtml#",
+        "OPS/chapter.xhtml#section\0",
+        "OPS/chapter.xhtml#section%00",
+        "OPS/chapter.xhtml#section%3Anested",
+        "OPS/chapter.xhtml#section%ZZ",
+        "OPS/chapter.xhtml#http://example.test",
+        "OPS/../chapter.xhtml#section-1",
+        "https://example.test/chapter.xhtml#section-1",
+        "OPS/chapter.xhtml#section#nested",
+        "OPS/chapter.xhtml%23section-1",
+    ] {
+        assert!(
+            TocEntry::new("Chapter", invalid_locator).is_err(),
+            "must reject unsafe TOC locator {invalid_locator:?}"
+        );
+    }
+    let toc =
+        TocEntry::new("Section", "OPS/chapter.xhtml#section-1").expect("safe TOC fragment locator");
+    assert_eq!(toc.href(), "OPS/chapter.xhtml#section-1");
     assert!(PublicationResource::new("OPS/chapter-1.xhtml", "application/xhtml+xml").is_ok());
 }
