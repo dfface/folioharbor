@@ -694,6 +694,7 @@ git commit -m "feat: persist WEMI catalog and logical library items"
 
 - Create: `crates/application/src/imports/{process_import,cleanup}.rs`
 - Create: `crates/application/src/ports/publication_parser.rs`
+- Create: `crates/application/src/ports/{import_repository,import_cleanup_repository}.rs`
 - Create: `crates/application/tests/{process_import,cleanup}.rs`
 - Create: `apps/worker/src/{main,runner,handlers}.rs`
 - Create: `apps/worker/tests/import_recovery.rs`
@@ -702,7 +703,7 @@ git commit -m "feat: persist WEMI catalog and logical library items"
 - Modify: `crates/application/src/ports/job_repository.rs`
 - Modify: `crates/application/src/imports/job_queue.rs`
 - Modify: `crates/postgres/src/jobs.rs`
-- Modify: `crates/postgres/tests/{job_leasing,import_cleanup}.rs`
+- Modify: `crates/postgres/tests/{job_leasing,import_cleanup,upload_state_machine}.rs`
 - Modify: `crates/epub/src/lib.rs`
 - Modify: `crates/storage-local/src/lib.rs`
 - Modify: `migrations/0009_uploads_and_jobs.sql`
