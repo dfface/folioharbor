@@ -14,10 +14,11 @@ use folioharbor_domain::{
     time::OffsetDateTime,
 };
 use folioharbor_postgres::{
-    PgAuthorizationRepository, PgCatalogRepository, PgGarbageCollectionRepository,
-    PgItemLifecycleRepository, PgPools, run_migrations,
+    DatabaseContext, PgAuthorizationRepository, PgCatalogRepository, PgGarbageCollectionRepository,
+    PgItemLifecycleRepository, PgPools, PgTransactionContext, connect_worker, run_migrations,
 };
 use folioharbor_test_support::postgres::TestPostgres;
+use secrecy::SecretString;
 use time::Duration;
 use tokio::time::{Duration as TokioDuration, sleep, timeout};
 
@@ -97,6 +98,43 @@ async fn delete_revokes_visibility_restore_is_bounded_and_audit_is_atomic() -> a
     .fetch_one(&pools.owner)
     .await?;
     assert_eq!(audit_count, 3, "two deletes and one restore are durable");
+
+    finish(database, pools).await
+}
+
+#[tokio::test]
+async fn delete_remains_idempotent_after_item_purge() -> anyhow::Result<()> {
+    let (database, pools) = database().await?;
+    let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
+    let seeded = seed_item(&pools, now - Duration::days(8), 39).await?;
+    mark_deleted(&pools, &seeded, now - Duration::days(7)).await?;
+    assert_eq!(
+        PgGarbageCollectionRepository::new(pools.worker.clone())
+            .prepare(now, 10)
+            .await?,
+        1
+    );
+
+    let state = DeleteItem::new(
+        &PgItemLifecycleRepository::new(pools.api.clone()),
+        &PgAuthorizationRepository::new(pools.api.clone()),
+    )
+    .execute(DeleteItemCommand {
+        actor: seeded.actor,
+        library_id: seeded.library,
+        item_id: seeded.item,
+        request_id: RequestId::new(),
+        now: now + Duration::hours(1),
+    })
+    .await?;
+    assert!(matches!(state, ItemLifecycle::Purged { .. }));
+    let deletes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM folioharbor.audit_events WHERE resource_id=$1 AND action_code='item.delete' AND decision='allowed'",
+    )
+    .bind(seeded.item.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_eq!(deletes, 2, "idempotent post-purge delete is still audited");
 
     finish(database, pools).await
 }
@@ -246,6 +284,87 @@ async fn shared_item_and_manifestation_asset_references_prevent_collection() -> 
 }
 
 #[tokio::test]
+async fn purged_blob_constraint_preserves_the_exact_twenty_four_hour_delay() -> anyhow::Result<()> {
+    let (database, pools) = database().await?;
+    let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
+    let seeded = seed_item(&pools, now, 45).await?;
+
+    let shortened = sqlx::query(
+        "UPDATE folioharbor.blob_locations SET state='purged',purge_pending_at=$2,purge_after=$2,purged_at=$2,updated_at=$2 WHERE blob_id=$1",
+    )
+    .bind(seeded.blob.as_uuid())
+    .bind(now)
+    .execute(&pools.owner)
+    .await;
+    assert!(
+        shortened.is_err(),
+        "terminal Blob state must not shorten the independent 24-hour delay"
+    );
+
+    finish(database, pools).await
+}
+
+#[tokio::test]
+async fn reclaimed_blob_claims_fence_stale_completion_and_release() -> anyhow::Result<()> {
+    let (database, pools) = database().await?;
+    let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
+    let first = seed_item(&pools, now - Duration::days(8), 55).await?;
+    let second = seed_item(&pools, now - Duration::days(8), 57).await?;
+    mark_deleted(&pools, &first, now - Duration::days(7)).await?;
+    mark_deleted(&pools, &second, now - Duration::days(7)).await?;
+    let garbage = PgGarbageCollectionRepository::new(pools.worker.clone());
+    assert_eq!(garbage.prepare(now, 10).await?, 2);
+    let claim_at = now + Duration::hours(24);
+    let stale = garbage.claim("worker-a", claim_at, 10).await?;
+    assert_eq!(stale.len(), 2);
+    let reclaimed = garbage
+        .claim("worker-a", claim_at + Duration::minutes(5), 10)
+        .await?;
+    assert_eq!(reclaimed.len(), 2);
+    let stale_first = stale
+        .iter()
+        .find(|claim| claim.blob_id == first.blob)
+        .expect("first stale claim");
+    let stale_second = stale
+        .iter()
+        .find(|claim| claim.blob_id == second.blob)
+        .expect("second stale claim");
+    let fresh_first = reclaimed
+        .iter()
+        .find(|claim| claim.blob_id == first.blob)
+        .expect("first reclaimed claim");
+    let fresh_second = reclaimed
+        .iter()
+        .find(|claim| claim.blob_id == second.blob)
+        .expect("second reclaimed claim");
+
+    assert!(
+        !garbage
+            .release(stale_first, "worker-a", claim_at + Duration::minutes(5))
+            .await?,
+        "an expired claim cannot release its successor's lease"
+    );
+    assert!(
+        !garbage
+            .complete(stale_second, "worker-a", claim_at + Duration::minutes(5))
+            .await?,
+        "an expired claim cannot complete its successor's lease"
+    );
+    assert!(
+        garbage
+            .complete(fresh_first, "worker-a", claim_at + Duration::minutes(5))
+            .await?
+    );
+    assert!(
+        garbage
+            .complete(fresh_second, "worker-a", claim_at + Duration::minutes(5))
+            .await?
+    );
+
+    finish(database, pools).await
+}
+
+#[tokio::test]
 async fn concurrent_reference_creation_locks_or_defeats_the_final_recheck() -> anyhow::Result<()> {
     let (database, pools) = database().await?;
     let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
@@ -289,6 +408,68 @@ async fn concurrent_reference_creation_locks_or_defeats_the_final_recheck() -> a
         state, "ready",
         "the final reference recheck defeats collection"
     );
+
+    finish(database, pools).await
+}
+
+#[tokio::test]
+async fn gc_and_catalog_import_follow_library_then_blob_lock_order() -> anyhow::Result<()> {
+    let (database, pools) = database().await?;
+    let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
+    let seeded = seed_item(&pools, now - Duration::days(8), 53).await?;
+    mark_deleted(&pools, &seeded, now - Duration::days(7)).await?;
+    let upload = seed_import(&pools, &seeded, 53, now).await?;
+    let request = RequestId::new();
+    let mut import_transaction = pools.worker.begin().await?;
+    PgTransactionContext::apply(
+        &mut import_transaction,
+        &DatabaseContext::worker(request, Some(seeded.library)),
+    )
+    .await?;
+    let quota_lock: String = sqlx::query_scalar("SELECT folioharbor.quota_resize($1,$2,$3)")
+        .bind(seeded.library.as_uuid())
+        .bind(upload.as_uuid())
+        .bind(53_i64)
+        .fetch_one(&mut *import_transaction)
+        .await?;
+    assert_eq!(quota_lock, "applied");
+    let mut blob_blocker = pools.owner.begin().await?;
+    sqlx::query("SELECT 1 FROM folioharbor.blobs WHERE blob_id=$1 FOR UPDATE")
+        .bind(seeded.blob.as_uuid())
+        .execute(&mut *blob_blocker)
+        .await?;
+
+    let gc_pool = connect_worker(&SecretString::from(database.worker_url()?)).await?;
+    let garbage = PgGarbageCollectionRepository::new(gc_pool.clone());
+    let gc = tokio::spawn(async move { garbage.prepare(now, 10).await });
+    sleep(TokioDuration::from_millis(100)).await;
+    assert!(!gc.is_finished(), "GC is queued behind the Blob blocker");
+    let library = seeded.library;
+    let actor = seeded.actor;
+    let blob = seeded.blob;
+    let importing = tokio::spawn(async move {
+        let valid: bool =
+            sqlx::query_scalar("SELECT folioharbor.catalog_validate_import($1,$2,$3,$4,$5,$6)")
+                .bind(library.as_uuid())
+                .bind(upload.as_uuid())
+                .bind(actor.as_uuid())
+                .bind(blob.as_uuid())
+                .bind(53_i64)
+                .bind(request.as_ulid().to_string())
+                .fetch_one(&mut *import_transaction)
+                .await?;
+        import_transaction.commit().await?;
+        anyhow::Ok(valid)
+    });
+    sleep(TokioDuration::from_millis(100)).await;
+    assert!(
+        !importing.is_finished(),
+        "the real import path is queued behind a lock held by GC"
+    );
+    blob_blocker.commit().await?;
+    assert!(timeout(TokioDuration::from_secs(3), importing).await???);
+    assert_eq!(timeout(TokioDuration::from_secs(3), gc).await???, 1);
+    gc_pool.close().await;
 
     finish(database, pools).await
 }
@@ -414,6 +595,39 @@ async fn seed_shared_item(
         content_unit: shared.content_unit,
         storage_key: shared.storage_key.clone(),
     })
+}
+
+async fn seed_import(
+    pools: &PgPools,
+    seeded: &SeededItem,
+    bytes: i64,
+    now: OffsetDateTime,
+) -> anyhow::Result<UploadId> {
+    let upload = UploadId::new();
+    sqlx::query("INSERT INTO folioharbor.quota_reservations(upload_id,library_id,reserved_bytes,expires_at,state) VALUES($1,$2,$3,$4,'active')")
+        .bind(upload.as_uuid())
+        .bind(seeded.library.as_uuid())
+        .bind(bytes)
+        .bind(now + Duration::hours(1))
+        .execute(&pools.owner)
+        .await?;
+    sqlx::query("UPDATE folioharbor.libraries SET quota_reserved_bytes=quota_reserved_bytes+$2 WHERE library_id=$1")
+        .bind(seeded.library.as_uuid())
+        .bind(bytes)
+        .execute(&pools.owner)
+        .await?;
+    sqlx::query("INSERT INTO folioharbor.upload_sessions(upload_id,library_id,created_by,file_name,media_type,declared_bytes,received_bytes,state,dedup_scope,storage_key,sha256,expires_at,created_at,updated_at) VALUES($1,$2,$3,'import.epub','application/epub+zip',$4,$4,'importing','instance',$5,$6,$7,$8,$8)")
+        .bind(upload.as_uuid())
+        .bind(seeded.library.as_uuid())
+        .bind(seeded.actor.as_uuid())
+        .bind(bytes)
+        .bind(&seeded.storage_key)
+        .bind(vec![0xab_u8; 32])
+        .bind(now + Duration::hours(1))
+        .bind(now)
+        .execute(&pools.owner)
+        .await?;
+    Ok(upload)
 }
 
 async fn seed_library(

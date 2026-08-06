@@ -1,11 +1,13 @@
 use async_trait::async_trait;
 use folioharbor_domain::{id::BlobId, imports::blob::StorageKey, time::OffsetDateTime};
 use thiserror::Error;
+use uuid::Uuid;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlobPurgeClaim {
     pub blob_id: BlobId,
     pub storage_key: StorageKey,
+    pub lease_token: Uuid,
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]

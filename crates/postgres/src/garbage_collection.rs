@@ -228,8 +228,8 @@ impl GarbageCollectionRepository for PgGarbageCollectionRepository {
         limit: u32,
     ) -> Result<Vec<BlobPurgeClaim>, GarbageCollectionRepositoryError> {
         let mut transaction = self.worker_transaction().await?;
-        let rows: Vec<(Uuid, String)> = sqlx::query_as(
-            "SELECT blob_id,storage_key FROM folioharbor.gc_claim_blobs_worker($1,$2,$3)",
+        let rows: Vec<(Uuid, String, Uuid)> = sqlx::query_as(
+            "SELECT blob_id,storage_key,lease_token FROM folioharbor.gc_claim_blobs_worker($1,$2,$3)",
         )
         .bind(worker)
         .bind(now)
@@ -243,9 +243,10 @@ impl GarbageCollectionRepository for PgGarbageCollectionRepository {
             .map_err(|_| GarbageCollectionRepositoryError)?;
         Ok(rows
             .into_iter()
-            .map(|(blob_id, storage_key)| BlobPurgeClaim {
+            .map(|(blob_id, storage_key, lease_token)| BlobPurgeClaim {
                 blob_id: BlobId::from_uuid(blob_id),
                 storage_key: StorageKey::from_opaque(storage_key),
+                lease_token,
             })
             .collect())
     }
@@ -258,7 +259,7 @@ impl GarbageCollectionRepository for PgGarbageCollectionRepository {
     ) -> Result<bool, GarbageCollectionRepositoryError> {
         mutate_claim(
             &self.pool,
-            "SELECT folioharbor.gc_complete_blob_worker($1,$2,$3,$4)",
+            "SELECT folioharbor.gc_complete_blob_worker($1,$2,$3,$4,$5)",
             claim,
             worker,
             now,
@@ -274,7 +275,7 @@ impl GarbageCollectionRepository for PgGarbageCollectionRepository {
     ) -> Result<bool, GarbageCollectionRepositoryError> {
         mutate_claim(
             &self.pool,
-            "SELECT folioharbor.gc_release_blob_worker($1,$2,$3,$4)",
+            "SELECT folioharbor.gc_release_blob_worker($1,$2,$3,$4,$5)",
             claim,
             worker,
             now,
@@ -304,6 +305,7 @@ async fn mutate_claim(
         .bind(claim.blob_id.as_uuid())
         .bind(claim.storage_key.as_str())
         .bind(worker)
+        .bind(claim.lease_token)
         .bind(now)
         .fetch_one(&mut *transaction)
         .await

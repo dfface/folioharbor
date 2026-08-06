@@ -69,32 +69,37 @@ ALTER TABLE folioharbor.blob_locations
     ADD COLUMN purge_lease_owner text CHECK (
       purge_lease_owner IS NULL OR length(purge_lease_owner) BETWEEN 1 AND 128
     ),
+    ADD COLUMN purge_lease_token uuid,
     ADD COLUMN purge_lease_expires_at timestamptz,
     ADD CONSTRAINT blob_locations_state_check CHECK (
       state IN ('staging','ready','quarantined','purge_pending','deleting','purged')
     );
 
 UPDATE folioharbor.blob_locations
-SET purge_pending_at=updated_at,purge_after=updated_at,purged_at=updated_at
+SET purge_pending_at=updated_at-interval '24 hours',purge_after=updated_at,purged_at=updated_at
 WHERE state='purged';
 
 ALTER TABLE folioharbor.blob_locations
     ADD CONSTRAINT blob_locations_lifecycle_timestamps CHECK (
       (state IN ('staging','ready','quarantined') AND purge_pending_at IS NULL
         AND purge_after IS NULL AND purged_at IS NULL
-        AND purge_lease_owner IS NULL AND purge_lease_expires_at IS NULL)
+        AND purge_lease_owner IS NULL AND purge_lease_token IS NULL
+        AND purge_lease_expires_at IS NULL)
       OR
       (state='purge_pending' AND purge_pending_at IS NOT NULL
         AND purge_after=purge_pending_at+interval '24 hours' AND purged_at IS NULL
-        AND purge_lease_owner IS NULL AND purge_lease_expires_at IS NULL)
+        AND purge_lease_owner IS NULL AND purge_lease_token IS NULL
+        AND purge_lease_expires_at IS NULL)
       OR
       (state='deleting' AND purge_pending_at IS NOT NULL
         AND purge_after=purge_pending_at+interval '24 hours' AND purged_at IS NULL
-        AND purge_lease_owner IS NOT NULL AND purge_lease_expires_at IS NOT NULL)
+        AND purge_lease_owner IS NOT NULL AND purge_lease_token IS NOT NULL
+        AND purge_lease_expires_at IS NOT NULL)
       OR
-      (state='purged' AND purge_pending_at IS NOT NULL AND purge_after IS NOT NULL
-        AND purged_at>=purge_after
-        AND purge_lease_owner IS NULL AND purge_lease_expires_at IS NULL)
+      (state='purged' AND purge_pending_at IS NOT NULL
+        AND purge_after=purge_pending_at+interval '24 hours' AND purged_at>=purge_after
+        AND purge_lease_owner IS NULL AND purge_lease_token IS NULL
+        AND purge_lease_expires_at IS NULL)
     );
 
 CREATE INDEX blob_locations_purge_batch_idx
@@ -105,10 +110,13 @@ CREATE FUNCTION folioharbor.blob_location_fill_legacy_purge_timestamps()
 RETURNS trigger LANGUAGE plpgsql SET search_path TO '' AS $$
 BEGIN
   IF NEW.state='purged' AND NEW.purged_at IS NULL THEN
-    NEW.purge_pending_at:=COALESCE(NEW.purge_pending_at,NEW.updated_at);
     NEW.purge_after:=COALESCE(NEW.purge_after,NEW.updated_at);
+    NEW.purge_pending_at:=COALESCE(
+      NEW.purge_pending_at,NEW.purge_after-interval '24 hours'
+    );
     NEW.purged_at:=NEW.updated_at;
     NEW.purge_lease_owner:=NULL;
+    NEW.purge_lease_token:=NULL;
     NEW.purge_lease_expires_at:=NULL;
   END IF;
   RETURN NEW;
@@ -160,10 +168,6 @@ BEGIN
       UPDATE folioharbor.items SET state='deleted',deleted_at=p_now,
         purge_eligible_at=p_now+interval '7 days',purged_at=NULL
       WHERE item_id=p_item RETURNING * INTO current_item;
-    ELSIF current_item.state<>'deleted' THEN
-      RETURN QUERY SELECT 'window_elapsed'::text,current_item.state,current_item.deleted_at,
-        current_item.purge_eligible_at,current_item.purged_at;
-      RETURN;
     END IF;
     expected_action:='item.delete';
   ELSE
@@ -283,9 +287,9 @@ BEGIN
       UNION SELECT resource.source_blob_id FROM folioharbor.publication_resources resource WHERE resource.package_id=candidate.package_id
       UNION SELECT asset.blob_id FROM folioharbor.manifestation_assets asset WHERE asset.manifestation_id=candidate.manifestation_id
     ) reference;
+    PERFORM 1 FROM folioharbor.libraries WHERE library_id=candidate.library_id FOR UPDATE;
     PERFORM blob.blob_id FROM folioharbor.blobs blob
       WHERE blob.blob_id=ANY(candidate_blobs) ORDER BY blob.blob_id FOR UPDATE;
-    PERFORM 1 FROM folioharbor.libraries WHERE library_id=candidate.library_id FOR UPDATE;
     SELECT COALESCE(sum(blob.byte_size),0) INTO logical_bytes
       FROM folioharbor.item_assets asset JOIN folioharbor.blobs blob USING(blob_id)
       WHERE asset.item_id=candidate.item_id;
@@ -310,7 +314,7 @@ BEGIN
       IF NOT folioharbor.blob_has_authoritative_reference(candidate_blob) THEN
         UPDATE folioharbor.blob_locations SET state='purge_pending',
           purge_pending_at=p_now,purge_after=p_now+interval '24 hours',purged_at=NULL,
-          purge_lease_owner=NULL,purge_lease_expires_at=NULL,updated_at=p_now
+          purge_lease_owner=NULL,purge_lease_token=NULL,purge_lease_expires_at=NULL,updated_at=p_now
         WHERE blob_id=candidate_blob AND state='ready';
       END IF;
     END LOOP;
@@ -324,7 +328,7 @@ GRANT EXECUTE ON FUNCTION folioharbor.gc_prepare_items_worker(timestamptz,bigint
 
 CREATE FUNCTION folioharbor.gc_claim_blobs_worker(
   p_worker text,p_now timestamptz,p_limit bigint
-) RETURNS TABLE(blob_id uuid,storage_key text) LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+) RETURNS TABLE(blob_id uuid,storage_key text,lease_token uuid) LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 DECLARE candidate record;
 BEGIN
   IF session_user<>'folioharbor_worker' OR NOT folioharbor.is_worker()
@@ -340,12 +344,15 @@ BEGIN
     PERFORM 1 FROM folioharbor.blobs blob WHERE blob.blob_id=candidate.blob_id FOR UPDATE;
     IF folioharbor.blob_has_authoritative_reference(candidate.blob_id) THEN
       UPDATE folioharbor.blob_locations location SET state='ready',purge_pending_at=NULL,
-        purge_after=NULL,purged_at=NULL,purge_lease_owner=NULL,purge_lease_expires_at=NULL,
+        purge_after=NULL,purged_at=NULL,purge_lease_owner=NULL,purge_lease_token=NULL,
+        purge_lease_expires_at=NULL,
         updated_at=p_now WHERE location.blob_id=candidate.blob_id;
     ELSE
       UPDATE folioharbor.blob_locations location SET state='deleting',purge_lease_owner=p_worker,
-        purge_lease_expires_at=p_now+interval '5 minutes',updated_at=p_now
-      WHERE location.blob_id=candidate.blob_id AND location.storage_key=candidate.storage_key;
+        purge_lease_token=gen_random_uuid(),purge_lease_expires_at=p_now+interval '5 minutes',
+        updated_at=p_now
+      WHERE location.blob_id=candidate.blob_id AND location.storage_key=candidate.storage_key
+      RETURNING location.purge_lease_token INTO lease_token;
       blob_id:=candidate.blob_id; storage_key:=candidate.storage_key; RETURN NEXT;
     END IF;
   END LOOP;
@@ -355,34 +362,34 @@ REVOKE ALL ON FUNCTION folioharbor.gc_claim_blobs_worker(text,timestamptz,bigint
 GRANT EXECUTE ON FUNCTION folioharbor.gc_claim_blobs_worker(text,timestamptz,bigint) TO folioharbor_worker;
 
 CREATE FUNCTION folioharbor.gc_complete_blob_worker(
-  p_blob uuid,p_storage text,p_worker text,p_now timestamptz
+  p_blob uuid,p_storage text,p_worker text,p_token uuid,p_now timestamptz
 ) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 BEGIN
   IF session_user<>'folioharbor_worker' OR NOT folioharbor.is_worker() THEN RETURN false; END IF;
   UPDATE folioharbor.blob_locations SET state='purged',purged_at=p_now,
-    purge_lease_owner=NULL,purge_lease_expires_at=NULL,updated_at=p_now
+    purge_lease_owner=NULL,purge_lease_token=NULL,purge_lease_expires_at=NULL,updated_at=p_now
   WHERE blob_id=p_blob AND storage_key=p_storage AND state='deleting'
-    AND purge_lease_owner=p_worker;
+    AND purge_lease_owner=p_worker AND purge_lease_token=p_token;
   RETURN FOUND;
 END $$;
-ALTER FUNCTION folioharbor.gc_complete_blob_worker(uuid,text,text,timestamptz) OWNER TO folioharbor_owner;
-REVOKE ALL ON FUNCTION folioharbor.gc_complete_blob_worker(uuid,text,text,timestamptz) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION folioharbor.gc_complete_blob_worker(uuid,text,text,timestamptz) TO folioharbor_worker;
+ALTER FUNCTION folioharbor.gc_complete_blob_worker(uuid,text,text,uuid,timestamptz) OWNER TO folioharbor_owner;
+REVOKE ALL ON FUNCTION folioharbor.gc_complete_blob_worker(uuid,text,text,uuid,timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION folioharbor.gc_complete_blob_worker(uuid,text,text,uuid,timestamptz) TO folioharbor_worker;
 
 CREATE FUNCTION folioharbor.gc_release_blob_worker(
-  p_blob uuid,p_storage text,p_worker text,p_now timestamptz
+  p_blob uuid,p_storage text,p_worker text,p_token uuid,p_now timestamptz
 ) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 BEGIN
   IF session_user<>'folioharbor_worker' OR NOT folioharbor.is_worker() THEN RETURN false; END IF;
   UPDATE folioharbor.blob_locations SET state='purge_pending',purge_lease_owner=NULL,
-    purge_lease_expires_at=NULL,updated_at=p_now
+    purge_lease_token=NULL,purge_lease_expires_at=NULL,updated_at=p_now
   WHERE blob_id=p_blob AND storage_key=p_storage AND state='deleting'
-    AND purge_lease_owner=p_worker;
+    AND purge_lease_owner=p_worker AND purge_lease_token=p_token;
   RETURN FOUND;
 END $$;
-ALTER FUNCTION folioharbor.gc_release_blob_worker(uuid,text,text,timestamptz) OWNER TO folioharbor_owner;
-REVOKE ALL ON FUNCTION folioharbor.gc_release_blob_worker(uuid,text,text,timestamptz) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION folioharbor.gc_release_blob_worker(uuid,text,text,timestamptz) TO folioharbor_worker;
+ALTER FUNCTION folioharbor.gc_release_blob_worker(uuid,text,text,uuid,timestamptz) OWNER TO folioharbor_owner;
+REVOKE ALL ON FUNCTION folioharbor.gc_release_blob_worker(uuid,text,text,uuid,timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION folioharbor.gc_release_blob_worker(uuid,text,text,uuid,timestamptz) TO folioharbor_worker;
 
 UPDATE folioharbor.schema_metadata SET schema_version=25,applied_at=clock_timestamp()
 WHERE singleton;

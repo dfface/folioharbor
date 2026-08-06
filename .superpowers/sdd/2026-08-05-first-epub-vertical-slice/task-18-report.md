@@ -41,3 +41,19 @@ The parent authorized the smallest behavior-preserving repairs needed for the re
 
 - The repository license allowlist needs a separate policy decision for the two transitive `lettre` licenses above before `cargo deny check` can be green.
 - No push was performed.
+
+## Independent-review fixes
+
+All P1/P2 findings in `task-18-review.md` were addressed with focused RED/GREEN regressions:
+
+- Post-purge DELETE: a real authorized PostgreSQL delete after GC initially returned an application error; it now returns the existing `Purged` lifecycle and records another allowed delete audit. OpenAPI no longer advertises a recovery-window conflict for DELETE, while restore retains 409.
+- Lock order: a deterministic real-PostgreSQL race first reproduced `deadlock detected` by queuing GC and `catalog_validate_import` behind a Blob blocker while import held Library. GC now locks Library before Blob, matching import/quota order; the same test completes both transactions.
+- Terminal delay: a direct invalid `purged` row with a zero-hour pending interval was initially accepted. The terminal constraint now requires `purge_after = purge_pending_at + 24 hours`; legacy purged rows and legacy transitions are explicitly represented by backdating `purge_pending_at` 24 hours.
+- Lease fencing: after same-owner expiry/reclaim, stale release initially changed the successor lease. Every claim now receives a fresh UUID fencing token returned through `BlobPurgeClaim`; completion and release match owner plus token, so stale completion/release return false and fresh claims complete.
+
+Review-fix verification:
+
+- `FOLIOHARBOR_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55432/postgres cargo test -p folioharbor-application --test item_lifecycle -p folioharbor-postgres --test blob_gc --test migration_from_zero -p folioharbor-http --test catalog_routes`: pass (3 + 8 + 2 + 4 tests).
+- `cargo fmt --all --check`: pass.
+- `git diff --check`: pass.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass.

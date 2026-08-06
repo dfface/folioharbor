@@ -486,6 +486,10 @@ fn openapi_documents_opaque_pagination_capabilities_etag_and_problems() {
         delete["responses"]["204"]["description"],
         "Item is deleted or was already deleted"
     );
+    assert!(
+        delete["responses"]["409"].is_null(),
+        "DELETE remains idempotent after the recovery window and purge"
+    );
     assert!(restore["responses"]["409"].is_mapping());
 }
 

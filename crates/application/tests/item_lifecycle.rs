@@ -23,6 +23,7 @@ use folioharbor_domain::{
     time::OffsetDateTime,
 };
 use time::Duration;
+use uuid::Uuid;
 
 #[test]
 fn recovery_window_and_blob_delay_have_exact_boundaries() {
@@ -291,6 +292,7 @@ async fn storage_failure_releases_the_durable_claim_for_retry() {
         claim: BlobPurgeClaim {
             blob_id: BlobId::new(),
             storage_key: StorageKey::from_opaque("blob:retryable".to_owned()),
+            lease_token: Uuid::now_v7(),
         },
         available: Mutex::new(true),
         completed: Mutex::new(0),
