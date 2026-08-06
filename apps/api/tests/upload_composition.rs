@@ -1,13 +1,13 @@
 #![allow(clippy::expect_used)]
 
 use bytes::Bytes;
-use folioharbor_api::{build_catalog_api, build_upload_api};
+use folioharbor_api::{build_catalog_api, build_reader_api, build_upload_api};
 use folioharbor_application::{
     catalog::PageRequest,
     config::{ConfigSources, Settings},
     imports::{CreateUploadRequest, ReceiveUploadRequest},
 };
-use folioharbor_domain::id::{LibraryId, RequestId, UserId};
+use folioharbor_domain::id::{ItemId, LibraryId, RequestId, UserId};
 use folioharbor_domain::time::OffsetDateTime;
 use folioharbor_postgres::{PgPools, run_migrations};
 use folioharbor_test_support::postgres::TestPostgres;
@@ -88,6 +88,15 @@ async fn production_upload_composition_uses_postgres_and_local_blob_storage() ->
         .list_library_books(actor, library, RequestId::new(), PageRequest::default())
         .await?;
     assert!(page.items.is_empty());
+    let reader = build_reader_api(&settings, pools.api.clone());
+    assert!(matches!(
+        reader
+            .get_manifest(actor, ItemId::new(), RequestId::new())
+            .await,
+        Err(folioharbor_application::error::AppError::NotFound {
+            code: "item_not_found"
+        })
+    ));
     pools.close().await;
     database.cleanup().await?;
     Ok(())

@@ -18,7 +18,7 @@ use crate::{DatabaseContext, PgTransactionContext};
 
 #[derive(Clone, Debug)]
 pub struct PgCatalogRepository {
-    pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 struct CatalogProjectionRow {

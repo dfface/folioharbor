@@ -808,12 +808,18 @@ git commit -m "feat: expose authorized library catalog queries"
 
 **Files:**
 
+- Create: `.sqlx/query-f5227dcc927da07bef1f71f2e39ef09ef6e75b3001dcbd1d8113109a12620afc.json`
+- Create: `migrations/0012_reader_projection.sql`
 - Create: `crates/application/src/reader/{mod,get_manifest,get_resource}.rs`
 - Create: `crates/application/src/ports/publication_resource_reader.rs`
 - Create: `crates/http/src/routes/reader.rs`
 - Create: `crates/http/tests/reader_routes.rs`
+- Create: `crates/postgres/src/reader_projection.rs`
 - Modify: `crates/postgres/src/catalog.rs`
 - Modify: `crates/epub/src/lib.rs`
+- Modify: `crates/{epub,http}/Cargo.toml`
+- Modify: `apps/api/{Cargo.toml,src/lib.rs,src/main.rs,tests/upload_composition.rs}`
+- Modify: `Cargo.lock`
 - Modify: `openapi/folioharbor-v1.yaml`
 
 **Interfaces:**
@@ -851,7 +857,7 @@ git commit -m "feat: serve authorized EPUB reading resources"
 
 **Files:**
 
-- Create: `migrations/0012_reading_state.sql`
+- Create: `migrations/0013_reading_state.sql`
 - Create: `crates/domain/src/reader/{mod,locator,reading_state}.rs`
 - Create: `crates/application/src/reader/{get_progress,update_progress}.rs`
 - Create: `crates/application/src/ports/reading_repository.rs`
@@ -889,7 +895,7 @@ Return an ETag derived from state version; accept `If-Match` and require the JSO
 Run concurrent updates from two devices, offline retry order permutations, RLS privacy tests, HTTP ETag tests, and workspace gate. Commit:
 
 ```bash
-git add migrations/0012_reading_state.sql crates/domain crates/application crates/postgres crates/http openapi
+git add migrations/0013_reading_state.sql crates/domain crates/application crates/postgres crates/http openapi
 git commit -m "feat: synchronize versioned reading progress"
 ```
 
@@ -938,7 +944,7 @@ git commit -m "feat: stream authorized original EPUB downloads"
 
 **Files:**
 
-- Create: `migrations/0013_outbox.sql`
+- Create: `migrations/0014_outbox.sql`
 - Create: `crates/application/src/mail/{mod,enqueue,deliver}.rs`
 - Create: `crates/application/src/ports/mail_repository.rs`
 - Create: `crates/postgres/src/mail.rs`
@@ -974,7 +980,7 @@ Render one public, locale-negotiated explanation per stable problem code without
 Run against a local SMTP capture service in integration tests, inspect captured text/HTML, force retry/failure, scan logs for test token values, then run workspace gate. Commit:
 
 ```bash
-git add migrations/0013_outbox.sql crates/application crates/postgres crates/http apps/worker deploy
+git add migrations/0014_outbox.sql crates/application crates/postgres crates/http apps/worker deploy
 git commit -m "feat: deliver transactional account and invitation email"
 ```
 
@@ -982,7 +988,7 @@ git commit -m "feat: deliver transactional account and invitation email"
 
 **Files:**
 
-- Create: `migrations/0014_deletion_and_gc.sql`
+- Create: `migrations/0015_deletion_and_gc.sql`
 - Create: `crates/domain/src/catalog/lifecycle.rs`
 - Create: `crates/application/src/catalog/{delete_item,restore_item,garbage_collect}.rs`
 - Create: `crates/application/tests/item_lifecycle.rs`
@@ -1018,7 +1024,7 @@ Select a limited `SKIP LOCKED` batch, recheck authoritative references in the tr
 Run shared-Blob deletion, concurrent import-versus-GC, storage failure/retry, progress preservation, quota release, and audit retention tests. Run workspace gate. Commit:
 
 ```bash
-git add migrations/0014_deletion_and_gc.sql crates/domain crates/application crates/postgres crates/http apps/worker openapi
+git add migrations/0015_deletion_and_gc.sql crates/domain crates/application crates/postgres crates/http apps/worker openapi
 git commit -m "feat: add recoverable item deletion and safe blob GC"
 ```
 
@@ -1172,7 +1178,7 @@ git commit -m "feat: add secure EPUB reader and progress sync"
 
 **Files:**
 
-- Create: `migrations/0015_operations.sql`
+- Create: `migrations/0016_operations.sql`
 - Create: `crates/application/src/operations/{mod,health,bootstrap_admin,consistency_check}.rs`
 - Create: `crates/postgres/src/operations.rs`
 - Create: `crates/http/src/routes/health.rs`
@@ -1214,7 +1220,7 @@ Migration completes before API/Worker; runtime processes use distinct role secre
 Document PostgreSQL plus Blob volume as one business backup set, schema version and Blob watermark recording, restore ordering, and post-restore `storage check` for missing Blob, orphan location, and hash mismatch. Do not claim crash-consistent cross-volume snapshots unless the operator provides them. Run CLI/health/Compose config tests and workspace/Web gates. Commit:
 
 ```bash
-git add migrations/0015_operations.sql crates apps deploy docs/operations
+git add migrations/0016_operations.sql crates apps deploy docs/operations
 git commit -m "feat: add deployment operations and observability"
 ```
 

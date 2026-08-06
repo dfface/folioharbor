@@ -256,6 +256,60 @@ paths:
         '404': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
         '503': {$ref: '#/components/responses/Problem'}
+  /api/v1/items/{item_id}/manifest:
+    get:
+      operationId: getPublicationManifest
+      description: Returns a Readium-style online-reading projection after a fresh item.read authorization check. Opaque resource links never expose archive paths.
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/ItemId'}
+        - {name: If-None-Match, in: header, schema: {type: string}}
+      responses:
+        '200':
+          description: Authorized publication manifest
+          headers:
+            ETag: {schema: {type: string}, description: Strong package and parser-version validator}
+            Cache-Control: {schema: {type: string}, example: 'private, no-cache'}
+          content: {application/json: {schema: {$ref: '#/components/schemas/PublicationManifest'}}}
+        '304': {description: Package validator matched}
+        '400': {$ref: '#/components/responses/InvalidIdentifierProblem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '503': {$ref: '#/components/responses/Problem'}
+  /api/v1/items/{item_id}/resources/{resource_id}:
+    get:
+      operationId: getPublicationResource
+      description: Reauthorizes item.read on every request, including transformed-cache hits, then returns one sanitized allowed EPUB resource.
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/ItemId'}
+        - {name: resource_id, in: path, required: true, schema: {type: string, pattern: '^[A-Za-z0-9_-]+$', maxLength: 128}, description: Opaque package-scoped resource identifier}
+        - {name: If-None-Match, in: header, schema: {type: string}}
+      responses:
+        '200':
+          description: Sanitized document, stylesheet, image, or font with restrictive browser-isolation headers
+          headers:
+            ETag: {schema: {type: string}, description: Strong package, resource, and sanitizer-version validator}
+            Content-Security-Policy: {schema: {type: string}, example: "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data: blob:"}
+            X-Content-Type-Options: {schema: {type: string}, example: nosniff}
+            Referrer-Policy: {schema: {type: string}, example: no-referrer}
+            Cache-Control: {schema: {type: string}, example: 'private, no-cache'}
+          content:
+            application/xhtml+xml: {schema: {type: string}}
+            text/html: {schema: {type: string}}
+            text/css: {schema: {type: string}}
+            image/png: {schema: {type: string, format: binary}}
+            image/jpeg: {schema: {type: string, format: binary}}
+            image/gif: {schema: {type: string, format: binary}}
+            image/webp: {schema: {type: string, format: binary}}
+            font/woff: {schema: {type: string, format: binary}}
+            font/woff2: {schema: {type: string, format: binary}}
+        '304': {description: Resource validator matched after fresh authorization}
+        '400': {$ref: '#/components/responses/InvalidIdentifierProblem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+        '503': {$ref: '#/components/responses/Problem'}
 components:
   securitySchemes:
     cookieAuth: {type: apiKey, in: cookie, name: folioharbor_session}
@@ -478,6 +532,33 @@ components:
         media_type: {type: string, enum: [application/epub+zip, application/octet-stream]}
         can_read: {type: boolean, description: Effective online-reading capability}
         can_download: {type: boolean, description: Effective original-file download capability; independent from can_read}
+    PublicationManifest:
+      type: object
+      additionalProperties: false
+      required: [metadata, manifestationId, readingOrder, resources, toc, links]
+      properties:
+        metadata:
+          type: object
+          additionalProperties: false
+          required: [title, authors, languages]
+          properties:
+            title: {type: string}
+            authors: {type: array, items: {type: string}}
+            languages: {type: array, items: {type: string}}
+        manifestationId: {type: string, format: uuid, description: Exact Manifestation identifier used by reading-state synchronization}
+        readingOrder: {type: array, items: {$ref: '#/components/schemas/PublicationLink'}}
+        resources: {type: array, items: {$ref: '#/components/schemas/PublicationLink'}}
+        toc: {type: array, items: {$ref: '#/components/schemas/PublicationLink'}}
+        links: {type: array, items: {$ref: '#/components/schemas/PublicationLink'}}
+    PublicationLink:
+      type: object
+      additionalProperties: false
+      required: [href, type]
+      properties:
+        href: {type: string, description: Same-origin API link containing only an opaque resource identifier}
+        type: {type: string}
+        rel: {type: string}
+        title: {type: string}
     ProblemDetails:
       type: object
       required: [type, title, status, detail, instance, code, request_id]

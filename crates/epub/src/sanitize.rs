@@ -86,6 +86,27 @@ impl ContentSanitizer {
         Self::transform_with_budget(html, resolver, limits, WallClockBudget { started, limits })
     }
 
+    /// Sanitizes an untrusted standalone stylesheet with the same URL policy as documents.
+    #[must_use]
+    pub fn transform_stylesheet(
+        css: &str,
+        resolver: &impl ResourceResolver,
+        limits: SanitizerLimits,
+    ) -> SanitizedContent {
+        let started = Instant::now();
+        let mut budget = WallClockBudget { started, limits };
+        match sanitize_stylesheet(css, resolver, limits, &mut budget).and_then(|content| {
+            budget.check(BudgetPoint::Final)?;
+            Ok(content)
+        }) {
+            Ok(html) => SanitizedContent {
+                html,
+                warnings: Vec::new(),
+            },
+            Err(reason) => failed(reason),
+        }
+    }
+
     fn transform_with_budget(
         html: &str,
         resolver: &impl ResourceResolver,

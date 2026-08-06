@@ -3,6 +3,7 @@ mod container;
 mod error;
 mod navigation;
 mod package;
+mod resource_reader;
 mod sanitize;
 
 use std::{
@@ -25,6 +26,7 @@ use folioharbor_domain::{
 
 pub use error::{EpubError, EpubErrorCode};
 pub use package::{Metadata, ParsedPublication, PublicationResource, SpineItem, TocEntry};
+pub use resource_reader::{EpubResourceReader, ResourceCacheLimits};
 pub use sanitize::{ContentSanitizer, ResourceResolver, SanitizedContent, SanitizerLimits};
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]

@@ -5,8 +5,10 @@ use folioharbor_application::{
     config::Settings,
     imports::{UploadApi, UploadService},
     ports::Clock,
+    reader::{ReaderApi, ReaderService},
 };
 use folioharbor_domain::imports::blob::DedupScope as DomainDedupScope;
+use folioharbor_epub::{EpubResourceReader, ResourceCacheLimits};
 use folioharbor_postgres::{PgAuthorizationRepository, PgCatalogRepository, PgUploadRepository};
 use folioharbor_storage_local::LocalBlobStore;
 use sqlx::PgPool;
@@ -41,5 +43,14 @@ pub fn build_catalog_api(settings: &Settings, pool: PgPool) -> Arc<dyn CatalogAp
         PgCatalogRepository::new(pool.clone()),
         PgAuthorizationRepository::new(pool),
         settings.auth.reader_download_enabled,
+    ))
+}
+
+#[must_use]
+pub fn build_reader_api(settings: &Settings, pool: PgPool) -> Arc<dyn ReaderApi> {
+    let blobs = Arc::new(LocalBlobStore::new(settings.storage.root.clone()));
+    Arc::new(ReaderService::new(
+        PgCatalogRepository::new(pool),
+        EpubResourceReader::new(blobs, ResourceCacheLimits::default()),
     ))
 }

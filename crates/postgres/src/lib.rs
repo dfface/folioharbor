@@ -11,6 +11,7 @@ pub mod libraries;
 mod migrate;
 mod pool;
 mod rate_limits;
+mod reader_projection;
 mod storage;
 mod uploads;
 

@@ -470,6 +470,7 @@ dependencies = [
  "bytes",
  "folioharbor-application",
  "folioharbor-domain",
+ "folioharbor-epub",
  "folioharbor-http",
  "folioharbor-postgres",
  "folioharbor-storage-local",
@@ -549,6 +550,8 @@ dependencies = [
  "quick-xml",
  "sha2",
  "thiserror",
+ "tokio",
+ "uuid",
  "zip",
 ]
 
@@ -561,6 +564,7 @@ dependencies = [
  "axum",
  "folioharbor-application",
  "folioharbor-domain",
+ "folioharbor-epub",
  "folioharbor-postgres",
  "folioharbor-test-support",
  "futures-util",
@@ -577,6 +581,7 @@ dependencies = [
  "tower",
  "url",
  "uuid",
+ "zip",
 ]
 
 [[package]]

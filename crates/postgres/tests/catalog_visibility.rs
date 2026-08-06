@@ -56,6 +56,29 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
     .await?;
     assert!(api_can_execute);
     assert!(!worker_can_execute);
+    let (reader_security_definer, reader_settings): (bool, Option<Vec<String>>) =
+        sqlx::query_as(
+            "SELECT prosecdef,proconfig FROM pg_proc JOIN pg_namespace ON pg_namespace.oid=pronamespace WHERE nspname='folioharbor' AND proname='reader_publication_visible'",
+        )
+        .fetch_one(&pools.owner)
+        .await?;
+    assert!(reader_security_definer);
+    assert!(
+        reader_settings
+            .is_some_and(|values| values.iter().any(|value| value == "search_path=\"\""))
+    );
+    let api_can_read: bool = sqlx::query_scalar(
+        "SELECT has_function_privilege('folioharbor_api','folioharbor.reader_publication_visible(uuid,uuid)','EXECUTE')",
+    )
+    .fetch_one(&pools.owner)
+    .await?;
+    let worker_can_read: bool = sqlx::query_scalar(
+        "SELECT has_function_privilege('folioharbor_worker','folioharbor.reader_publication_visible(uuid,uuid)','EXECUTE')",
+    )
+    .fetch_one(&pools.owner)
+    .await?;
+    assert!(api_can_read);
+    assert!(!worker_can_read);
     let now = OffsetDateTime::now_utc();
     let allowed = UserId::new();
     let outsider = UserId::new();
@@ -170,6 +193,27 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
     assert_eq!(visible.languages, ["fr"]);
     assert_eq!(visible.identifiers, ["isbn:978-test"]);
     assert_eq!(visible.media_type, "application/octet-stream");
+    let readable = catalog
+        .find_readable_publication(allowed, item, RequestId::new())
+        .await?
+        .expect("active member can read the package projection");
+    assert_eq!(readable.manifestation_id, manifestation);
+    assert_eq!(readable.package_id, intended_package);
+    assert_eq!(readable.resources[0].normalized_href, "OPS/chapter.xhtml");
+    assert_eq!(
+        readable.reading_order[0].normalized_href,
+        "OPS/chapter.xhtml"
+    );
+    assert_eq!(readable.toc[0].label, "Chapter");
+    assert!(!readable.storage_key.as_str().is_empty());
+    sqlx::query("UPDATE folioharbor.library_memberships SET status='removed',removed_at=$3,version=version+1 WHERE library_id=$1 AND user_id=$2")
+        .bind(library.as_uuid()).bind(allowed.as_uuid()).bind(now).execute(&pools.owner).await?;
+    assert!(
+        catalog
+            .find_readable_publication(allowed, item, RequestId::new())
+            .await?
+            .is_none()
+    );
     pools.close().await;
     database.cleanup().await?;
     Ok(())
@@ -206,17 +250,28 @@ async fn seed_item(
     sqlx::query("INSERT INTO folioharbor.manifestations(manifestation_id,identifiers,created_at) VALUES($1,ARRAY['isbn:978-test']::text[],$2)").bind(manifestation.as_uuid()).bind(now).execute(pool).await?;
     sqlx::query("INSERT INTO folioharbor.manifestation_expressions(manifestation_id,expression_id,expression_order) VALUES($1,$2,0)").bind(manifestation.as_uuid()).bind(expression.as_uuid()).execute(pool).await?;
     sqlx::query("INSERT INTO folioharbor.blobs(blob_id,storage_namespace,sha256,byte_size,created_at) VALUES($1,'instance-v1',$2,1,$3)").bind(blob.as_uuid()).bind(vec![7_u8; 32]).bind(now).execute(pool).await?;
+    sqlx::query("INSERT INTO folioharbor.blob_locations(blob_id,storage_key,state,created_at,updated_at) VALUES($1,$2,'ready',$3,$3)")
+        .bind(blob.as_uuid()).bind(format!("blob:instance-v1:{}:1", "07".repeat(32))).bind(now).execute(pool).await?;
     sqlx::query("INSERT INTO folioharbor.upload_sessions(upload_id,library_id,created_by,file_name,media_type,declared_bytes,dedup_scope,received_bytes,state,storage_key,sha256,expires_at,created_at,updated_at) VALUES($1,$2,$3,'visible.epub','application/octet-stream',1,'instance',1,'ready',$4,$5,$6,$6,$6)")
         .bind(upload.as_uuid()).bind(library.as_uuid()).bind(actor.as_uuid())
         .bind(format!("blob:instance-v1:{}:1", "07".repeat(32))).bind(vec![7_u8; 32]).bind(now).execute(pool).await?;
     sqlx::query("INSERT INTO folioharbor.publication_packages(package_id,manifestation_id,blob_id,parser_profile_version,created_at) VALUES($1,$2,$3,'epub-v1',$4)").bind(package.as_uuid()).bind(manifestation.as_uuid()).bind(blob.as_uuid()).bind(now).execute(pool).await?;
+    sqlx::query("INSERT INTO folioharbor.publication_resources(package_id,resource_order,normalized_href,media_type,source_blob_id) VALUES($1,0,'OPS/chapter.xhtml','application/xhtml+xml',$2)")
+        .bind(package.as_uuid()).bind(blob.as_uuid()).execute(pool).await?;
+    let unit = folioharbor_domain::id::ContentUnitId::new();
+    sqlx::query("INSERT INTO folioharbor.content_units(content_unit_id,package_id,locator_href,created_at) VALUES($1,$2,'OPS/chapter.xhtml',$3)")
+        .bind(unit.as_uuid()).bind(package.as_uuid()).bind(now).execute(pool).await?;
+    sqlx::query("INSERT INTO folioharbor.manifestation_units(manifestation_id,package_id,content_unit_id,spine_order,linear) VALUES($1,$2,$3,0,true)")
+        .bind(manifestation.as_uuid()).bind(package.as_uuid()).bind(unit.as_uuid()).execute(pool).await?;
+    sqlx::query("INSERT INTO folioharbor.package_toc_entries(package_id,toc_order,label,locator_href) VALUES($1,0,'Chapter','OPS/chapter.xhtml#start')")
+        .bind(package.as_uuid()).execute(pool).await?;
     sqlx::query("INSERT INTO folioharbor.holdings(holding_id,library_id,manifestation_id,state,created_at) VALUES($1,$2,$3,'active',$4)").bind(holding.as_uuid()).bind(library.as_uuid()).bind(manifestation.as_uuid()).bind(now).execute(pool).await?;
     sqlx::query("INSERT INTO folioharbor.items(item_id,holding_id,manifestation_id,package_id,source_upload_id,state,created_at) VALUES($1,$2,$3,$4,$5,'active',$6)").bind(item.as_uuid()).bind(holding.as_uuid()).bind(manifestation.as_uuid()).bind(package.as_uuid()).bind(upload.as_uuid()).bind(now).execute(pool).await?;
     Ok((item, package, manifestation, blob))
 }
 use folioharbor_application::{
     authorization::{Action, Authorization, ResourceRef},
-    ports::CatalogQueryRepository,
+    ports::{CatalogQueryRepository, ReaderCatalogRepository},
 };
 
 #[tokio::test]
