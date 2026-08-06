@@ -698,6 +698,11 @@ git commit -m "feat: persist WEMI catalog and logical library items"
 - Create: `apps/worker/src/{main,runner,handlers}.rs`
 - Create: `apps/worker/tests/import_recovery.rs`
 - Create: `crates/postgres/src/imports.rs`
+- Modify: `crates/domain/src/imports/job.rs`
+- Modify: `crates/application/src/ports/job_repository.rs`
+- Modify: `crates/application/src/imports/job_queue.rs`
+- Modify: `crates/postgres/src/jobs.rs`
+- Modify: `crates/postgres/tests/{job_leasing,import_cleanup}.rs`
 - Modify: `crates/epub/src/lib.rs`
 - Modify: `crates/storage-local/src/lib.rs`
 - Modify: `migrations/0009_uploads_and_jobs.sql`
@@ -730,7 +735,7 @@ Expire abandoned Created/Received uploads, release expired reservations, and pur
 Run fault-injection tests, multiple concurrent Worker processes, a concurrency value of 1, and the workspace gate. Commit:
 
 ```bash
-git add crates/application crates/epub crates/storage-local apps/worker
+git add apps/worker crates/domain crates/application crates/epub crates/storage-local crates/postgres migrations
 git commit -m "feat: process EPUB imports with an idempotent worker saga"
 ```
 
