@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO folioharbor.manifestation_assets(manifestation_id,blob_id,asset_kind,locator_href,created_at) VALUES($1,$2,'cover',$3,$4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "00bba27e07aabbd8ae2768a816bf433e264b22719cce4603479f86f681c6e3fa"
+}

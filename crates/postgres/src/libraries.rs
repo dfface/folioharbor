@@ -173,6 +173,7 @@ fn resource_id(resource: ResourceRef) -> Uuid {
         ResourceRef::Library(id) => id.as_uuid(),
         ResourceRef::Membership { user_id, .. } => user_id.as_uuid(),
         ResourceRef::Invitation { invitation_id, .. } => invitation_id.as_uuid(),
+        ResourceRef::Upload { upload_id, .. } => upload_id.as_uuid(),
     }
 }
 

@@ -1,6 +1,7 @@
 mod audit_repository;
 mod authorization_repository;
 mod blob_store;
+mod catalog_repository;
 mod clock;
 mod identity_repository;
 mod job_repository;
@@ -16,6 +17,7 @@ mod upload_repository;
 pub use audit_repository::*;
 pub use authorization_repository::*;
 pub use blob_store::*;
+pub use catalog_repository::*;
 pub use clock::Clock;
 pub use identity_repository::*;
 pub use job_repository::*;

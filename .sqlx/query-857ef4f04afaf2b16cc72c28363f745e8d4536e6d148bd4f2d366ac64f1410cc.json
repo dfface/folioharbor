@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO folioharbor.manifestation_units(manifestation_id,content_unit_id,spine_order,linear) VALUES($1,$2,$3,$4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "857ef4f04afaf2b16cc72c28363f745e8d4536e6d148bd4f2d366ac64f1410cc"
+}

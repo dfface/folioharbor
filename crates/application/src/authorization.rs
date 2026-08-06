@@ -1,5 +1,5 @@
 use folioharbor_domain::{
-    id::{InvitationId, LibraryId, UserId},
+    id::{InvitationId, LibraryId, UploadId, UserId},
     libraries::role::{PermissionCode, RoleCode},
 };
 
@@ -14,6 +14,7 @@ pub enum Action {
     RemoveMember,
     CreateUpload,
     InspectUpload,
+    ImportPublication,
 }
 
 impl Action {
@@ -27,6 +28,7 @@ impl Action {
             Self::RemoveMember => "member.remove",
             Self::CreateUpload => "upload.create",
             Self::InspectUpload => "upload.inspect",
+            Self::ImportPublication => "publication.import",
         }
     }
 
@@ -34,7 +36,9 @@ impl Action {
     pub const fn required_permission(self) -> PermissionCode {
         match self {
             Self::ViewLibrary => PermissionCode::HoldingView,
-            Self::CreateUpload | Self::InspectUpload => PermissionCode::HoldingEdit,
+            Self::CreateUpload | Self::InspectUpload | Self::ImportPublication => {
+                PermissionCode::HoldingEdit
+            }
             Self::InviteMember => PermissionCode::MemberInvite,
             Self::ManageLibrary | Self::ChangeMemberRole | Self::RemoveMember => {
                 PermissionCode::LibraryManage
@@ -54,6 +58,10 @@ pub enum ResourceRef {
         library_id: LibraryId,
         invitation_id: InvitationId,
     },
+    Upload {
+        library_id: LibraryId,
+        upload_id: UploadId,
+    },
 }
 
 impl ResourceRef {
@@ -62,7 +70,8 @@ impl ResourceRef {
         match self {
             Self::Library(id)
             | Self::Membership { library_id: id, .. }
-            | Self::Invitation { library_id: id, .. } => id,
+            | Self::Invitation { library_id: id, .. }
+            | Self::Upload { library_id: id, .. } => id,
         }
     }
 
@@ -72,6 +81,7 @@ impl ResourceRef {
             Self::Library(_) => "library",
             Self::Membership { .. } => "membership",
             Self::Invitation { .. } => "invitation",
+            Self::Upload { .. } => "upload",
         }
     }
 }

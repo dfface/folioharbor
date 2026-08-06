@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT item.item_id AS \"item_id!\" FROM folioharbor.holdings holding JOIN folioharbor.items item USING(holding_id) JOIN folioharbor.item_assets asset USING(item_id) WHERE holding.library_id=$1 AND holding.state='active' AND item.state='active' AND asset.asset_kind='original' AND asset.blob_id=$2 ORDER BY item.created_at LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "item_id!",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "541cb0a1bce402407d8e680614d6920c194e7b7c544e0dfdda89744c16ac31d0"
+}

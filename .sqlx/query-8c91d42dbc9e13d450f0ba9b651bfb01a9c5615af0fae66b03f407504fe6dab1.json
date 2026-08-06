@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT package_id,manifestation_id FROM folioharbor.publication_packages WHERE blob_id=$1 AND parser_profile_version=$2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "package_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "manifestation_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "8c91d42dbc9e13d450f0ba9b651bfb01a9c5615af0fae66b03f407504fe6dab1"
+}

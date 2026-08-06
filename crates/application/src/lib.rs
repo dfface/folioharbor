@@ -3,6 +3,7 @@
 pub mod actor;
 pub mod audit;
 pub mod authorization;
+pub mod catalog;
 pub mod config;
 pub mod error;
 pub mod identity;

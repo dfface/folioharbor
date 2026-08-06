@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO folioharbor.items(item_id,holding_id,state,created_at) VALUES($1,$2,'active',$3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "625286e579338bdc75f158118f1107ee03a1ccf489f941d1fd5a2ef49725d1e8"
+}

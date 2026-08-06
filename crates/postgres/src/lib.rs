@@ -2,6 +2,7 @@
 
 mod audit;
 mod authorization;
+mod catalog;
 mod context;
 pub mod identity;
 mod jobs;
@@ -14,6 +15,7 @@ mod uploads;
 
 pub use audit::PgAuditRepository;
 pub use authorization::PgAuthorizationRepository;
+pub use catalog::PgCatalogRepository;
 pub use context::{DatabaseContext, PgTransactionContext};
 pub use jobs::PgJobRepository;
 pub use migrate::{MigrationError, MigrationReport, run_migrations};

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO folioharbor.manifestations(manifestation_id,identifiers,created_at) VALUES($1,$2,$3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7d1842626cfba45b0e5b57b3b9b0dd0f5595e580fc4edb97e77a721f0c09671e"
+}

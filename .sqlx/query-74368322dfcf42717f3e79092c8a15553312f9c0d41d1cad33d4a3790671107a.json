@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT byte_size AS \"byte_size!\" FROM folioharbor.blobs WHERE blob_id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "byte_size!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "74368322dfcf42717f3e79092c8a15553312f9c0d41d1cad33d4a3790671107a"
+}
