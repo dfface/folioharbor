@@ -2,6 +2,7 @@ mod auth;
 mod catalog;
 mod download;
 mod libraries;
+mod problems;
 mod progress;
 mod reader;
 mod uploads;
@@ -128,6 +129,7 @@ impl AppState {
 }
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .nest("/problems", problems::router())
         .nest("/api/v1/auth", auth::router())
         .nest(
             "/api/v1/libraries",

@@ -9,6 +9,7 @@ pub mod error;
 pub mod identity;
 pub mod imports;
 pub mod libraries;
+pub mod mail;
 pub mod ports;
 pub mod rate_limit;
 pub mod reader;

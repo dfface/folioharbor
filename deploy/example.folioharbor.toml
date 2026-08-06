@@ -30,7 +30,10 @@ invitation_enabled = true
 password_reset_enabled = true
 
 [mail]
+# Use smtps:// for implicit TLS or smtp:// when TLS is negotiated by the relay.
 smtp_url = "smtp://mail.example:2525"
+# Credentials are supplied only through FOLIOHARBOR_MAIL_USERNAME and
+# FOLIOHARBOR_MAIL_PASSWORD (or its _FILE variant), never in smtp_url.
 
 [worker]
 concurrency = 1
