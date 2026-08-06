@@ -95,3 +95,37 @@ fn command(blob_id: BlobId, title: &str) -> ImportCatalogCommand {
         now: OffsetDateTime::now_utc(),
     }
 }
+
+#[test]
+fn catalog_hrefs_reject_transport_and_ambiguous_epub_paths() {
+    for invalid in [
+        "http://example.test/chapter.xhtml",
+        "mailto:reader@example.test",
+        "data:text/html,chapter",
+        "scheme:value",
+        "OPS/chapter.xhtml?mode=raw",
+        "OPS/chapter.xhtml#fragment",
+        "OPS/chapter\0.xhtml",
+        "OPS/chapter\n.xhtml",
+        "/OPS/chapter.xhtml",
+        "OPS\\chapter.xhtml",
+        "OPS/../chapter.xhtml",
+        "OPS//chapter.xhtml",
+        "OPS/%2e%2e/chapter.xhtml",
+        "OPS/%2Fchapter.xhtml",
+        "OPS/%5cchapter.xhtml",
+        "OPS/%00chapter.xhtml",
+        "OPS/%1fchapter.xhtml",
+        "OPS/chapter%3Fmode.xhtml",
+        "OPS/chapter%23fragment.xhtml",
+        "OPS/scheme%3avalue.xhtml",
+    ] {
+        assert!(
+            PublicationResource::new(invalid, "application/xhtml+xml").is_err(),
+            "must reject {invalid:?}"
+        );
+        assert!(SpineEntry::new(invalid, true).is_err());
+        assert!(TocEntry::new("Chapter", invalid).is_err());
+    }
+    assert!(PublicationResource::new("OPS/chapter-1.xhtml", "application/xhtml+xml").is_ok());
+}

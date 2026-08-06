@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT folioharbor.catalog_finish_import($1,$2,$3,$4,$5,$6,$7,$8) AS \"outcome!\"",
+  "query": "SELECT folioharbor.catalog_finish_import($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) AS \"outcome!\"",
   "describe": {
     "columns": [
       {
@@ -15,6 +15,8 @@
         "Uuid",
         "Uuid",
         "Uuid",
+        "Int8",
+        "Uuid",
         "Bool",
         "Uuid",
         "Text",
@@ -25,5 +27,5 @@
       null
     ]
   },
-  "hash": "214b3375e884c6c6ded2e22227032e03a044beb1dcac754b0c369aabe678727b"
+  "hash": "ab9d54f73b420fc75c9a4b2dd4413d359dbf02b8d8fc0f3b4d8c54efa0f1bbc8"
 }

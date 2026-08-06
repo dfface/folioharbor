@@ -34,7 +34,16 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
     }
     sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,created_at,updated_at) VALUES($1,'Visible',$2,$2)").bind(library.as_uuid()).bind(now).execute(&pools.owner).await?;
     sqlx::query("INSERT INTO folioharbor.library_memberships(library_id,user_id,role_code,status,joined_at) VALUES($1,$2,'reader','active',$3)").bind(library.as_uuid()).bind(allowed.as_uuid()).bind(now).execute(&pools.owner).await?;
-    let item = seed_item(&pools.owner, library, now).await?;
+    let (item, intended_package, manifestation, blob) =
+        seed_item(&pools.owner, library, now).await?;
+    sqlx::query("INSERT INTO folioharbor.publication_packages(package_id,manifestation_id,blob_id,parser_profile_version,created_at) VALUES($1,$2,$3,'epub-v2',$4)")
+        .bind(PublicationPackageId::new().as_uuid()).bind(manifestation.as_uuid()).bind(blob.as_uuid()).bind(now).execute(&pools.owner).await?;
+    let associated_package: uuid::Uuid =
+        sqlx::query_scalar("SELECT package_id FROM folioharbor.items WHERE item_id=$1")
+            .bind(item.as_uuid())
+            .fetch_one(&pools.owner)
+            .await?;
+    assert_eq!(associated_package, intended_package.as_uuid());
 
     for context in [
         DatabaseContext::api(allowed, library, RequestId::new()),
@@ -110,6 +119,7 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
         .await?
         .expect("authorized Item must resolve from its Holding");
     assert_eq!(visible.item_id, item);
+    assert_eq!(visible.package_id, intended_package);
     assert_eq!(visible.primary_title, "Visible work");
     assert!(
         catalog
@@ -138,7 +148,7 @@ async fn seed_item(
     pool: &PgPool,
     library: LibraryId,
     now: OffsetDateTime,
-) -> anyhow::Result<ItemId> {
+) -> anyhow::Result<(ItemId, PublicationPackageId, ManifestationId, BlobId)> {
     let work = WorkId::new();
     let expression = ExpressionId::new();
     let manifestation = ManifestationId::new();
@@ -153,7 +163,7 @@ async fn seed_item(
     sqlx::query("INSERT INTO folioharbor.blobs(blob_id,storage_namespace,sha256,byte_size,created_at) VALUES($1,'instance-v1',$2,1,$3)").bind(blob.as_uuid()).bind(vec![7_u8; 32]).bind(now).execute(pool).await?;
     sqlx::query("INSERT INTO folioharbor.publication_packages(package_id,manifestation_id,blob_id,parser_profile_version,created_at) VALUES($1,$2,$3,'epub-v1',$4)").bind(package.as_uuid()).bind(manifestation.as_uuid()).bind(blob.as_uuid()).bind(now).execute(pool).await?;
     sqlx::query("INSERT INTO folioharbor.holdings(holding_id,library_id,manifestation_id,state,created_at) VALUES($1,$2,$3,'active',$4)").bind(holding.as_uuid()).bind(library.as_uuid()).bind(manifestation.as_uuid()).bind(now).execute(pool).await?;
-    sqlx::query("INSERT INTO folioharbor.items(item_id,holding_id,state,created_at) VALUES($1,$2,'active',$3)").bind(item.as_uuid()).bind(holding.as_uuid()).bind(now).execute(pool).await?;
-    Ok(item)
+    sqlx::query("INSERT INTO folioharbor.items(item_id,holding_id,manifestation_id,package_id,state,created_at) VALUES($1,$2,$3,$4,'active',$5)").bind(item.as_uuid()).bind(holding.as_uuid()).bind(manifestation.as_uuid()).bind(package.as_uuid()).bind(now).execute(pool).await?;
+    Ok((item, package, manifestation, blob))
 }
 use folioharbor_application::ports::CatalogQueryRepository;

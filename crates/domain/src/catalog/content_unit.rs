@@ -63,17 +63,48 @@ impl TocEntry {
 }
 
 pub(crate) fn normalized_href(value: String) -> Result<String, CatalogValueError> {
-    let path = value.split('#').next().unwrap_or_default();
-    if path.is_empty()
-        || path.len() > 2_048
-        || path.starts_with('/')
-        || path.contains('\\')
-        || path
+    let decoded = percent_decoded(&value)?;
+    if value.is_empty()
+        || value.len() > 2_048
+        || value.contains(['?', '#'])
+        || decoded.starts_with('/')
+        || decoded.contains(['\\', ':', '?', '#'])
+        || decoded
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
-        || path.chars().any(char::is_control)
+        || decoded.chars().any(char::is_control)
     {
         return Err(CatalogValueError::InvalidMetadata);
     }
     Ok(value)
+}
+
+fn percent_decoded(value: &str) -> Result<String, CatalogValueError> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = bytes.get(index + 1).and_then(|byte| hex_digit(*byte));
+            let low = bytes.get(index + 2).and_then(|byte| hex_digit(*byte));
+            let (Some(high), Some(low)) = (high, low) else {
+                return Err(CatalogValueError::InvalidMetadata);
+            };
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| CatalogValueError::InvalidMetadata)
+}
+
+const fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
