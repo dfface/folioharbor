@@ -8,7 +8,6 @@ pub mod routes;
 
 pub use routes::{AppState, router};
 
-#[must_use]
 pub fn problem_document_router() -> axum::Router {
     routes::problem_document_router()
 }

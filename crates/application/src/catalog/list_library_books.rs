@@ -6,10 +6,13 @@ use uuid::Uuid;
 use crate::{
     authorization::{Action, Authorization, ResourceRef},
     error::{AppError, FieldViolation},
-    ports::{AuthorizationRepository, CatalogQueryRepository, VisibleCatalogItem},
+    ports::{
+        AuthorizationRepository, CatalogQueryRepository, ItemLifecycleRepository,
+        VisibleCatalogItem,
+    },
 };
 
-use super::ItemDetail;
+use super::{DeleteItem, DeleteItemCommand, ItemDetail, RestoreItem, RestoreItemCommand};
 
 pub const MAX_PAGE_SIZE: u32 = 100;
 const DEFAULT_PAGE_SIZE: u32 = 25;
@@ -111,6 +114,24 @@ pub trait CatalogApi: Send + Sync {
         item_id: ItemId,
         request_id: RequestId,
     ) -> Result<ItemDetail, AppError>;
+
+    async fn delete_item(
+        &self,
+        _: DeleteItemCommand,
+    ) -> Result<folioharbor_domain::catalog::ItemLifecycle, AppError> {
+        Err(AppError::DependencyUnavailable {
+            code: "catalog_repository_unavailable",
+        })
+    }
+
+    async fn restore_item(
+        &self,
+        _: RestoreItemCommand,
+    ) -> Result<folioharbor_domain::catalog::ItemLifecycle, AppError> {
+        Err(AppError::DependencyUnavailable {
+            code: "catalog_repository_unavailable",
+        })
+    }
 }
 
 pub struct UnavailableCatalogApi;
@@ -147,12 +168,25 @@ pub struct CatalogService<R, A> {
     authorization: A,
 }
 
+pub struct LifecycleCatalogService<R, A> {
+    repository: R,
+    authorization: A,
+}
+
 impl<R, A> CatalogService<R, A> {
     #[must_use]
     pub const fn new(repository: R, authorization: A) -> Self {
         Self {
             repository,
             authorization,
+        }
+    }
+
+    #[must_use]
+    pub fn with_lifecycle(self) -> LifecycleCatalogService<R, A> {
+        LifecycleCatalogService {
+            repository: self.repository,
+            authorization: self.authorization,
         }
     }
 }
@@ -180,6 +214,53 @@ impl<R: CatalogQueryRepository, A: AuthorizationRepository> CatalogApi for Catal
     ) -> Result<ItemDetail, AppError> {
         super::GetItem::new(&self.repository, &self.authorization)
             .execute(actor, library_id, item_id, request_id)
+            .await
+    }
+}
+
+#[async_trait]
+impl<R: CatalogQueryRepository + ItemLifecycleRepository, A: AuthorizationRepository> CatalogApi
+    for LifecycleCatalogService<R, A>
+{
+    async fn list_library_books(
+        &self,
+        actor: UserId,
+        library_id: LibraryId,
+        request_id: RequestId,
+        page: PageRequest,
+    ) -> Result<Page<BookSummary>, AppError> {
+        ListLibraryBooks::new(&self.repository, &self.authorization)
+            .execute(actor, library_id, request_id, page)
+            .await
+    }
+
+    async fn get_item(
+        &self,
+        actor: UserId,
+        library_id: LibraryId,
+        item_id: ItemId,
+        request_id: RequestId,
+    ) -> Result<ItemDetail, AppError> {
+        super::GetItem::new(&self.repository, &self.authorization)
+            .execute(actor, library_id, item_id, request_id)
+            .await
+    }
+
+    async fn delete_item(
+        &self,
+        command: DeleteItemCommand,
+    ) -> Result<folioharbor_domain::catalog::ItemLifecycle, AppError> {
+        DeleteItem::new(&self.repository, &self.authorization)
+            .execute(command)
+            .await
+    }
+
+    async fn restore_item(
+        &self,
+        command: RestoreItemCommand,
+    ) -> Result<folioharbor_domain::catalog::ItemLifecycle, AppError> {
+        RestoreItem::new(&self.repository, &self.authorization)
+            .execute(command)
             .await
     }
 }

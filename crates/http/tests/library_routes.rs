@@ -277,7 +277,7 @@ async fn disabled_invitation_feature_removes_its_route_without_removing_library_
         auth.clone(),
         auth,
     )
-    .with_auth_features(AuthFeatures::new(false, false, false, false));
+    .with_auth_features(AuthFeatures::new([false, false, false, false]));
     let app = router(state);
     let invitation = app
         .clone()

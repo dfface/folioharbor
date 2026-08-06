@@ -42,10 +42,13 @@ pub fn build_upload_api(settings: &Settings, pool: PgPool) -> Arc<dyn UploadApi>
 
 #[must_use]
 pub fn build_catalog_api(_settings: &Settings, pool: PgPool) -> Arc<dyn CatalogApi> {
-    Arc::new(CatalogService::new(
-        PgCatalogRepository::new(pool.clone()),
-        PgAuthorizationRepository::new(pool),
-    ))
+    Arc::new(
+        CatalogService::new(
+            PgCatalogRepository::new(pool.clone()),
+            PgAuthorizationRepository::new(pool),
+        )
+        .with_lifecycle(),
+    )
 }
 
 #[must_use]

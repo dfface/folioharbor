@@ -1,5 +1,5 @@
 use folioharbor_domain::{
-    id::{InvitationId, LibraryId, UploadId, UserId},
+    id::{InvitationId, ItemId, LibraryId, UploadId, UserId},
     libraries::role::{PermissionCode, RoleCode},
 };
 
@@ -16,6 +16,8 @@ pub enum Action {
     InspectUpload,
     ImportPublication,
     DownloadItem,
+    DeleteItem,
+    RestoreItem,
 }
 
 impl Action {
@@ -31,6 +33,8 @@ impl Action {
             Self::InspectUpload => "upload.inspect",
             Self::ImportPublication => "publication.import",
             Self::DownloadItem => "item.download",
+            Self::DeleteItem => "item.delete",
+            Self::RestoreItem => "item.restore",
         }
     }
 
@@ -38,9 +42,11 @@ impl Action {
     pub const fn required_permission(self) -> PermissionCode {
         match self {
             Self::ViewLibrary => PermissionCode::HoldingView,
-            Self::CreateUpload | Self::InspectUpload | Self::ImportPublication => {
-                PermissionCode::HoldingEdit
-            }
+            Self::CreateUpload
+            | Self::InspectUpload
+            | Self::ImportPublication
+            | Self::DeleteItem
+            | Self::RestoreItem => PermissionCode::HoldingEdit,
             Self::DownloadItem => PermissionCode::ItemDownload,
             Self::InviteMember => PermissionCode::MemberInvite,
             Self::ManageLibrary | Self::ChangeMemberRole | Self::RemoveMember => {
@@ -65,6 +71,10 @@ pub enum ResourceRef {
         library_id: LibraryId,
         upload_id: UploadId,
     },
+    Item {
+        library_id: LibraryId,
+        item_id: ItemId,
+    },
 }
 
 impl ResourceRef {
@@ -74,7 +84,8 @@ impl ResourceRef {
             Self::Library(id)
             | Self::Membership { library_id: id, .. }
             | Self::Invitation { library_id: id, .. }
-            | Self::Upload { library_id: id, .. } => id,
+            | Self::Upload { library_id: id, .. }
+            | Self::Item { library_id: id, .. } => id,
         }
     }
 
@@ -85,6 +96,7 @@ impl ResourceRef {
             Self::Membership { .. } => "membership",
             Self::Invitation { .. } => "invitation",
             Self::Upload { .. } => "upload",
+            Self::Item { .. } => "item",
         }
     }
 }

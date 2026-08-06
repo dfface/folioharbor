@@ -3,6 +3,7 @@ use std::{io::Write as _, sync::Arc, time::Duration as StdDuration};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use folioharbor_application::{
+    catalog::garbage_collect::CollectGarbage,
     config::MailSettings,
     imports::{CleanupImports, JobFailure, ProcessImportJob},
     mail::RenderedMail,
@@ -143,7 +144,9 @@ impl Mailer for SmtpMailer {
             tokio::time::timeout(SMTP_TIMEOUT, self.transport.send_raw(&envelope, &bytes)).await;
         bytes.zeroize();
         match result {
-            Ok(result) => result.map(|_: Response| ()).map_err(classify_smtp_error),
+            Ok(result) => result
+                .map(|_: Response| ())
+                .map_err(|error| classify_smtp_error(&error)),
             Err(_) => Err(MailError::transient("smtp_exchange_timeout")),
         }
     }
@@ -187,7 +190,7 @@ fn write_body(output: &mut Vec<u8>, body: &str) {
     }
 }
 
-fn classify_smtp_error(error: lettre::transport::smtp::Error) -> MailError {
+fn classify_smtp_error(error: &lettre::transport::smtp::Error) -> MailError {
     if error.is_permanent() {
         MailError::permanent("smtp_permanent")
     } else {
@@ -198,6 +201,7 @@ fn classify_smtp_error(error: lettre::transport::smtp::Error) -> MailError {
 pub struct WorkerHandlers {
     imports: Arc<ProcessImportJob>,
     cleanup: Option<Arc<CleanupImports>>,
+    garbage: Option<Arc<CollectGarbage>>,
 }
 
 impl WorkerHandlers {
@@ -206,6 +210,7 @@ impl WorkerHandlers {
         Self {
             imports,
             cleanup: None,
+            garbage: None,
         }
     }
 
@@ -214,6 +219,20 @@ impl WorkerHandlers {
         Self {
             imports,
             cleanup: Some(cleanup),
+            garbage: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_cleanup_and_garbage(
+        imports: Arc<ProcessImportJob>,
+        cleanup: Arc<CleanupImports>,
+        garbage: Arc<CollectGarbage>,
+    ) -> Self {
+        Self {
+            imports,
+            cleanup: Some(cleanup),
+            garbage: Some(garbage),
         }
     }
 }
@@ -223,9 +242,7 @@ impl JobDispatcher for WorkerHandlers {
     async fn dispatch(&self, job: LeasedJob) -> Result<(), JobFailure> {
         match job.kind {
             JobKind::ImportEpub => self.imports.execute(job).await.map(|_| ()),
-            kind @ (JobKind::ExpireUploadsAndReservations
-            | JobKind::PurgeFailedUploads
-            | JobKind::CollectBlobsLater) => {
+            kind @ (JobKind::ExpireUploadsAndReservations | JobKind::PurgeFailedUploads) => {
                 let cleanup =
                     self.cleanup
                         .as_ref()
@@ -237,6 +254,38 @@ impl JobDispatcher for WorkerHandlers {
                     .run_kind(
                         &format!("cleanup-{}", job.job_id.as_uuid()),
                         kind,
+                        OffsetDateTime::now_utc(),
+                        100,
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|_| JobFailure::Transient {
+                        code: "cleanup_unavailable",
+                        retry_at: OffsetDateTime::now_utc() + Duration::minutes(1),
+                    })
+            }
+            JobKind::CollectBlobsLater => {
+                if let Some(garbage) = &self.garbage {
+                    return garbage
+                        .execute(OffsetDateTime::now_utc())
+                        .await
+                        .map(|_| ())
+                        .map_err(|_| JobFailure::Transient {
+                            code: "garbage_collection_unavailable",
+                            retry_at: OffsetDateTime::now_utc() + Duration::minutes(1),
+                        });
+                }
+                let cleanup =
+                    self.cleanup
+                        .as_ref()
+                        .ok_or_else(|| JobFailure::OperatorRequired {
+                            code: "garbage_collection_not_configured",
+                            summary: "garbage collection handler is not configured".to_owned(),
+                        })?;
+                cleanup
+                    .run_kind(
+                        &format!("cleanup-{}", job.job_id.as_uuid()),
+                        JobKind::CollectBlobsLater,
                         OffsetDateTime::now_utc(),
                         100,
                     )

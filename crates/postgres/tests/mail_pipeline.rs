@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::too_many_lines)]
+
 use folioharbor_application::ports::{
     IdentityRepository, LeaseMail, LibraryMutationOutcome, LibraryRepository, MailRepository,
     NewAccount, NewLibraryInvitation, NewMailOutboxEntry, RegisterOutcome,

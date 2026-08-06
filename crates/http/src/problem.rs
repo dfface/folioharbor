@@ -57,8 +57,9 @@ documents! {
     ],
     Conflict => [
         "conflict", "email-verification-required", "library-quota-exceeded",
-        "library-requires-owner", "personal-library-provisioning-failed", "progress-conflict",
-        "progress-mutation-mismatch", "quota-exceeded", "upload-already-exists",
+        "library-requires-owner", "item-recovery-window-elapsed",
+        "personal-library-provisioning-failed", "progress-conflict", "progress-mutation-mismatch",
+        "quota-exceeded", "upload-already-exists",
         "upload-not-importable", "upload-receipt-lease-lost", "upload-state-conflict",
     ],
     Invalid => [

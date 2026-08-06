@@ -267,6 +267,39 @@ paths:
         '404': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
         '503': {$ref: '#/components/responses/Problem'}
+    delete:
+      operationId: deleteLibraryItem
+      description: Immediately revokes Item access and starts a seven-day recovery window. Logical quota is retained until the recovery window closes.
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/LibraryId'}
+        - {$ref: '#/components/parameters/ItemId'}
+        - {$ref: '#/components/parameters/CsrfToken'}
+      responses:
+        '204': {description: Item is deleted or was already deleted}
+        '400': {$ref: '#/components/responses/InvalidIdentifierProblem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '503': {$ref: '#/components/responses/Problem'}
+  /api/v1/libraries/{library_id}/items/{item_id}/restore:
+    post:
+      operationId: restoreLibraryItem
+      description: Restores a deleted Item strictly before its seven-day recovery window ends.
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/LibraryId'}
+        - {$ref: '#/components/parameters/ItemId'}
+        - {$ref: '#/components/parameters/CsrfToken'}
+      responses:
+        '204': {description: Item is active or was already active}
+        '400': {$ref: '#/components/responses/InvalidIdentifierProblem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {description: The seven-day recovery window elapsed, content: {application/problem+json: {schema: {$ref: '#/components/schemas/ProblemDetails'}}}}
+        '503': {$ref: '#/components/responses/Problem'}
   /api/v1/items/{item_id}/manifest:
     get:
       operationId: getPublicationManifest

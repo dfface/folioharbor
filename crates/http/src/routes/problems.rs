@@ -224,6 +224,7 @@ mod tests {
     use super::localized_document;
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn documents_the_kebab_case_type_code_and_negotiates_chinese_by_quality() {
         let document = localized_document("mail-delivery-unavailable", "en;q=0.5, zh-CN;q=0.9")
             .expect("known stable code");

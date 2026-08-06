@@ -25,6 +25,23 @@ fn quota_conflict_has_stable_problem_shape() {
 }
 
 #[test]
+fn elapsed_item_recovery_window_has_its_documented_public_type() {
+    let problem = ProblemDetails::from_app_error(
+        &AppError::Conflict {
+            code: "item_recovery_window_elapsed",
+        },
+        &ProblemContext::example("01JREQ"),
+    );
+
+    assert_eq!(problem.status, 409);
+    assert_eq!(problem.code, "item_recovery_window_elapsed");
+    assert_eq!(
+        problem.type_uri.as_str(),
+        "https://library.example/problems/item-recovery-window-elapsed"
+    );
+}
+
+#[test]
 fn every_application_error_has_a_stable_status_and_code() {
     let errors = [
         (AppError::Unauthenticated, 401, "unauthenticated"),

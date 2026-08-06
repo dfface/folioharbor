@@ -6,12 +6,16 @@
 //! use folioharbor_application::catalog::DownloadSource;
 //! ```
 
+mod delete_item;
 mod download_item;
+pub mod garbage_collect;
 mod get_item;
 mod import_publication;
 mod list_library_books;
+mod restore_item;
 
 pub use crate::ports::DownloadRange;
+pub use delete_item::{DeleteItem, DeleteItemCommand};
 pub use download_item::{
     DownloadApi, DownloadGrant, DownloadItem, DownloadService, UnavailableDownloadApi,
     sanitize_download_file_name,
@@ -19,6 +23,7 @@ pub use download_item::{
 pub use get_item::{GetItem, ItemDetail};
 pub use import_publication::{ImportCatalogCommand, ImportCatalogResult, ImportPublicationCatalog};
 pub use list_library_books::{
-    BookSummary, CatalogApi, CatalogService, MAX_PAGE_SIZE, Page, PageRequest,
-    UnavailableCatalogApi,
+    BookSummary, CatalogApi, CatalogService, LifecycleCatalogService, MAX_PAGE_SIZE, Page,
+    PageRequest, UnavailableCatalogApi,
 };
+pub use restore_item::{RestoreItem, RestoreItemCommand};

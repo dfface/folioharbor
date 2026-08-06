@@ -267,58 +267,65 @@ pub struct AuthSettings {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AuthFeatures {
-    registration: bool,
-    email_verification: bool,
-    invitation: bool,
-    password_reset: bool,
+    enabled: u8,
 }
 
 impl AuthFeatures {
+    const REGISTRATION: u8 = 1 << 0;
+    const EMAIL_VERIFICATION: u8 = 1 << 1;
+    const INVITATION: u8 = 1 << 2;
+    const PASSWORD_RESET: u8 = 1 << 3;
+
     #[must_use]
     pub const fn new(
-        registration: bool,
-        email_verification: bool,
-        invitation: bool,
-        password_reset: bool,
+        [registration, email_verification, invitation, password_reset]: [bool; 4],
     ) -> Self {
-        Self {
-            registration,
-            email_verification,
-            invitation,
-            password_reset,
+        let mut enabled = 0;
+        if registration {
+            enabled |= Self::REGISTRATION;
         }
+        if email_verification {
+            enabled |= Self::EMAIL_VERIFICATION;
+        }
+        if invitation {
+            enabled |= Self::INVITATION;
+        }
+        if password_reset {
+            enabled |= Self::PASSWORD_RESET;
+        }
+        Self { enabled }
     }
 
     #[must_use]
     pub const fn registration_enabled(self) -> bool {
-        self.registration
+        self.enabled & Self::REGISTRATION != 0
     }
 
     #[must_use]
     pub const fn email_verification_enabled(self) -> bool {
-        self.email_verification
+        self.enabled & Self::EMAIL_VERIFICATION != 0
     }
 
     #[must_use]
     pub const fn invitation_enabled(self) -> bool {
-        self.invitation
+        self.enabled & Self::INVITATION != 0
     }
 
     #[must_use]
     pub const fn password_reset_enabled(self) -> bool {
-        self.password_reset
+        self.enabled & Self::PASSWORD_RESET != 0
     }
 }
 
 impl AuthSettings {
     #[must_use]
     pub const fn features(&self) -> AuthFeatures {
-        AuthFeatures::new(
+        AuthFeatures::new([
             self.registration_enabled,
             self.email_verification_enabled,
             self.invitation_enabled,
             self.password_reset_enabled,
-        )
+        ])
     }
 }
 

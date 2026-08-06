@@ -4,14 +4,15 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use folioharbor_application::ports::JobRepository;
 use folioharbor_application::{
+    catalog::garbage_collect::CollectGarbage,
     config::{ConfigSources, Settings},
     imports::{CleanupImports, ProcessImportJob, RetrySchedule},
     mail::DeliverMailJob,
 };
 use folioharbor_epub::{EpubPublicationParser, ParserLimits};
 use folioharbor_postgres::{
-    PgCatalogRepository, PgImportCleanupRepository, PgImportRepository, PgJobRepository,
-    PgMailRepository, connect_worker,
+    PgCatalogRepository, PgGarbageCollectionRepository, PgImportCleanupRepository,
+    PgImportRepository, PgJobRepository, PgMailRepository, connect_worker,
 };
 use folioharbor_storage_local::LocalBlobStore;
 use folioharbor_worker::{
@@ -34,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
     let storage_root = settings.storage.root.clone();
     let config = RunnerConfig::new(settings.worker.concurrency)
         .ok_or_else(|| anyhow::anyhow!("worker concurrency must be positive"))?;
-    let pool = connect_worker(&database_url).await?;
+    let pool = connect_worker(database_url).await?;
     let smtp = SmtpMailer::for_mode(&settings.mail)?;
     let blobs = Arc::new(LocalBlobStore::new(storage_root));
     let process = Arc::new(ProcessImportJob::new(
@@ -50,8 +51,17 @@ async fn main() -> anyhow::Result<()> {
     let jobs = Arc::new(PgJobRepository::new(pool.clone()));
     let cleanup = Arc::new(CleanupImports::new(
         Arc::new(PgImportCleanupRepository::new(pool.clone())),
-        blobs,
+        blobs.clone(),
     ));
+    let garbage = Arc::new(
+        CollectGarbage::new(
+            Arc::new(PgGarbageCollectionRepository::new(pool.clone())),
+            blobs,
+            worker_id.clone(),
+            100,
+        )
+        .ok_or_else(|| anyhow::anyhow!("garbage collection configuration is invalid"))?,
+    );
     let mail_repository = PgMailRepository::new(pool);
     let application_secrets = Arc::new(settings.auth.application_secrets);
     let public_base_url = settings.server.public_base_url;
@@ -66,7 +76,9 @@ async fn main() -> anyhow::Result<()> {
     });
     let runner = WorkerRunner::new(
         jobs.clone(),
-        Arc::new(WorkerHandlers::with_cleanup(process, cleanup)),
+        Arc::new(WorkerHandlers::with_cleanup_and_garbage(
+            process, cleanup, garbage,
+        )),
         worker_id.clone(),
         config,
     );

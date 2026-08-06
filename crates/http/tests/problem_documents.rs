@@ -45,6 +45,7 @@ const EMITTED_CODES: &[&str] = &[
     "invitation-invalid",
     "item-download-forbidden",
     "item-not-found",
+    "item-recovery-window-elapsed",
     "library-action-forbidden",
     "library-not-found",
     "library-owner-required",

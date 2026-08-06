@@ -90,7 +90,8 @@ async fn migrations_from_zero_preserve_least_privilege_roles_and_are_idempotent(
     assert_eq!(
         first_versions,
         vec![
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+            25
         ]
     );
 
@@ -102,7 +103,8 @@ async fn migrations_from_zero_preserve_least_privilege_roles_and_are_idempotent(
     assert_eq!(
         second_versions,
         vec![
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+            25
         ]
     );
 

@@ -293,10 +293,13 @@ fn production_state(
 ) -> AppState {
     state(
         identity,
-        Arc::new(CatalogService::new(
-            PgCatalogRepository::new(pools.api.clone()),
-            PgAuthorizationRepository::new(pools.api.clone()),
-        )),
+        Arc::new(
+            CatalogService::new(
+                PgCatalogRepository::new(pools.api.clone()),
+                PgAuthorizationRepository::new(pools.api.clone()),
+            )
+            .with_lifecycle(),
+        ),
     )
     .with_library_api(Arc::new(LibraryService::new(
         PgLibraryRepository::new(pools.api.clone()),
@@ -446,6 +449,9 @@ fn openapi_documents_opaque_pagination_capabilities_etag_and_problems() {
             .expect("OpenAPI");
     let list = &document["paths"]["/api/v1/libraries/{library_id}/books"]["get"];
     let detail = &document["paths"]["/api/v1/libraries/{library_id}/items/{item_id}"]["get"];
+    let delete = &document["paths"]["/api/v1/libraries/{library_id}/items/{item_id}"]["delete"];
+    let restore =
+        &document["paths"]["/api/v1/libraries/{library_id}/items/{item_id}/restore"]["post"];
     assert!(
         list["description"]
             .as_str()
@@ -474,6 +480,13 @@ fn openapi_documents_opaque_pagination_capabilities_etag_and_problems() {
     for field in ["can_read", "can_download"] {
         assert!(document["components"]["schemas"]["BookSummary"]["properties"][field].is_mapping());
     }
+    assert_eq!(delete["operationId"], "deleteLibraryItem");
+    assert_eq!(restore["operationId"], "restoreLibraryItem");
+    assert_eq!(
+        delete["responses"]["204"]["description"],
+        "Item is deleted or was already deleted"
+    );
+    assert!(restore["responses"]["409"].is_mapping());
 }
 
 #[test]
@@ -781,6 +794,7 @@ async fn real_routes_apply_role_and_reader_download_setting_without_enumerating_
         serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
     assert_eq!(json["items"][0]["can_download"], false);
     let download = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("HEAD")
@@ -790,6 +804,40 @@ async fn real_routes_apply_role_and_reader_download_setting_without_enumerating_
         )
         .await?;
     assert_eq!(download.status(), StatusCode::FORBIDDEN);
+    let lifecycle_request = |method: &str, uri: &str| {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("Cookie", "folioharbor_session=editor")
+            .header("X-CSRF-Token", "catalog-csrf")
+            .body(Body::empty())
+            .expect("lifecycle request")
+    };
+    assert_eq!(
+        app.clone()
+            .oneshot(lifecycle_request("DELETE", &detail_uri))
+            .await?
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(&detail_uri, "reader"))
+            .await?
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(lifecycle_request("POST", &format!("{detail_uri}/restore")))
+            .await?
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        app.oneshot(request(&detail_uri, "reader")).await?.status(),
+        StatusCode::OK
+    );
     let allowed_starts: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM folioharbor.audit_events WHERE action_code='item.download' AND decision='allowed'",
     )

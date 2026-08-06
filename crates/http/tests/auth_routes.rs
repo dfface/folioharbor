@@ -340,7 +340,7 @@ async fn disabled_auth_features_remove_all_optional_auth_routes() {
     ] {
         let response = app_with_auth_features(
             Arc::new(FakeAuth::default()),
-            AuthFeatures::new(false, false, false, false),
+            AuthFeatures::new([false, false, false, false]),
         )
         .oneshot(
             Request::builder()
@@ -358,7 +358,7 @@ async fn disabled_auth_features_remove_all_optional_auth_routes() {
 
     let login = app_with_auth_features(
         Arc::new(FakeAuth::default()),
-        AuthFeatures::new(false, false, false, false),
+        AuthFeatures::new([false, false, false, false]),
     )
     .oneshot(
         Request::builder()
@@ -400,7 +400,7 @@ async fn enabled_auth_features_keep_all_optional_auth_routes() {
 
 #[tokio::test]
 async fn mixed_auth_features_mount_only_the_independently_enabled_routes() {
-    let features = AuthFeatures::new(false, true, false, false);
+    let features = AuthFeatures::new([false, true, false, false]);
     for (path, expected) in [
         ("/api/v1/auth/register", StatusCode::NOT_FOUND),
         (

@@ -7,12 +7,12 @@ use axum::{
     Json, Router,
     extract::rejection::QueryRejection,
     extract::{Extension, Path, Query, State},
-    http::{HeaderValue, header::ETAG},
+    http::{HeaderValue, StatusCode, header::ETAG},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use folioharbor_application::{
-    catalog::{BookSummary, ItemDetail, PageRequest},
+    catalog::{BookSummary, DeleteItemCommand, ItemDetail, PageRequest, RestoreItemCommand},
     error::{AppError, FieldViolation},
 };
 use folioharbor_domain::id::{ItemId, LibraryId, RequestId};
@@ -22,7 +22,11 @@ use uuid::Uuid;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/{library_id}/books", get(list_books))
-        .route("/{library_id}/items/{item_id}", get(get_item))
+        .route(
+            "/{library_id}/items/{item_id}",
+            get(get_item).delete(delete_item),
+        )
+        .route("/{library_id}/items/{item_id}/restore", post(restore_item))
 }
 
 #[derive(Deserialize)]
@@ -138,6 +142,60 @@ async fn get_item(
         .await
     {
         Ok(detail) => detail_response(detail),
+        Err(error) => problem_response(&error, &context),
+    }
+}
+
+async fn delete_item(
+    State(state): State<AppState>,
+    Extension(context): Extension<ProblemContext>,
+    Extension(request_id): Extension<RequestId>,
+    AuthenticatedActor(actor): AuthenticatedActor,
+    Path((raw_library, raw_item)): Path<(String, String)>,
+) -> Response {
+    let (library_id, item_id) = match parse_ids(&raw_library, &raw_item) {
+        Ok(value) => value,
+        Err(error) => return problem_response(&error, &context),
+    };
+    match state
+        .catalog_api
+        .delete_item(DeleteItemCommand {
+            actor: actor.user_id,
+            library_id,
+            item_id,
+            request_id,
+            now: folioharbor_domain::time::OffsetDateTime::now_utc(),
+        })
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => problem_response(&error, &context),
+    }
+}
+
+async fn restore_item(
+    State(state): State<AppState>,
+    Extension(context): Extension<ProblemContext>,
+    Extension(request_id): Extension<RequestId>,
+    AuthenticatedActor(actor): AuthenticatedActor,
+    Path((raw_library, raw_item)): Path<(String, String)>,
+) -> Response {
+    let (library_id, item_id) = match parse_ids(&raw_library, &raw_item) {
+        Ok(value) => value,
+        Err(error) => return problem_response(&error, &context),
+    };
+    match state
+        .catalog_api
+        .restore_item(RestoreItemCommand {
+            actor: actor.user_id,
+            library_id,
+            item_id,
+            request_id,
+            now: folioharbor_domain::time::OffsetDateTime::now_utc(),
+        })
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => problem_response(&error, &context),
     }
 }
