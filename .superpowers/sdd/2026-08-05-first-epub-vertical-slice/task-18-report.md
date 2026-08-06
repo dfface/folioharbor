@@ -71,3 +71,18 @@ Re-review verification:
 - `cargo fmt --all --check`: pass.
 - `git diff --check`: pass.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass.
+
+## Final re-review fix
+
+The remaining normal-upload revival gap from `task-18-final-rereview.md` was addressed with a real RED/GREEN path:
+
+- RED: a normal instance-scoped upload created through `PgUploadRepository` and received through `UploadService` with `LocalBlobStore` failed during promotion when the content-addressed database location was already `purged`; reconciliation was never reached.
+- GREEN: the candidate guard now permits the terminal `purged` location so the re-uploaded bytes are protected by the reachability candidate until reconciliation restores the existing location to `ready`. The guard still locks the Blob and rejects `deleting`, preventing an active GC lease from deleting newly promoted bytes.
+- The regression proceeds through upload creation, receipt preparation, physical storage promotion, upload finalization, and worker reconciliation. It verifies the physical bytes, existing Blob reuse, and clearing of all purge lifecycle and lease fields. A companion real-PostgreSQL regression verifies that promotion against an active `deleting` location remains fenced.
+
+Final re-review verification:
+
+- `FOLIOHARBOR_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55432/postgres cargo test -p folioharbor-postgres --test import_cleanup --test blob_gc --test upload_state_machine --test migration_from_zero --test catalog_constraints`: pass (7 + 9 + 4 + 2 + 11 tests).
+- `cargo fmt --all --check`: pass.
+- `git diff --check`: pass.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass.

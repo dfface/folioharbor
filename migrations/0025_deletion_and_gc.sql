@@ -243,7 +243,7 @@ BEGIN
   IF EXISTS(
       SELECT 1 FROM folioharbor.blob_locations
       WHERE blob_id=referenced_blob AND storage_key=NEW.storage_key
-        AND state IN ('deleting','purged')
+        AND state='deleting'
   ) THEN
     RAISE EXCEPTION 'Blob candidate is not referenceable' USING ERRCODE='55000';
   END IF;
