@@ -329,7 +329,7 @@ paths:
       parameters:
         - {$ref: '#/components/parameters/ItemId'}
         - {name: Range, in: header, schema: {type: string, pattern: '^[Bb][Yy][Tt][Ee][Ss]=(?:[0-9]+-[0-9]*|-[0-9]+)$'}, description: At most one byte range field-line}
-        - {name: If-None-Match, in: header, schema: {type: string}, description: Immutable opaque Blob validator}
+        - {name: If-None-Match, in: header, schema: {type: string}, description: 'Uses weak comparison; supports wildcard and comma-list members across repeated field-lines'}
       responses:
         '200': {$ref: '#/components/responses/OriginalEpub'}
         '206': {$ref: '#/components/responses/OriginalEpub'}
@@ -347,7 +347,7 @@ paths:
       parameters:
         - {$ref: '#/components/parameters/ItemId'}
         - {name: Range, in: header, schema: {type: string, pattern: '^[Bb][Yy][Tt][Ee][Ss]=(?:[0-9]+-[0-9]*|-[0-9]+)$'}, description: At most one byte range field-line}
-        - {name: If-None-Match, in: header, schema: {type: string}}
+        - {name: If-None-Match, in: header, schema: {type: string}, description: 'Uses weak comparison; supports wildcard and comma-list members across repeated field-lines'}
       responses:
         '200': {$ref: '#/components/responses/OriginalEpub'}
         '206': {$ref: '#/components/responses/OriginalEpub'}

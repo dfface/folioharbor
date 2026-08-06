@@ -737,6 +737,57 @@ async fn download_validators_handle_repeated_fields_weak_wildcard_and_invalid_by
     );
 }
 
+#[tokio::test]
+async fn download_validators_match_later_comma_list_members_for_get_and_head() {
+    let (app, item, _, starts) = download_app();
+    let path = format!("/api/v1/items/{}/download", item.as_uuid());
+    let baseline = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(&path)
+                .header("Cookie", "folioharbor_session=allowed")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let etag = baseline.headers()[ETAG]
+        .to_str()
+        .expect("etag is visible ASCII");
+
+    let weak_list = format!("\"not-current\", W/{etag}");
+    let weak_match = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&path)
+                .header("Cookie", "folioharbor_session=allowed")
+                .header("If-None-Match", weak_list)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(weak_match.status(), StatusCode::NOT_MODIFIED);
+
+    let wildcard_match = app
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(&path)
+                .header("Cookie", "folioharbor_session=allowed")
+                .header("If-None-Match", "\"not-current\", *")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(wildcard_match.status(), StatusCode::NOT_MODIFIED);
+    assert!(starts.lock().expect("download starts lock").is_empty());
+}
+
 async fn assert_prompt_cancellation(app: axum::Router, path: &str, reads: &AtomicUsize) {
     reads.store(0, Ordering::SeqCst);
     let response = app

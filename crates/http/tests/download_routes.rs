@@ -18,10 +18,12 @@ fn download_contract_exposes_get_head_ranges_and_no_storage_internals() {
     assert!(rendered.contains("Content-Range"));
     assert!(rendered.contains("application/epub+zip"));
     let expected_range_pattern = "^[Bb][Yy][Tt][Ee][Ss]=(?:[0-9]+-[0-9]*|-[0-9]+)$";
+    let expected_validator_description = "Uses weak comparison; supports wildcard and comma-list members across repeated field-lines";
     for operation in ["get", "head"] {
-        let range = path[operation]["parameters"]
+        let parameters = path[operation]["parameters"]
             .as_sequence()
-            .expect("download parameters")
+            .expect("download parameters");
+        let range = parameters
             .iter()
             .find(|parameter| parameter["name"] == "Range")
             .expect("Range parameter");
@@ -32,6 +34,11 @@ fn download_contract_exposes_get_head_ranges_and_no_storage_internals() {
                 .expect("Range description")
                 .contains("one byte range field-line")
         );
+        let validator = parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "If-None-Match")
+            .expect("If-None-Match parameter");
+        assert_eq!(validator["description"], expected_validator_description);
     }
     for secret in ["storage_key", "storage path", "blob hash", "sha256"] {
         assert!(!rendered.to_ascii_lowercase().contains(secret));
