@@ -5,6 +5,7 @@ use crate::{
 };
 use axum::{
     Json, Router,
+    extract::rejection::QueryRejection,
     extract::{Extension, Path, Query, State},
     http::{HeaderValue, header::ETAG},
     response::{IntoResponse, Response},
@@ -80,11 +81,23 @@ async fn list_books(
     Extension(request_id): Extension<RequestId>,
     AuthenticatedActor(actor): AuthenticatedActor,
     Path(raw_library): Path<String>,
-    Query(query): Query<PageQuery>,
+    query: Result<Query<PageQuery>, QueryRejection>,
 ) -> Response {
     let library_id = match parse_library(&raw_library) {
         Ok(value) => value,
         Err(error) => return problem_response(&error, &context),
+    };
+    let Ok(Query(query)) = query else {
+        return problem_response(
+            &AppError::Invalid {
+                code: "invalid_page",
+                fields: vec![FieldViolation {
+                    field: "query",
+                    code: "invalid_query",
+                }],
+            },
+            &context,
+        );
     };
     match state
         .catalog_api

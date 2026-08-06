@@ -99,7 +99,7 @@ impl CatalogQueryRepository for PgCatalogRepository {
         .await
         .map_err(persistence)?;
         let rows = sqlx::query!(
-            r#"SELECT holding.holding_id AS "holding_id!",visible.item_id AS "item_id!",visible.package_id AS "package_id!",visible.manifestation_id AS "manifestation_id!",visible.primary_title AS "primary_title!" FROM folioharbor.holdings holding JOIN folioharbor.items item USING(holding_id) CROSS JOIN LATERAL folioharbor.catalog_item_visible($1,$2,item.item_id,$3) visible WHERE holding.library_id=$2 AND holding.state='active' AND item.state='active' AND ($4::uuid IS NULL OR holding.holding_id<$4) ORDER BY holding.holding_id DESC LIMIT $5"#,
+            r#"SELECT holding.holding_id AS "holding_id!",visible.item_id AS "item_id!",visible.package_id AS "package_id!",visible.manifestation_id AS "manifestation_id!",visible.primary_title AS "primary_title!" FROM folioharbor.holdings holding CROSS JOIN LATERAL (SELECT candidate.item_id FROM folioharbor.items candidate WHERE candidate.holding_id=holding.holding_id AND candidate.state='active' ORDER BY candidate.item_id DESC LIMIT 1) selected CROSS JOIN LATERAL folioharbor.catalog_item_visible($1,$2,selected.item_id,$3) visible WHERE holding.library_id=$2 AND holding.state='active' AND ($4::uuid IS NULL OR holding.holding_id<$4) ORDER BY holding.holding_id DESC LIMIT $5"#,
             grant.actor().as_uuid(),
             library_id.as_uuid(),
             grant.membership_version(),

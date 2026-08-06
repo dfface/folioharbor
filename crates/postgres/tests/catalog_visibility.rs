@@ -236,6 +236,79 @@ async fn visible_holding_keyset_is_stable_when_a_newer_item_is_inserted() -> any
     Ok(())
 }
 
+#[tokio::test]
+async fn catalog_returns_one_deterministic_item_per_holding_even_if_active_item_uniqueness_is_relaxed()
+-> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let now = OffsetDateTime::now_utc();
+    let actor = UserId::new();
+    let library = LibraryId::new();
+    sqlx::query("INSERT INTO folioharbor.user_accounts(user_id,normalized_email,display_email,status,created_at,verified_at) VALUES($1,'duplicate@test.invalid','duplicate@test.invalid','verified',$2,$2)")
+        .bind(actor.as_uuid()).bind(now).execute(&pools.owner).await?;
+    sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,created_at,updated_at) VALUES($1,'Duplicate',$2,$2)")
+        .bind(library.as_uuid()).bind(now).execute(&pools.owner).await?;
+    sqlx::query("INSERT INTO folioharbor.library_memberships(library_id,user_id,role_code,status,joined_at) VALUES($1,$2,'reader','active',$3)")
+        .bind(library.as_uuid()).bind(actor.as_uuid()).bind(now).execute(&pools.owner).await?;
+    let (_, package, manifestation, _, holding) =
+        seed_named_item(&pools.owner, library, actor, now, 31, "One Holding").await?;
+    sqlx::query("DROP INDEX folioharbor.items_one_active_per_holding")
+        .execute(&pools.owner)
+        .await?;
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let selected = insert_additional_active_item(
+        &pools.owner,
+        library,
+        actor,
+        package,
+        manifestation,
+        holding,
+        now,
+    )
+    .await?;
+    let grant = Authorization::new(&PgAuthorizationRepository::new(pools.api.clone()))
+        .require(actor, Action::ViewLibrary, ResourceRef::Library(library))
+        .await?;
+    let rows = PgCatalogRepository::new(pools.api.clone())
+        .list_visible_items(grant, library, None, 10, RequestId::new())
+        .await?;
+    assert_eq!(rows.len(), 1, "a Holding is the list row boundary");
+    assert_eq!(
+        rows[0].item_id, selected,
+        "highest Item UUID wins deterministically"
+    );
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+async fn insert_additional_active_item(
+    pool: &PgPool,
+    library: LibraryId,
+    actor: UserId,
+    package: PublicationPackageId,
+    manifestation: ManifestationId,
+    holding: HoldingId,
+    now: OffsetDateTime,
+) -> anyhow::Result<ItemId> {
+    let upload = UploadId::new();
+    let item = ItemId::new();
+    let sha = vec![32_u8; 32];
+    sqlx::query("INSERT INTO folioharbor.upload_sessions(upload_id,library_id,created_by,file_name,media_type,declared_bytes,dedup_scope,received_bytes,state,storage_key,sha256,expires_at,created_at,updated_at) VALUES($1,$2,$3,'second.epub','application/epub+zip',1,'instance',1,'ready',$4,$5,$6,$6,$6)")
+        .bind(upload.as_uuid()).bind(library.as_uuid()).bind(actor.as_uuid())
+        .bind(format!("blob:instance-v1:{}:1", "20".repeat(32))).bind(sha).bind(now).execute(pool).await?;
+    sqlx::query("INSERT INTO folioharbor.items(item_id,holding_id,manifestation_id,package_id,source_upload_id,state,created_at) VALUES($1,$2,$3,$4,$5,'active',$6)")
+        .bind(item.as_uuid()).bind(holding.as_uuid()).bind(manifestation.as_uuid())
+        .bind(package.as_uuid()).bind(upload.as_uuid()).bind(now).execute(pool).await?;
+    Ok(item)
+}
+
 async fn seed_named_item(
     pool: &PgPool,
     library: LibraryId,
@@ -243,7 +316,13 @@ async fn seed_named_item(
     now: OffsetDateTime,
     seed: u8,
     title: &str,
-) -> anyhow::Result<(ItemId, PublicationPackageId, ManifestationId, BlobId)> {
+) -> anyhow::Result<(
+    ItemId,
+    PublicationPackageId,
+    ManifestationId,
+    BlobId,
+    HoldingId,
+)> {
     let work = WorkId::new();
     let expression = ExpressionId::new();
     let manifestation = ManifestationId::new();
@@ -264,5 +343,5 @@ async fn seed_named_item(
     sqlx::query("INSERT INTO folioharbor.publication_packages(package_id,manifestation_id,blob_id,parser_profile_version,created_at) VALUES($1,$2,$3,'epub-v1',$4)").bind(package.as_uuid()).bind(manifestation.as_uuid()).bind(blob.as_uuid()).bind(now).execute(pool).await?;
     sqlx::query("INSERT INTO folioharbor.holdings(holding_id,library_id,manifestation_id,state,created_at) VALUES($1,$2,$3,'active',$4)").bind(holding.as_uuid()).bind(library.as_uuid()).bind(manifestation.as_uuid()).bind(now).execute(pool).await?;
     sqlx::query("INSERT INTO folioharbor.items(item_id,holding_id,manifestation_id,package_id,source_upload_id,state,created_at) VALUES($1,$2,$3,$4,$5,'active',$6)").bind(item.as_uuid()).bind(holding.as_uuid()).bind(manifestation.as_uuid()).bind(package.as_uuid()).bind(upload.as_uuid()).bind(now).execute(pool).await?;
-    Ok((item, package, manifestation, blob))
+    Ok((item, package, manifestation, blob, holding))
 }

@@ -747,14 +747,30 @@ git commit -m "feat: process EPUB imports with an idempotent worker saga"
 - Create: `crates/application/src/catalog/{list_library_books,get_item}.rs`
 - Create: `crates/http/src/routes/catalog.rs`
 - Create: `crates/http/tests/catalog_routes.rs`
+- Create: `crates/application/tests/catalog_queries.rs`
 - Modify: `crates/postgres/src/catalog.rs`
+- Modify: `crates/postgres/tests/catalog_visibility.rs`
+- Modify: `crates/application/src/{authorization.rs,catalog/mod.rs,ports/catalog_repository.rs}`
+- Modify: `crates/http/src/routes/mod.rs`
+- Modify: `crates/http/tests/openapi_contract.rs`
+- Modify: `apps/api/src/{lib.rs,main.rs}`
+- Modify: `apps/api/tests/upload_composition.rs`
+- Modify: `Cargo.lock`, `crates/application/Cargo.toml`, and `.sqlx/`
 - Modify: `openapi/folioharbor-v1.yaml`
 
 **Interfaces:**
 
-- Produces `ListLibraryBooks::execute(actor, library_id, PageRequest) -> Page<BookSummary>`.
-- Produces `GetItem::execute(actor, library_id, item_id) -> ItemDetail`.
+- Produces `ListLibraryBooks::execute(actor, library_id, request_id, PageRequest) -> Page<BookSummary>`.
+- Produces `GetItem::execute(actor, library_id, item_id, request_id) -> ItemDetail`.
 - Produces `GET /api/v1/libraries/{library_id}/books` and `GET /api/v1/libraries/{library_id}/items/{item_id}`.
+
+**Task 13 interface amendment (2026-08-06):** `RequestId` is an explicit use-case
+input so every PostgreSQL transaction and HTTP problem response carries the request correlation
+established by middleware. The additional application/HTTP module files expose the new ports and
+compose the routes without transport leakage; the API composition files prove production wiring;
+the real PostgreSQL, HTTP, OpenAPI, and SQLx metadata files govern authorization, pagination,
+query-count, and checked-query behavior. These are Task 13 integration boundaries, not Task 14
+reader/resource work. Migration `0010_catalog.sql` remains unchanged.
 
 - [ ] **Step 1: Write failing list/detail tests**
 

@@ -19,6 +19,11 @@ use folioharbor_domain::{
 
 struct Authorized(RoleCode);
 
+struct VersionedAuthorized {
+    role: RoleCode,
+    membership_version: i64,
+}
+
 #[async_trait]
 impl AuthorizationRepository for Authorized {
     async fn resolve(
@@ -31,6 +36,24 @@ impl AuthorizationRepository for Authorized {
             library_id: resource.library_id(),
             role: self.0,
             membership_version: 4,
+            discoverable: true,
+            permitted: true,
+        }))
+    }
+}
+
+#[async_trait]
+impl AuthorizationRepository for VersionedAuthorized {
+    async fn resolve(
+        &self,
+        _: UserId,
+        _: Action,
+        resource: ResourceRef,
+    ) -> Result<Option<AuthorizationFact>, AuthorizationRepositoryError> {
+        Ok(Some(AuthorizationFact {
+            library_id: resource.library_id(),
+            role: self.role,
+            membership_version: self.membership_version,
             discoverable: true,
             permitted: true,
         }))
@@ -190,5 +213,44 @@ async fn detail_keeps_read_and_download_capabilities_independent_for_reader_sett
         assert_eq!(detail.can_download, expected);
         assert_eq!(detail.primary_title, "Visible title");
         assert!(!detail.etag.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn detail_etag_covers_role_membership_version_and_effective_capabilities() {
+    let row = item("ETag inputs");
+    let mut etags = std::collections::HashSet::new();
+    for (role, membership_version, reader_download_enabled) in [
+        (RoleCode::Owner, 4, false),
+        (RoleCode::Editor, 4, false),
+        (RoleCode::Reader, 4, false),
+        (RoleCode::Reader, 4, true),
+        (RoleCode::Reader, 5, true),
+    ] {
+        let repository = CatalogRows {
+            rows: vec![row.clone()],
+            requested_limits: Arc::new(Mutex::new(Vec::new())),
+        };
+        let service = CatalogService::new(
+            repository,
+            VersionedAuthorized {
+                role,
+                membership_version,
+            },
+            reader_download_enabled,
+        );
+        let detail = service
+            .get_item(
+                UserId::new(),
+                LibraryId::new(),
+                row.item_id,
+                RequestId::new(),
+            )
+            .await
+            .expect("visible detail");
+        assert!(
+            etags.insert(detail.etag),
+            "every response-affecting authorization input needs a distinct validator"
+        );
     }
 }

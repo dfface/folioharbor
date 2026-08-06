@@ -70,6 +70,7 @@ impl<R: CatalogQueryRepository + ?Sized, A: AuthorizationRepository + ?Sized> Ge
             })?;
         Ok(detail(
             row,
+            grant.role(),
             grant.membership_version(),
             capabilities(grant.role(), self.reader_download_enabled),
             self.reader_download_enabled,
@@ -79,13 +80,17 @@ impl<R: CatalogQueryRepository + ?Sized, A: AuthorizationRepository + ?Sized> Ge
 
 fn detail(
     row: VisibleCatalogItem,
+    role: folioharbor_domain::libraries::role::RoleCode,
     membership_version: i64,
     (can_read, can_download): (bool, bool),
     reader_download_enabled: bool,
 ) -> ItemDetail {
     let etag = format!(
-        "W/\"item-{}-m{membership_version}-d{}\"",
+        "W/\"item-{}-r{}-m{membership_version}-c{}{}-d{}\"",
         row.item_id.as_uuid(),
+        role.as_str(),
+        u8::from(can_read),
+        u8::from(can_download),
         u8::from(reader_download_enabled)
     );
     ItemDetail {

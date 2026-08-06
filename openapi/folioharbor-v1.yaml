@@ -232,7 +232,7 @@ paths:
         '200':
           description: One display-ready row per visible library Holding
           content: {application/json: {schema: {$ref: '#/components/schemas/BookPage'}}}
-        '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
+        '400': {$ref: '#/components/responses/InvalidIdentifierProblem'}
         '401': {$ref: '#/components/responses/Problem'}
         '404': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
@@ -251,7 +251,7 @@ paths:
           headers:
             ETag: {schema: {type: string}, description: Weak validator covering item and capability inputs}
           content: {application/json: {schema: {$ref: '#/components/schemas/ItemDetail'}}}
-        '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
+        '400': {$ref: '#/components/responses/InvalidIdentifierProblem'}
         '401': {$ref: '#/components/responses/Problem'}
         '404': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
@@ -337,6 +337,12 @@ components:
         application/problem+json:
           schema: {$ref: '#/components/schemas/ProblemDetails'}
           example: {type: 'https://library.example/problems/invalid-session-id', title: Invalid path parameter, status: 400, detail: The session_id path parameter must be a UUID., instance: /problems/01JREQ00000000000000000000, code: invalid_session_id, request_id: 01JREQ00000000000000000000}
+    InvalidIdentifierProblem:
+      description: A malformed UUID was supplied for a catalog path parameter; the use case is not invoked
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/ProblemDetails'}
+          example: {type: 'https://library.example/problems/invalid-identifier', title: Invalid path parameter, status: 400, detail: The catalog path parameter must be a UUID., instance: /problems/01JREQ00000000000000000000, code: invalid_identifier, request_id: 01JREQ00000000000000000000}
     RegistrationAccepted:
       description: Registration accepted without account enumeration
       content:

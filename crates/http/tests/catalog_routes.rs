@@ -5,7 +5,10 @@ use std::{collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use axum::{
     body::Body,
-    http::{Request, StatusCode, header::ETAG},
+    http::{
+        Request, StatusCode,
+        header::{CONTENT_TYPE, ETAG},
+    },
 };
 use folioharbor_application::{
     actor::Actor,
@@ -296,6 +299,7 @@ async fn routes_return_safe_catalog_projections_etag_and_anti_enumerating_proble
     );
 
     let hidden = app
+        .clone()
         .oneshot(request(
             &format!("/api/v1/libraries/{}/books", library.as_uuid()),
             "outsider",
@@ -307,6 +311,34 @@ async fn routes_return_safe_catalog_projections_etag_and_anti_enumerating_proble
     let hidden_json: serde_json::Value = serde_json::from_slice(&hidden_body).expect("problem");
     assert_eq!(hidden_json["code"], "library_not_found");
     assert!(hidden_json.get("total").is_none());
+
+    let malformed = app
+        .oneshot(request(
+            &format!("/api/v1/libraries/{}/books?limit=abc", library.as_uuid()),
+            "allowed",
+        ))
+        .await
+        .expect("response");
+    assert_eq!(malformed.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        malformed
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/problem+json")
+    );
+    let problem: serde_json::Value = serde_json::from_slice(
+        &malformed
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes(),
+    )
+    .expect("problem JSON");
+    assert_eq!(problem["code"], "invalid_page");
+    let request_id = problem["request_id"].as_str().expect("request ID");
+    assert_eq!(problem["instance"], format!("/problems/{request_id}"));
 }
 
 #[test]
@@ -322,6 +354,17 @@ fn openapi_documents_opaque_pagination_capabilities_etag_and_problems() {
             .is_some_and(|text| text.contains("opaque"))
     );
     assert!(detail["responses"]["200"]["headers"]["ETag"].is_mapping());
+    for operation in [list, detail] {
+        assert_eq!(
+            operation["responses"]["400"]["$ref"],
+            "#/components/responses/InvalidIdentifierProblem"
+        );
+    }
+    assert_eq!(
+        document["components"]["responses"]["InvalidIdentifierProblem"]["content"]["application/problem+json"]
+            ["example"]["code"],
+        "invalid_identifier"
+    );
     for operation in [list, detail] {
         for status in ["401", "404", "503"] {
             assert!(

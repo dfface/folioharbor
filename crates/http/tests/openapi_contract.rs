@@ -154,7 +154,10 @@ fn openapi_uuid_path_parameters_document_correlated_malformed_value_problems() {
                 &document["components"]["schemas"]["ProblemDetails"]
             );
             assert_eq!(media["example"]["status"], 400);
-            assert_eq!(media["example"]["code"], "invalid_session_id");
+            assert!(matches!(
+                media["example"]["code"].as_str(),
+                Some("invalid_session_id" | "invalid_identifier")
+            ));
             assert!(media["example"]["request_id"].as_str().is_some());
             assert!(
                 response["description"]
