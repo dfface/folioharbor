@@ -1,0 +1,65 @@
+{
+  "app": {
+    "name": "FolioHarbor",
+    "loading": "Checking your session…",
+    "welcome": "Your reading harbor is ready.",
+    "language": "Language",
+    "english": "English",
+    "chinese": "简体中文"
+  },
+  "nav": {
+    "home": "Home",
+    "sessions": "Sessions",
+    "logout": "Log out"
+  },
+  "auth": {
+    "email": "Email",
+    "password": "Password",
+    "newPassword": "New password",
+    "verificationToken": "Verification token",
+    "resetToken": "Reset token",
+    "login": "Log in",
+    "register": "Create account",
+    "verifyEmail": "Verify email",
+    "forgotPassword": "Forgot password?",
+    "resetPassword": "Reset password",
+    "sendReset": "Send reset instructions",
+    "haveAccount": "Already have an account?",
+    "needAccount": "Need an account?",
+    "verificationRequired": "Verification required. Check your email, then verify your address.",
+    "emailVerified": "Email verified. You can now log in.",
+    "resetRequested": "If an account exists for that email, reset instructions will be sent.",
+    "submitting": "Submitting…"
+  },
+  "validation": {
+    "summary": "Please correct the fields below.",
+    "emailRequired": "Email is required.",
+    "passwordRequired": "Password is required.",
+    "tokenRequired": "Token is required."
+  },
+  "problems": {
+    "csrfFailed": "Your security token expired. Refresh the page and try again.",
+    "emailVerificationRequired": "Verification required. Check your email before logging in.",
+    "invalidRequest": "The request contains invalid information.",
+    "invalidResetToken": "This reset link is invalid or expired.",
+    "invalidVerificationToken": "This verification link is invalid or expired.",
+    "invalidPassword": "The password is not accepted.",
+    "invalidRegistration": "The registration details are not accepted.",
+    "rateLimited": "Too many attempts. Please try again later.",
+    "sessionNotFound": "That session is no longer active.",
+    "unauthenticated": "Log in to continue.",
+    "unknown": "The request could not be completed. Request ID: {{requestId}}"
+  },
+  "sessions": {
+    "title": "Account sessions",
+    "current": "Current session",
+    "active": "Active",
+    "idle_expired": "Idle expired",
+    "absolute_expired": "Expired",
+    "revoked": "Revoked",
+    "revoke": "Revoke {{sessionId}}",
+    "revokeAll": "Revoke all sessions",
+    "revokedOne": "Session revoked.",
+    "empty": "No sessions found."
+  }
+}

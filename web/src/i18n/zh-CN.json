@@ -1,0 +1,65 @@
+{
+  "app": {
+    "name": "FolioHarbor",
+    "loading": "正在检查会话…",
+    "welcome": "你的阅读港湾已准备就绪。",
+    "language": "语言",
+    "english": "English",
+    "chinese": "简体中文"
+  },
+  "nav": {
+    "home": "首页",
+    "sessions": "会话",
+    "logout": "退出登录"
+  },
+  "auth": {
+    "email": "邮箱",
+    "password": "密码",
+    "newPassword": "新密码",
+    "verificationToken": "验证令牌",
+    "resetToken": "重置令牌",
+    "login": "登录",
+    "register": "创建账户",
+    "verifyEmail": "验证邮箱",
+    "forgotPassword": "忘记密码？",
+    "resetPassword": "重置密码",
+    "sendReset": "发送重置说明",
+    "haveAccount": "已有账户？",
+    "needAccount": "需要账户？",
+    "verificationRequired": "需要验证。请检查邮箱并验证你的地址。",
+    "emailVerified": "邮箱已验证，现在可以登录。",
+    "resetRequested": "如果该邮箱对应账户，我们会发送重置说明。",
+    "submitting": "正在提交…"
+  },
+  "validation": {
+    "summary": "请更正以下字段。",
+    "emailRequired": "请输入邮箱。",
+    "passwordRequired": "请输入密码。",
+    "tokenRequired": "请输入令牌。"
+  },
+  "problems": {
+    "csrfFailed": "安全令牌已过期，请刷新页面后重试。",
+    "emailVerificationRequired": "请先验证邮箱，再登录。",
+    "invalidRequest": "请求中包含无效信息。",
+    "invalidResetToken": "该重置链接无效或已过期。",
+    "invalidVerificationToken": "该验证链接无效或已过期。",
+    "invalidPassword": "密码不符合要求。",
+    "invalidRegistration": "注册信息不符合要求。",
+    "rateLimited": "尝试次数过多，请稍后再试。",
+    "sessionNotFound": "该会话已失效。",
+    "unauthenticated": "请登录后继续。",
+    "unknown": "请求无法完成。请求 ID：{{requestId}}"
+  },
+  "sessions": {
+    "title": "账户会话",
+    "current": "当前会话",
+    "active": "活跃",
+    "idle_expired": "空闲过期",
+    "absolute_expired": "已过期",
+    "revoked": "已撤销",
+    "revoke": "撤销 {{sessionId}}",
+    "revokeAll": "撤销全部会话",
+    "revokedOne": "会话已撤销。",
+    "empty": "没有会话。"
+  }
+}

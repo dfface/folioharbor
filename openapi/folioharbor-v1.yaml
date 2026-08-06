@@ -810,3 +810,14 @@ components:
         instance: {type: string}
         code: {type: string, examples: [malformed_json, invalid_json_body, unsupported_media_type, invalid_session_id, unauthenticated, csrf_failed, rate_limited, session_not_found]}
         request_id: {type: string, description: ULID request identifier}
+        fields:
+          type: array
+          description: Stable field/code pairs for invalid requests; display text remains client-localized
+          items: {$ref: '#/components/schemas/ProblemFieldViolation'}
+    ProblemFieldViolation:
+      type: object
+      additionalProperties: false
+      required: [field, code]
+      properties:
+        field: {type: string}
+        code: {type: string}

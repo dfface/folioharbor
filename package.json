@@ -1,0 +1,9 @@
+{
+  "name": "folioharbor",
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "web:generate-api": "pnpm --dir web generate-api",
+    "web:check-generated-api": "pnpm web:generate-api && git diff --exit-code -- web/src/api/generated.ts"
+  }
+}
