@@ -57,3 +57,17 @@ Review-fix verification:
 - `cargo fmt --all --check`: pass.
 - `git diff --check`: pass.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass.
+
+## Re-review fixes
+
+Both P1 findings in `task-18-rereview.md` were addressed with focused RED/GREEN regressions:
+
+- Multi-library batching: a real shared-Blob, two-library regression initially failed with `garbage collection persistence failed` after PostgreSQL detected the retained-lock deadlock. Preparation now commits at most one candidate per transaction while preserving the caller's total requested limit, releasing each Library/Blob lock set before selecting the next item.
+- Re-import revival: real reconciliation against a matching purged content-addressed location initially failed with `import persistence is temporarily unavailable`. Ready and quarantined transitions now clear every purge lifecycle timestamp and lease field; the migration 0025 trigger also enforces that reset for upgraded schemas whose migration 0010 function already existed.
+
+Re-review verification:
+
+- `FOLIOHARBOR_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55432/postgres cargo test -p folioharbor-postgres --test blob_gc --test import_cleanup --test migration_from_zero --test catalog_constraints`: pass (9 + 5 + 2 + 11 tests).
+- `cargo fmt --all --check`: pass.
+- `git diff --check`: pass.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: pass.

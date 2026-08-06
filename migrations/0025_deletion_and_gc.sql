@@ -109,7 +109,14 @@ CREATE INDEX blob_locations_purge_batch_idx
 CREATE FUNCTION folioharbor.blob_location_fill_legacy_purge_timestamps()
 RETURNS trigger LANGUAGE plpgsql SET search_path TO '' AS $$
 BEGIN
-  IF NEW.state='purged' AND NEW.purged_at IS NULL THEN
+  IF NEW.state IN ('ready','quarantined') THEN
+    NEW.purge_pending_at:=NULL;
+    NEW.purge_after:=NULL;
+    NEW.purged_at:=NULL;
+    NEW.purge_lease_owner:=NULL;
+    NEW.purge_lease_token:=NULL;
+    NEW.purge_lease_expires_at:=NULL;
+  ELSIF NEW.state='purged' AND NEW.purged_at IS NULL THEN
     NEW.purge_after:=COALESCE(NEW.purge_after,NEW.updated_at);
     NEW.purge_pending_at:=COALESCE(
       NEW.purge_pending_at,NEW.purge_after-interval '24 hours'

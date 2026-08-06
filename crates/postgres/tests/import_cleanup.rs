@@ -15,6 +15,99 @@ use folioharbor_postgres::{
 use folioharbor_test_support::postgres::TestPostgres;
 use time::Duration;
 
+#[derive(sqlx::FromRow)]
+struct LocationLifecycleRow {
+    state: String,
+    purge_pending_at: Option<OffsetDateTime>,
+    purge_after: Option<OffsetDateTime>,
+    purged_at: Option<OffsetDateTime>,
+    purge_lease_owner: Option<String>,
+    purge_lease_token: Option<uuid::Uuid>,
+    purge_lease_expires_at: Option<OffsetDateTime>,
+}
+
+#[tokio::test]
+async fn reconcile_revives_a_purged_content_addressed_location() -> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
+    let actor = UserId::new();
+    let library = LibraryId::new();
+    let upload = UploadId::new();
+    let blob = BlobId::new();
+    let digest = vec![0x66_u8; 32];
+    let storage_key = format!("blob:instance-v1:{}:61", "66".repeat(32));
+    sqlx::query("INSERT INTO folioharbor.user_accounts(user_id,normalized_email,display_email,status,created_at,verified_at) VALUES($1,$2,$2,'verified',$3,$3)")
+        .bind(actor.as_uuid())
+        .bind(format!("{}@revive.test", actor.as_uuid()))
+        .bind(now)
+        .execute(&pools.owner)
+        .await?;
+    sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,quota_reserved_bytes,created_at,updated_at) VALUES($1,'Revive',61,$2,$2)")
+        .bind(library.as_uuid())
+        .bind(now)
+        .execute(&pools.owner)
+        .await?;
+    sqlx::query("INSERT INTO folioharbor.blobs(blob_id,storage_namespace,sha256,byte_size,created_at) VALUES($1,'instance-v1',$2,61,$3)")
+        .bind(blob.as_uuid())
+        .bind(&digest)
+        .bind(now - Duration::days(2))
+        .execute(&pools.owner)
+        .await?;
+    sqlx::query("INSERT INTO folioharbor.blob_locations(blob_id,storage_key,state,created_at,updated_at,purge_pending_at,purge_after,purged_at) VALUES($1,$2,'purged',$3,$4,$3,$4,$4)")
+        .bind(blob.as_uuid())
+        .bind(&storage_key)
+        .bind(now - Duration::days(2))
+        .bind(now - Duration::days(1))
+        .execute(&pools.owner)
+        .await?;
+    sqlx::query("INSERT INTO folioharbor.upload_sessions(upload_id,library_id,created_by,file_name,media_type,declared_bytes,received_bytes,state,dedup_scope,storage_key,sha256,expires_at,created_at,updated_at) VALUES($1,$2,$3,'same.epub','application/epub+zip',61,61,'validating','instance',$4,$5,$6,$7,$7)")
+        .bind(upload.as_uuid())
+        .bind(library.as_uuid())
+        .bind(actor.as_uuid())
+        .bind(&storage_key)
+        .bind(&digest)
+        .bind(now + Duration::hours(1))
+        .bind(now)
+        .execute(&pools.owner)
+        .await?;
+    sqlx::query("INSERT INTO folioharbor.quota_reservations(upload_id,library_id,reserved_bytes,expires_at,state) VALUES($1,$2,61,$3,'active')")
+        .bind(upload.as_uuid())
+        .bind(library.as_uuid())
+        .bind(now + Duration::hours(1))
+        .execute(&pools.owner)
+        .await?;
+
+    let reconciled = PgImportRepository::new(pools.worker.clone())
+        .reconcile(upload, library, RequestId::new(), now)
+        .await?;
+    assert!(
+        matches!(reconciled, ImportReconciliation::Work(ref work) if work.blob_id == blob),
+        "re-import reuses the content-addressed Blob"
+    );
+    let location: LocationLifecycleRow = sqlx::query_as("SELECT state,purge_pending_at,purge_after,purged_at,purge_lease_owner,purge_lease_token,purge_lease_expires_at FROM folioharbor.blob_locations WHERE blob_id=$1")
+        .bind(blob.as_uuid())
+        .fetch_one(&pools.owner)
+        .await?;
+    assert_eq!(location.state, "ready");
+    assert!(location.purge_pending_at.is_none());
+    assert!(location.purge_after.is_none());
+    assert!(location.purged_at.is_none());
+    assert!(location.purge_lease_owner.is_none());
+    assert!(location.purge_lease_token.is_none());
+    assert!(location.purge_lease_expires_at.is_none());
+
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn cleanup_is_bounded_skip_locked_and_persists_its_time_boundary() -> anyhow::Result<()> {
     let database = TestPostgres::provision().await?;

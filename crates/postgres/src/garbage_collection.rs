@@ -206,19 +206,27 @@ impl GarbageCollectionRepository for PgGarbageCollectionRepository {
         now: OffsetDateTime,
         limit: u32,
     ) -> Result<u64, GarbageCollectionRepositoryError> {
-        let mut transaction = self.worker_transaction().await?;
-        let processed: i64 =
-            sqlx::query_scalar("SELECT folioharbor.gc_prepare_items_worker($1,$2)")
-                .bind(now)
-                .bind(i64::from(limit))
-                .fetch_one(&mut *transaction)
+        let mut processed = 0_u64;
+        for _ in 0..limit {
+            let mut transaction = self.worker_transaction().await?;
+            let advanced: i64 =
+                sqlx::query_scalar("SELECT folioharbor.gc_prepare_items_worker($1,1)")
+                    .bind(now)
+                    .fetch_one(&mut *transaction)
+                    .await
+                    .map_err(|_| GarbageCollectionRepositoryError)?;
+            transaction
+                .commit()
                 .await
                 .map_err(|_| GarbageCollectionRepositoryError)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| GarbageCollectionRepositoryError)?;
-        u64::try_from(processed).map_err(|_| GarbageCollectionRepositoryError)
+            if advanced == 0 {
+                break;
+            }
+            processed = processed
+                .checked_add(u64::try_from(advanced).map_err(|_| GarbageCollectionRepositoryError)?)
+                .ok_or(GarbageCollectionRepositoryError)?;
+        }
+        Ok(processed)
     }
 
     async fn claim(

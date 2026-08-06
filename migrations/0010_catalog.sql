@@ -352,7 +352,9 @@ BEGIN
        VALUES(p_upload,upload.storage_key,upload.dedup_scope='disabled',p_now+interval '24 hours',p_now,p_now)
        ON CONFLICT(upload_id) DO NOTHING;
       IF upload.dedup_scope='disabled' THEN
-       UPDATE folioharbor.blob_locations location SET state='quarantined',updated_at=p_now
+       UPDATE folioharbor.blob_locations location SET state='quarantined',updated_at=p_now,
+        purge_pending_at=NULL,purge_after=NULL,purged_at=NULL,purge_lease_owner=NULL,
+        purge_lease_token=NULL,purge_lease_expires_at=NULL
         WHERE location.storage_key=upload.storage_key;
       END IF;
       RETURN QUERY SELECT 'failed'::text,upload.created_by,NULL::uuid,upload.received_bytes,
@@ -384,7 +386,9 @@ BEGIN
     IF resolved_blob IS NULL THEN RETURN; END IF;
     INSERT INTO folioharbor.blob_locations(blob_id,storage_key,state,created_at,updated_at)
       VALUES(resolved_blob,upload.storage_key,'ready',p_now,p_now)
-      ON CONFLICT ON CONSTRAINT blob_locations_storage_key_key DO UPDATE SET state='ready',updated_at=p_now
+      ON CONFLICT ON CONSTRAINT blob_locations_storage_key_key DO UPDATE SET state='ready',
+        updated_at=p_now,purge_pending_at=NULL,purge_after=NULL,purged_at=NULL,
+        purge_lease_owner=NULL,purge_lease_token=NULL,purge_lease_expires_at=NULL
       WHERE folioharbor.blob_locations.blob_id=EXCLUDED.blob_id;
     IF NOT FOUND THEN RETURN; END IF;
     RETURN QUERY SELECT 'work'::text,upload.created_by,resolved_blob,upload.received_bytes,

@@ -474,6 +474,68 @@ async fn gc_and_catalog_import_follow_library_then_blob_lock_order() -> anyhow::
     finish(database, pools).await
 }
 
+#[tokio::test]
+async fn multi_library_gc_batch_does_not_retain_blob_before_a_later_library_lock()
+-> anyhow::Result<()> {
+    let (database, pools) = database().await?;
+    let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
+    let first = seed_item(&pools, now - Duration::days(8), 59).await?;
+    let second = seed_shared_item(&pools, &first, now - Duration::days(8), 59).await?;
+    mark_deleted(
+        &pools,
+        &first,
+        now - Duration::days(7) - Duration::seconds(1),
+    )
+    .await?;
+    mark_deleted(&pools, &second, now - Duration::days(7)).await?;
+    let upload = seed_import(&pools, &second, 59, now).await?;
+    let request = RequestId::new();
+    let mut import_transaction = pools.worker.begin().await?;
+    PgTransactionContext::apply(
+        &mut import_transaction,
+        &DatabaseContext::worker(request, Some(second.library)),
+    )
+    .await?;
+    let quota_lock: String = sqlx::query_scalar("SELECT folioharbor.quota_resize($1,$2,$3)")
+        .bind(second.library.as_uuid())
+        .bind(upload.as_uuid())
+        .bind(59_i64)
+        .fetch_one(&mut *import_transaction)
+        .await?;
+    assert_eq!(quota_lock, "applied");
+
+    let gc_pool = connect_worker(&SecretString::from(database.worker_url()?)).await?;
+    let garbage = PgGarbageCollectionRepository::new(gc_pool.clone());
+    let gc = tokio::spawn(async move { garbage.prepare(now, 10).await });
+    sleep(TokioDuration::from_millis(100)).await;
+    assert!(
+        !gc.is_finished(),
+        "GC reaches the later candidate's locked Library"
+    );
+    let library = second.library;
+    let actor = second.actor;
+    let blob = second.blob;
+    let importing = tokio::spawn(async move {
+        let valid: bool =
+            sqlx::query_scalar("SELECT folioharbor.catalog_validate_import($1,$2,$3,$4,$5,$6)")
+                .bind(library.as_uuid())
+                .bind(upload.as_uuid())
+                .bind(actor.as_uuid())
+                .bind(blob.as_uuid())
+                .bind(59_i64)
+                .bind(request.as_ulid().to_string())
+                .fetch_one(&mut *import_transaction)
+                .await?;
+        import_transaction.commit().await?;
+        anyhow::Ok(valid)
+    });
+    assert!(timeout(TokioDuration::from_secs(3), importing).await???);
+    assert_eq!(timeout(TokioDuration::from_secs(3), gc).await???, 2);
+    gc_pool.close().await;
+
+    finish(database, pools).await
+}
+
 async fn database() -> anyhow::Result<(TestPostgres, PgPools)> {
     let database = TestPostgres::provision().await?;
     let pools = PgPools::connect_for_tests(
