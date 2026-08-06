@@ -3,7 +3,8 @@ use async_trait::async_trait;
 use crate::{
     actor::Actor,
     error::AppError,
-    ports::{Clock, IdentityRepository, LibraryRepository, Mailer, PasswordHasher, RandomSource},
+    mail::MailIntentSealer,
+    ports::{Clock, IdentityRepository, LibraryRepository, PasswordHasher, RandomSource},
 };
 
 use super::{
@@ -132,8 +133,14 @@ impl<R, H, M, C, N, L> IdentityApi<R, H, M, C, N, L> {
 }
 
 #[async_trait]
-impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSource, L: Send + Sync>
-    RegisterAccountUseCase for IdentityApi<R, H, M, C, N, L>
+impl<
+    R: IdentityRepository,
+    H: PasswordHasher,
+    M: MailIntentSealer,
+    C: Clock,
+    N: RandomSource,
+    L: Send + Sync,
+> RegisterAccountUseCase for IdentityApi<R, H, M, C, N, L>
 {
     async fn register(&self, command: RegisterAccountCommand) -> Result<PendingAccount, AppError> {
         RegisterAccount::new(
@@ -148,8 +155,14 @@ impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSou
     }
 }
 #[async_trait]
-impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSource, L: Send + Sync>
-    VerifyEmailUseCase for IdentityApi<R, H, M, C, N, L>
+impl<
+    R: IdentityRepository,
+    H: PasswordHasher,
+    M: MailIntentSealer,
+    C: Clock,
+    N: RandomSource,
+    L: Send + Sync,
+> VerifyEmailUseCase for IdentityApi<R, H, M, C, N, L>
 {
     async fn verify_email(&self, command: VerifyEmailCommand) -> Result<VerifiedAccount, AppError> {
         VerifyEmail::new(&self.repository, &self.clock)
@@ -161,7 +174,7 @@ impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSou
 impl<
     R: IdentityRepository,
     H: PasswordHasher,
-    M: Mailer,
+    M: MailIntentSealer,
     C: Clock,
     N: RandomSource,
     L: LibraryRepository,
@@ -191,8 +204,14 @@ impl<
     }
 }
 #[async_trait]
-impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSource, L: Send + Sync>
-    LogoutUseCase for IdentityApi<R, H, M, C, N, L>
+impl<
+    R: IdentityRepository,
+    H: PasswordHasher,
+    M: MailIntentSealer,
+    C: Clock,
+    N: RandomSource,
+    L: Send + Sync,
+> LogoutUseCase for IdentityApi<R, H, M, C, N, L>
 {
     async fn logout(&self, command: LogoutCommand) -> Result<(), AppError> {
         Logout::new(&self.repository, &self.clock)
@@ -201,8 +220,14 @@ impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSou
     }
 }
 #[async_trait]
-impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSource, L: Send + Sync>
-    RequestPasswordResetUseCase for IdentityApi<R, H, M, C, N, L>
+impl<
+    R: IdentityRepository,
+    H: PasswordHasher,
+    M: MailIntentSealer,
+    C: Clock,
+    N: RandomSource,
+    L: Send + Sync,
+> RequestPasswordResetUseCase for IdentityApi<R, H, M, C, N, L>
 {
     async fn request_password_reset(
         &self,
@@ -214,8 +239,14 @@ impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSou
     }
 }
 #[async_trait]
-impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSource, L: Send + Sync>
-    CompletePasswordResetUseCase for IdentityApi<R, H, M, C, N, L>
+impl<
+    R: IdentityRepository,
+    H: PasswordHasher,
+    M: MailIntentSealer,
+    C: Clock,
+    N: RandomSource,
+    L: Send + Sync,
+> CompletePasswordResetUseCase for IdentityApi<R, H, M, C, N, L>
 {
     async fn complete_password_reset(
         &self,
@@ -232,8 +263,14 @@ impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSou
     }
 }
 #[async_trait]
-impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSource, L: Send + Sync>
-    AuthenticateSessionUseCase for IdentityApi<R, H, M, C, N, L>
+impl<
+    R: IdentityRepository,
+    H: PasswordHasher,
+    M: MailIntentSealer,
+    C: Clock,
+    N: RandomSource,
+    L: Send + Sync,
+> AuthenticateSessionUseCase for IdentityApi<R, H, M, C, N, L>
 {
     async fn authenticate_session(
         &self,
@@ -245,8 +282,14 @@ impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSou
     }
 }
 #[async_trait]
-impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSource, L: Send + Sync>
-    CurrentSessionUseCase for IdentityApi<R, H, M, C, N, L>
+impl<
+    R: IdentityRepository,
+    H: PasswordHasher,
+    M: MailIntentSealer,
+    C: Clock,
+    N: RandomSource,
+    L: Send + Sync,
+> CurrentSessionUseCase for IdentityApi<R, H, M, C, N, L>
 {
     async fn current_session(&self, actor: Actor) -> Result<SafeSession, AppError> {
         CurrentSession::new(&self.repository, &self.clock)
@@ -255,8 +298,14 @@ impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSou
     }
 }
 #[async_trait]
-impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSource, L: Send + Sync>
-    ListSessionsUseCase for IdentityApi<R, H, M, C, N, L>
+impl<
+    R: IdentityRepository,
+    H: PasswordHasher,
+    M: MailIntentSealer,
+    C: Clock,
+    N: RandomSource,
+    L: Send + Sync,
+> ListSessionsUseCase for IdentityApi<R, H, M, C, N, L>
 {
     async fn list_sessions(&self, actor: Actor) -> Result<Vec<SafeSession>, AppError> {
         ListSessions::new(&self.repository, &self.clock)
@@ -265,8 +314,14 @@ impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSou
     }
 }
 #[async_trait]
-impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSource, L: Send + Sync>
-    RevokeSessionUseCase for IdentityApi<R, H, M, C, N, L>
+impl<
+    R: IdentityRepository,
+    H: PasswordHasher,
+    M: MailIntentSealer,
+    C: Clock,
+    N: RandomSource,
+    L: Send + Sync,
+> RevokeSessionUseCase for IdentityApi<R, H, M, C, N, L>
 {
     async fn revoke_session(
         &self,

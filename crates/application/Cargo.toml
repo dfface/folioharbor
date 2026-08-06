@@ -26,6 +26,7 @@ toml.workspace = true
 unicode-properties.workspace = true
 url.workspace = true
 uuid.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 folioharbor-test-support = { path = "../test-support", version = "0.1.0" }

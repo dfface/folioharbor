@@ -4,6 +4,8 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use url::Url;
 
+use folioharbor_domain::identity::NormalizedEmail;
+
 use super::{ConfigError, raw::RawStorage};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -255,6 +257,7 @@ pub struct AuthSettings {
 #[derive(Debug)]
 pub struct MailSettings {
     pub smtp_url: Option<SmtpUrl>,
+    pub from_address: NormalizedEmail,
     pub username: Option<SecretString>,
     pub password: Option<SecretString>,
 }

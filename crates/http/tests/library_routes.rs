@@ -20,12 +20,13 @@ use folioharbor_application::{
         RevokeSessionUseCase, SafeSession, VerifiedAccount, VerifyEmailCommand, VerifyEmailUseCase,
     },
     libraries::LibraryService,
-    ports::{LibraryInvitationContext, MailError, Mailer},
+    mail::{MailIntentSealer, MailMessage, MailOutboxError},
+    ports::NewMailOutboxEntry,
     rate_limit::{CheckRateLimit, RateLimitDecision, RateLimitUseCase},
 };
 use folioharbor_domain::{
     id::{LibraryId, SessionId, UserId},
-    identity::{CsrfToken, NormalizedEmail},
+    identity::CsrfToken,
 };
 use folioharbor_http::{AppState, router};
 use folioharbor_postgres::{
@@ -137,66 +138,51 @@ impl RateLimitUseCase for RouteAuth {
 }
 
 #[derive(Clone, Copy)]
-struct NoopMailer;
-#[async_trait]
-impl Mailer for NoopMailer {
-    async fn preflight_library_invitation(&self) -> Result<(), MailError> {
-        Ok(())
-    }
-
-    async fn send_verification(
+struct NoopSealer;
+impl MailIntentSealer for NoopSealer {
+    fn seal(
         &self,
-        _: &NormalizedEmail,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        Ok(())
-    }
-    async fn send_password_reset(
-        &self,
-        _: &NormalizedEmail,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        Ok(())
-    }
-    async fn send_library_invitation(
-        &self,
-        _: &NormalizedEmail,
-        _: LibraryInvitationContext,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        Ok(())
+        message: MailMessage,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<NewMailOutboxEntry, MailOutboxError> {
+        Ok(test_mail_entry(&message, now, expires_at))
     }
 }
 
 #[derive(Clone, Copy)]
-struct UnavailableMailer;
-#[async_trait]
-impl Mailer for UnavailableMailer {
-    async fn preflight_library_invitation(&self) -> Result<(), MailError> {
-        Err(MailError)
+struct UnavailableSealer;
+impl MailIntentSealer for UnavailableSealer {
+    fn seal(
+        &self,
+        _: MailMessage,
+        _: OffsetDateTime,
+        _: OffsetDateTime,
+    ) -> Result<NewMailOutboxEntry, MailOutboxError> {
+        Err(MailOutboxError::Encryption)
     }
+}
 
-    async fn send_verification(
-        &self,
-        _: &NormalizedEmail,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        Err(MailError)
-    }
-    async fn send_password_reset(
-        &self,
-        _: &NormalizedEmail,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        Err(MailError)
-    }
-    async fn send_library_invitation(
-        &self,
-        _: &NormalizedEmail,
-        _: LibraryInvitationContext,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        Err(MailError)
+fn test_mail_entry(
+    message: &MailMessage,
+    now: OffsetDateTime,
+    expires_at: OffsetDateTime,
+) -> NewMailOutboxEntry {
+    NewMailOutboxEntry {
+        mail_id: message.mail_id(),
+        recipient_account_id: message.recipient_account_id(),
+        delivery_address: message.recipient().as_str().to_owned(),
+        template_code: message.template().code(),
+        template_version: 1,
+        locale: message.locale().as_str(),
+        token_ciphertext: vec![1],
+        encryption_key_id: "test-key".to_owned(),
+        nonce: vec![0; 12],
+        idempotency_key: message.idempotency_key(),
+        invitation_library_id: message.invitation_library_id(),
+        invitation_role: message.invitation_role().map(str::to_owned),
+        next_run_at: now,
+        expires_at,
     }
 }
 
@@ -297,7 +283,7 @@ async fn unavailable_invitation_delivery_returns_correlated_503_without_persiste
         PgLibraryRepository::new(pools.api.clone()),
         PgAuthorizationRepository::new(pools.api.clone()),
         PgAuditRepository::new(pools.api.clone()),
-        UnavailableMailer,
+        UnavailableSealer,
         FixedClock::new(now),
         FixedRandom::new(5),
     ));
@@ -400,7 +386,7 @@ async fn concrete_routes_enforce_role_matrix_and_correlate_denial_audits() -> an
         PgLibraryRepository::new(pools.api.clone()),
         PgAuthorizationRepository::new(pools.api.clone()),
         PgAuditRepository::new(pools.api.clone()),
-        NoopMailer,
+        NoopSealer,
         FixedClock::new(now),
         FixedRandom::new(4),
     ));

@@ -6,6 +6,8 @@ use folioharbor_domain::{
 };
 use thiserror::Error;
 
+use super::NewMailOutboxEntry;
+
 #[derive(Debug, Error)]
 #[error("identity persistence failed")]
 pub struct IdentityRepositoryError;
@@ -80,6 +82,15 @@ pub trait IdentityRepository: Send + Sync {
         account: NewAccount,
     ) -> Result<RegisterOutcome, IdentityRepositoryError>;
 
+    /// Atomically persists a new account and its verification-mail intent.
+    async fn register_with_verification(
+        &self,
+        _account: NewAccount,
+        _mail: NewMailOutboxEntry,
+    ) -> Result<RegisterOutcome, IdentityRepositoryError> {
+        Err(IdentityRepositoryError)
+    }
+
     /// Atomically consumes one unexpired token and verifies its account.
     async fn verify_email(
         &self,
@@ -119,6 +130,26 @@ pub trait IdentityRepository: Send + Sync {
         created_at: OffsetDateTime,
         expires_at: OffsetDateTime,
     ) -> Result<bool, IdentityRepositoryError>;
+
+    /// Resolves only the account identifier needed to authenticate an encrypted mail intent.
+    async fn mail_recipient_account_id(
+        &self,
+        _email: &NormalizedEmail,
+    ) -> Result<Option<UserId>, IdentityRepositoryError> {
+        Err(IdentityRepositoryError)
+    }
+
+    /// Atomically persists a password-reset token and its delivery intent.
+    async fn issue_password_reset_with_mail(
+        &self,
+        _email: &NormalizedEmail,
+        _token_hash: TokenHash,
+        _created_at: OffsetDateTime,
+        _expires_at: OffsetDateTime,
+        _mail: NewMailOutboxEntry,
+    ) -> Result<bool, IdentityRepositoryError> {
+        Err(IdentityRepositoryError)
+    }
 
     /// Atomically consumes the token, replaces the password, and revokes all sessions.
     async fn reset_password(

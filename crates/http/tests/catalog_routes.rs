@@ -26,7 +26,8 @@ use folioharbor_application::{
         RevokeSessionUseCase, SafeSession, VerifiedAccount, VerifyEmailCommand, VerifyEmailUseCase,
     },
     libraries::LibraryService,
-    ports::{LibraryInvitationContext, MailError, Mailer},
+    mail::{MailIntentSealer, MailMessage, MailOutboxError},
+    ports::NewMailOutboxEntry,
     rate_limit::{CheckRateLimit, RateLimitDecision, RateLimitUseCase},
 };
 use folioharbor_domain::{
@@ -34,7 +35,7 @@ use folioharbor_domain::{
         BlobId, ExpressionId, HoldingId, ItemId, LibraryId, ManifestationId, PublicationPackageId,
         RequestId, SessionId, UploadId, UserId, WorkId,
     },
-    identity::{CsrfToken, NormalizedEmail},
+    identity::CsrfToken,
 };
 use folioharbor_http::{AppState, router};
 use folioharbor_postgres::{
@@ -52,34 +53,31 @@ use url::Url;
 
 struct Identity(HashMap<String, UserId>);
 #[derive(Clone, Copy)]
-struct NoopMailer;
+struct NoopSealer;
 
-#[async_trait]
-impl Mailer for NoopMailer {
-    async fn preflight_library_invitation(&self) -> Result<(), MailError> {
-        Ok(())
-    }
-    async fn send_verification(
+impl MailIntentSealer for NoopSealer {
+    fn seal(
         &self,
-        _: &NormalizedEmail,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        Ok(())
-    }
-    async fn send_password_reset(
-        &self,
-        _: &NormalizedEmail,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        Ok(())
-    }
-    async fn send_library_invitation(
-        &self,
-        _: &NormalizedEmail,
-        _: LibraryInvitationContext,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        Ok(())
+        message: MailMessage,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<NewMailOutboxEntry, MailOutboxError> {
+        Ok(NewMailOutboxEntry {
+            mail_id: message.mail_id(),
+            recipient_account_id: message.recipient_account_id(),
+            delivery_address: message.recipient().as_str().to_owned(),
+            template_code: message.template().code(),
+            template_version: 1,
+            locale: message.locale().as_str(),
+            token_ciphertext: vec![1],
+            encryption_key_id: "test-key".to_owned(),
+            nonce: vec![0; 12],
+            idempotency_key: message.idempotency_key(),
+            invitation_library_id: message.invitation_library_id(),
+            invitation_role: message.invitation_role().map(str::to_owned),
+            next_run_at: now,
+            expires_at,
+        })
     }
 }
 fn unused<T>() -> Result<T, AppError> {
@@ -304,7 +302,7 @@ fn production_state(
         PgLibraryRepository::new(pools.api.clone()),
         PgAuthorizationRepository::new(pools.api.clone()),
         PgAuditRepository::new(pools.api.clone()),
-        NoopMailer,
+        NoopSealer,
         FixedClock::new(now),
         FixedRandom::new(16),
     )))

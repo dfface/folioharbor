@@ -6,9 +6,8 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::{
     error::{AppError, FieldViolation},
-    ports::{
-        Clock, IdentityRepository, Mailer, PasswordHasher, PasswordResetSession, RandomSource,
-    },
+    mail::{Locale, MailIntentSealer, MailMessage, MailTemplate},
+    ports::{Clock, IdentityRepository, PasswordHasher, PasswordResetSession, RandomSource},
 };
 
 use super::{RESET_LIFETIME, SESSION_ABSOLUTE_LIFETIME, SESSION_IDLE_LIFETIME, internal_error};
@@ -36,7 +35,7 @@ impl<'a, R, M, C, N> RequestPasswordReset<'a, R, M, C, N> {
         }
     }
 }
-impl<R: IdentityRepository, M: Mailer, C: Clock, N: RandomSource>
+impl<R: IdentityRepository, M: MailIntentSealer, C: Clock, N: RandomSource>
     RequestPasswordReset<'_, R, M, C, N>
 {
     /// Requests a password reset without revealing whether the account exists.
@@ -51,19 +50,39 @@ impl<R: IdentityRepository, M: Mailer, C: Clock, N: RandomSource>
         let Ok(email) = NormalizedEmail::parse(&command.email) else {
             return Ok(PasswordResetRequested);
         };
+        let recipient_account_id = self
+            .repository
+            .mail_recipient_account_id(&email)
+            .await
+            .map_err(|_| internal_error())?;
+        let authenticated_context_id = recipient_account_id.unwrap_or_else(UserId::new);
         let mut bytes = [0_u8; 32];
         self.random.fill(&mut bytes);
         let token = PasswordResetToken::from_random_bytes(bytes);
+        let token_hash = token.hash_for_storage();
         let now = self.clock.now();
+        let mail = self
+            .mailer
+            .seal(
+                MailMessage::new(
+                    Some(authenticated_context_id.as_uuid()),
+                    email.clone(),
+                    MailTemplate::PasswordReset,
+                    Locale::En,
+                    token.into_secret(),
+                ),
+                now,
+                now + RESET_LIFETIME,
+            )
+            .map_err(|_| internal_error())?;
+        if recipient_account_id.is_none() {
+            return Ok(PasswordResetRequested);
+        }
         let _issued = self
             .repository
-            .issue_password_reset(&email, token.hash_for_storage(), now, now + RESET_LIFETIME)
+            .issue_password_reset_with_mail(&email, token_hash, now, now + RESET_LIFETIME, mail)
             .await
             .map_err(|_| internal_error())?;
-        let _delivery = self
-            .mailer
-            .send_password_reset(&email, token.into_secret())
-            .await;
         Ok(PasswordResetRequested)
     }
 }

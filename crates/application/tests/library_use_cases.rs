@@ -5,23 +5,24 @@ use folioharbor_application::libraries::{
     InviteMember, InviteMemberCommand, ProvisionPersonalLibrary, ProvisionPersonalLibraryCommand,
     RemoveMember, RemoveMemberCommand, UpdateLibrarySettings, UpdateLibrarySettingsCommand,
 };
+use folioharbor_application::mail::{MailIntentSealer, MailOutboxError};
 use folioharbor_application::ports::{
     AcceptInvitationOutcome, AuthorizationRepository, AuthorizationRepositoryError,
-    LibraryInvitationContext, LibraryMutationOutcome, LibraryRepository, LibraryRepositoryError,
-    MailError, Mailer, NewLibraryInvitation, RandomSource,
+    LibraryMutationOutcome, LibraryRepository, LibraryRepositoryError, NewLibraryInvitation,
+    NewMailOutboxEntry, RandomSource,
 };
 use folioharbor_application::{
     audit::AuditEvent,
     authorization::{Action, AuthorizationFact, AuthorizationGrant, ResourceRef},
 };
 use folioharbor_domain::id::{LibraryId, RequestId, UserId};
-use folioharbor_domain::identity::{NormalizedEmail, SessionToken, TokenHash};
+use folioharbor_domain::identity::{SessionToken, TokenHash};
 use folioharbor_domain::libraries::Library;
 use folioharbor_domain::libraries::role::{PermissionCode, RoleCode};
 use folioharbor_domain::time::OffsetDateTime;
 use folioharbor_test_support::clock::FakeClock;
 use folioharbor_test_support::random::FixedRandom;
-use secrecy::{ExposeSecret as _, SecretString};
+use secrecy::SecretString;
 use std::sync::Mutex;
 
 #[test]
@@ -88,6 +89,7 @@ async fn personal_library_provisioning_is_idempotent() -> Result<(), Box<dyn std
 
 struct CommandRepository {
     invitation: Mutex<Option<NewLibraryInvitation>>,
+    mail: Mutex<Option<NewMailOutboxEntry>>,
     invitation_outcome: LibraryMutationOutcome,
     mutation_outcome: LibraryMutationOutcome,
     accepted_user: UserId,
@@ -99,6 +101,7 @@ impl CommandRepository {
     fn new(invitation_outcome: LibraryMutationOutcome) -> Self {
         Self {
             invitation: Mutex::new(None),
+            mail: Mutex::new(None),
             invitation_outcome,
             mutation_outcome: LibraryMutationOutcome::Applied,
             accepted_user: UserId::new(),
@@ -135,6 +138,26 @@ impl LibraryRepository for CommandRepository {
             .invitation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(invitation);
+        Ok(self.invitation_outcome)
+    }
+
+    async fn create_invitation_with_mail(
+        &self,
+        invitation: NewLibraryInvitation,
+        _: AuthorizationGrant,
+        _: AuditEvent,
+        mail: NewMailOutboxEntry,
+    ) -> Result<LibraryMutationOutcome, LibraryRepositoryError> {
+        if self.invitation_outcome == LibraryMutationOutcome::Applied {
+            *self
+                .invitation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(invitation);
+            *self
+                .mail
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(mail);
+        }
         Ok(self.invitation_outcome)
     }
 
@@ -209,7 +232,7 @@ impl AuthorizationRepository for CommandRepository {
 
 #[derive(Default)]
 struct InvitationMailer {
-    delivery: Mutex<Option<(String, LibraryInvitationContext, String)>>,
+    intent: Mutex<Option<(String, uuid::Uuid, String)>>,
     fail: bool,
 }
 
@@ -228,43 +251,47 @@ impl RandomSource for CountingRandom {
     }
 }
 
-#[async_trait]
-impl Mailer for InvitationMailer {
-    async fn preflight_library_invitation(&self) -> Result<(), MailError> {
-        if self.fail { Err(MailError) } else { Ok(()) }
-    }
-
-    async fn send_verification(
+impl MailIntentSealer for InvitationMailer {
+    fn seal(
         &self,
-        _: &NormalizedEmail,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        Ok(())
-    }
-
-    async fn send_password_reset(
-        &self,
-        _: &NormalizedEmail,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        Ok(())
-    }
-
-    async fn send_library_invitation(
-        &self,
-        recipient: &NormalizedEmail,
-        context: LibraryInvitationContext,
-        token: SecretString,
-    ) -> Result<(), MailError> {
+        message: folioharbor_application::mail::MailMessage,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<NewMailOutboxEntry, MailOutboxError> {
+        if self.fail {
+            return Err(MailOutboxError::Encryption);
+        }
+        let library_id = message
+            .invitation_library_id()
+            .ok_or(MailOutboxError::InvalidContext)?;
+        let role = message
+            .invitation_role()
+            .ok_or(MailOutboxError::InvalidContext)?
+            .to_owned();
         *self
-            .delivery
+            .intent
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
-            recipient.as_str().to_owned(),
-            context,
-            token.expose_secret().to_owned(),
+            message.recipient().as_str().to_owned(),
+            library_id,
+            role.clone(),
         ));
-        if self.fail { Err(MailError) } else { Ok(()) }
+        Ok(NewMailOutboxEntry {
+            mail_id: message.mail_id(),
+            recipient_account_id: None,
+            delivery_address: message.recipient().as_str().to_owned(),
+            template_code: message.template().code(),
+            template_version: 1,
+            locale: message.locale().as_str(),
+            token_ciphertext: vec![1],
+            encryption_key_id: "test".to_owned(),
+            nonce: vec![2; 12],
+            idempotency_key: message.idempotency_key(),
+            invitation_library_id: Some(library_id),
+            invitation_role: Some(role),
+            next_run_at: now,
+            expires_at,
+        })
     }
 }
 
@@ -273,7 +300,7 @@ fn clock() -> FakeClock {
 }
 
 #[tokio::test]
-async fn invitation_plaintext_moves_directly_to_mailer_with_bound_context()
+async fn invitation_and_encrypted_intent_use_one_combined_repository_operation()
 -> Result<(), Box<dyn std::error::Error>> {
     let repository = CommandRepository::new(LibraryMutationOutcome::Applied);
     let mailer = InvitationMailer::default();
@@ -296,15 +323,15 @@ async fn invitation_plaintext_moves_directly_to_mailer_with_bound_context()
     .await;
 
     assert!(result.is_ok());
-    let (recipient, context, plaintext) = mailer
-        .delivery
+    let (recipient, context_library, context_role) = mailer
+        .intent
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take()
-        .ok_or(std::io::Error::other("invitation should be delivered"))?;
+        .ok_or(std::io::Error::other("invitation should be sealed"))?;
     assert_eq!(recipient, "Reader@example.com");
-    assert_eq!(context.library_id, library_id);
-    assert_eq!(context.role, RoleCode::Reader);
+    assert_eq!(context_library, library_id.as_uuid());
+    assert_eq!(context_role, "reader");
     let stored = repository
         .invitation
         .lock()
@@ -312,15 +339,18 @@ async fn invitation_plaintext_moves_directly_to_mailer_with_bound_context()
         .take()
         .ok_or(std::io::Error::other("invitation hash should be persisted"))?;
     assert_eq!(stored.normalized_email.as_str(), recipient);
-    assert_eq!(
-        stored.token_hash,
-        SessionToken::parse(SecretString::from(plaintext)).hash_for_storage()
-    );
+    let mail = repository
+        .mail
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .ok_or(std::io::Error::other("mail intent should be persisted"))?;
+    assert_eq!(mail.invitation_library_id, Some(library_id.as_uuid()));
     Ok(())
 }
 
 #[tokio::test]
-async fn unavailable_invitation_delivery_prevents_token_generation_and_persistence() {
+async fn invitation_sealing_failure_prevents_business_and_outbox_persistence() {
     let repository = CommandRepository::new(LibraryMutationOutcome::Applied);
     let mailer = InvitationMailer {
         fail: true,
@@ -357,16 +387,16 @@ async fn unavailable_invitation_delivery_prevents_token_generation_and_persisten
             .fills
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
-        0,
-        "an unavailable mailer must prevent token generation"
+        1,
+        "sealing happens after generating the one-time token"
     );
     assert!(
-        mailer
-            .delivery
+        repository
+            .mail
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_none(),
-        "an unavailable mailer must not receive invitation plaintext"
+        "a failed sealer must not produce a mail intent"
     );
 }
 
@@ -405,12 +435,12 @@ async fn library_commands_preserve_owner_only_denials() {
         .await,
     );
     assert!(
-        mailer
-            .delivery
+        repository
+            .mail
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_none(),
-        "denied invitations must not disclose a token to the mailer"
+        "denied invitations must not persist a mail intent"
     );
     forbidden(
         ChangeMemberRole::new(&repository, &repository, &clock)

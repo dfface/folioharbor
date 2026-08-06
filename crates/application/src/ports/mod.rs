@@ -34,7 +34,7 @@ pub use job_repository::*;
 pub use library_query_repository::*;
 pub use library_repository::*;
 pub use mail_repository::*;
-pub use mailer::{LibraryInvitationContext, MailError, Mailer};
+pub use mailer::{MailError, Mailer};
 pub use password_hasher::{Argon2PasswordHasher, PasswordHashError, PasswordHasher};
 pub use publication_parser::*;
 pub use publication_resource_reader::*;

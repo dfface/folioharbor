@@ -6,7 +6,8 @@ use secrecy::SecretString;
 
 use crate::{
     error::{AppError, FieldViolation},
-    ports::{Clock, IdentityRepository, Mailer, NewAccount, PasswordHasher, RandomSource},
+    mail::{Locale, MailIntentSealer, MailMessage, MailTemplate},
+    ports::{Clock, IdentityRepository, NewAccount, PasswordHasher, RandomSource},
 };
 
 use super::{VERIFICATION_LIFETIME, internal_error};
@@ -46,7 +47,7 @@ impl<'a, R, H, M, C, N> RegisterAccount<'a, R, H, M, C, N> {
     }
 }
 
-impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSource>
+impl<R: IdentityRepository, H: PasswordHasher, M: MailIntentSealer, C: Clock, N: RandomSource>
     RegisterAccount<'_, R, H, M, C, N>
 {
     /// Registers a local account without revealing whether its email already exists.
@@ -81,24 +82,39 @@ impl<R: IdentityRepository, H: PasswordHasher, M: Mailer, C: Clock, N: RandomSou
         let mut bytes = [0_u8; 32];
         self.random.fill(&mut bytes);
         let token = EmailVerificationToken::from_random_bytes(bytes);
+        let token_hash = token.hash_for_storage();
         let now = self.clock.now();
+        let user_id = UserId::new();
+        let mail = self
+            .mailer
+            .seal(
+                MailMessage::new(
+                    Some(user_id.as_uuid()),
+                    email.clone(),
+                    MailTemplate::Verification,
+                    Locale::En,
+                    token.into_secret(),
+                ),
+                now,
+                now + VERIFICATION_LIFETIME,
+            )
+            .map_err(|_| internal_error())?;
         let _outcome = self
             .repository
-            .register(NewAccount {
-                user_id: UserId::new(),
-                normalized_email: email.clone(),
-                display_email: command.email.trim().to_owned(),
-                password_hash,
-                verification_token_hash: token.hash_for_storage(),
-                created_at: now,
-                verification_expires_at: now + VERIFICATION_LIFETIME,
-            })
+            .register_with_verification(
+                NewAccount {
+                    user_id,
+                    normalized_email: email.clone(),
+                    display_email: command.email.trim().to_owned(),
+                    password_hash,
+                    verification_token_hash: token_hash,
+                    created_at: now,
+                    verification_expires_at: now + VERIFICATION_LIFETIME,
+                },
+                mail,
+            )
             .await
             .map_err(|_| internal_error())?;
-        let _delivery = self
-            .mailer
-            .send_verification(&email, token.into_secret())
-            .await;
         Ok(PendingAccount)
     }
 }

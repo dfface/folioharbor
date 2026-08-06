@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use folioharbor_application::ports::{
-    IdentityRepository, IdentityRepositoryError, LoginIdentity, NewAccount, NewSession,
-    PasswordResetSession, RegisterOutcome, SessionPrincipal, SessionRecord,
+    IdentityRepository, IdentityRepositoryError, LoginIdentity, NewAccount, NewMailOutboxEntry,
+    NewSession, PasswordResetSession, RegisterOutcome, SessionPrincipal, SessionRecord,
 };
 use folioharbor_domain::{
     id::{SessionId, UserId},
@@ -56,6 +56,42 @@ impl IdentityRepository for PgIdentityRepository {
         .fetch_one(&mut *tx)
         .await
         .map_err(persistence_error)?;
+        tx.commit().await.map_err(persistence_error)?;
+        Ok(if created {
+            RegisterOutcome::Created
+        } else {
+            RegisterOutcome::Existing
+        })
+    }
+
+    async fn register_with_verification(
+        &self,
+        account: NewAccount,
+        mail: NewMailOutboxEntry,
+    ) -> Result<RegisterOutcome, IdentityRepositoryError> {
+        if mail.recipient_account_id != Some(account.user_id.as_uuid()) {
+            return Err(IdentityRepositoryError);
+        }
+        let mut tx = self.pool.begin().await.map_err(persistence_error)?;
+        let created = sqlx::query_scalar!(
+            r#"SELECT folioharbor.identity_register($1, $2, $3, $4, $5, $6, $7, $8) AS "created!""#,
+            account.user_id.as_uuid(),
+            account.normalized_email.as_str(),
+            account.display_email,
+            account.password_hash,
+            Uuid::now_v7(),
+            account.verification_token_hash.as_bytes().as_slice(),
+            account.created_at,
+            account.verification_expires_at,
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(persistence_error)?;
+        if created {
+            crate::mail::insert_mail(&mut tx, mail)
+                .await
+                .map_err(persistence_error)?;
+        }
         tx.commit().await.map_err(persistence_error)?;
         Ok(if created {
             RegisterOutcome::Created
@@ -182,6 +218,53 @@ impl IdentityRepository for PgIdentityRepository {
         .map_err(persistence_error)?;
         tx.commit().await.map_err(persistence_error)?;
         Ok(inserted)
+    }
+
+    async fn mail_recipient_account_id(
+        &self,
+        email: &NormalizedEmail,
+    ) -> Result<Option<UserId>, IdentityRepositoryError> {
+        let user_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT folioharbor.mail_recipient_account_id($1)")
+                .bind(email.as_str())
+                .fetch_one(&self.pool)
+                .await
+                .map_err(persistence_error)?;
+        Ok(user_id.map(UserId::from_uuid))
+    }
+
+    async fn issue_password_reset_with_mail(
+        &self,
+        email: &NormalizedEmail,
+        token_hash: TokenHash,
+        created_at: OffsetDateTime,
+        expires_at: OffsetDateTime,
+        mail: NewMailOutboxEntry,
+    ) -> Result<bool, IdentityRepositoryError> {
+        let mut tx = self.pool.begin().await.map_err(persistence_error)?;
+        let user_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT folioharbor.identity_issue_password_reset_recipient($1,$2,$3,$4,$5)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(email.as_str())
+        .bind(token_hash.as_bytes().as_slice())
+        .bind(created_at)
+        .bind(expires_at)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(persistence_error)?;
+        let Some(user_id) = user_id else {
+            tx.commit().await.map_err(persistence_error)?;
+            return Ok(false);
+        };
+        if mail.recipient_account_id != Some(user_id) {
+            return Err(IdentityRepositoryError);
+        }
+        crate::mail::insert_mail(&mut tx, mail)
+            .await
+            .map_err(persistence_error)?;
+        tx.commit().await.map_err(persistence_error)?;
+        Ok(true)
     }
 
     async fn reset_password(

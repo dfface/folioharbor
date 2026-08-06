@@ -9,9 +9,10 @@ use crate::{
     audit::AuditEvent,
     authorization::{Action, Authorization, ResourceRef},
     error::{AppError, FieldViolation},
+    mail::{Locale, MailIntentSealer, MailMessage, MailTemplate},
     ports::{
-        AuthorizationRepository, Clock, LibraryInvitationContext, LibraryMutationOutcome,
-        LibraryRepository, Mailer, NewLibraryInvitation, RandomSource,
+        AuthorizationRepository, Clock, LibraryMutationOutcome, LibraryRepository,
+        NewLibraryInvitation, RandomSource,
     },
 };
 
@@ -49,8 +50,13 @@ impl<'a, R, A, M, C, N> InviteMember<'a, R, A, M, C, N> {
         }
     }
 }
-impl<R: LibraryRepository, A: AuthorizationRepository, M: Mailer, C: Clock, N: RandomSource>
-    InviteMember<'_, R, A, M, C, N>
+impl<
+    R: LibraryRepository,
+    A: AuthorizationRepository,
+    M: MailIntentSealer,
+    C: Clock,
+    N: RandomSource,
+> InviteMember<'_, R, A, M, C, N>
 {
     /// Creates an email-bound invitation with a new opaque token.
     ///
@@ -81,15 +87,10 @@ impl<R: LibraryRepository, A: AuthorizationRepository, M: Mailer, C: Clock, N: R
         let grant = Authorization::new(self.authorization)
             .require(command.actor, Action::InviteMember, resource)
             .await?;
-        self.mailer
-            .preflight_library_invitation()
-            .await
-            .map_err(|_| AppError::DependencyUnavailable {
-                code: "mail_delivery_unavailable",
-            })?;
         let mut bytes = [0; 32];
         self.random.fill(&mut bytes);
         let token = SessionToken::from_random_bytes(bytes);
+        let token_hash = token.hash_for_storage();
         let now = self.clock.now();
         let audit = AuditEvent::allowed(
             command.actor,
@@ -98,9 +99,24 @@ impl<R: LibraryRepository, A: AuthorizationRepository, M: Mailer, C: Clock, N: R
             command.request_id,
             now,
         );
+        let mut message = MailMessage::new(
+            None,
+            email.clone(),
+            MailTemplate::Invitation,
+            Locale::En,
+            token.into_secret(),
+        );
+        message
+            .set_invitation_repository_context(command.library_id.as_uuid(), command.role.as_str());
+        let mail = self
+            .mailer
+            .seal(message, now, now + INVITATION_LIFETIME)
+            .map_err(|_| AppError::DependencyUnavailable {
+                code: "mail_delivery_unavailable",
+            })?;
         let outcome = self
             .repository
-            .create_invitation(
+            .create_invitation_with_mail(
                 NewLibraryInvitation {
                     invitation_id,
                     library_id: command.library_id,
@@ -108,32 +124,20 @@ impl<R: LibraryRepository, A: AuthorizationRepository, M: Mailer, C: Clock, N: R
                     normalized_email: email.clone(),
                     display_email: command.email,
                     role: command.role,
-                    token_hash: token.hash_for_storage(),
+                    token_hash,
                     created_at: now,
                     expires_at: now + INVITATION_LIFETIME,
                 },
                 grant,
                 audit,
+                mail,
             )
             .await
             .map_err(|_| AppError::DependencyUnavailable {
                 code: "library_repository_unavailable",
             })?;
         match outcome {
-            LibraryMutationOutcome::Applied => self
-                .mailer
-                .send_library_invitation(
-                    &email,
-                    LibraryInvitationContext {
-                        library_id: command.library_id,
-                        role: command.role,
-                    },
-                    token.into_secret(),
-                )
-                .await
-                .map_err(|_| AppError::DependencyUnavailable {
-                    code: "mail_delivery_unavailable",
-                }),
+            LibraryMutationOutcome::Applied => Ok(()),
             other => {
                 super::mutation_result(other)?;
                 unreachable!()

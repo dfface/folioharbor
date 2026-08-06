@@ -175,6 +175,46 @@ fn smtp_urls_reject_embedded_credentials_without_echoing_them() {
 }
 
 #[test]
+fn smtp_credentials_must_be_configured_as_a_pair_without_echoing_values() {
+    for (present, missing) in [
+        ("FOLIOHARBOR_MAIL_USERNAME", "FOLIOHARBOR_MAIL_PASSWORD"),
+        ("FOLIOHARBOR_MAIL_PASSWORD", "FOLIOHARBOR_MAIL_USERNAME"),
+    ] {
+        let mut environment = minimum_environment();
+        environment.insert(present.to_owned(), "sentinel-mail-credential".to_owned());
+
+        let error = Settings::load(ConfigSources {
+            environment,
+            ..ConfigSources::default()
+        })
+        .expect_err("partial SMTP credentials must fail");
+        let diagnostic = error.to_string();
+
+        assert!(diagnostic.contains(missing));
+        assert!(!diagnostic.contains("sentinel-mail-credential"));
+    }
+}
+
+#[test]
+fn smtp_from_address_is_validated_without_echoing_it() {
+    let mut environment = minimum_environment();
+    environment.insert(
+        "FOLIOHARBOR_MAIL_FROM_ADDRESS".to_owned(),
+        "sentinel-invalid-address".to_owned(),
+    );
+
+    let error = Settings::load(ConfigSources {
+        environment,
+        ..ConfigSources::default()
+    })
+    .expect_err("invalid mail from address must fail");
+    let diagnostic = error.to_string();
+
+    assert!(diagnostic.contains("mail.from_address"));
+    assert!(!diagnostic.contains("sentinel-invalid-address"));
+}
+
+#[test]
 fn storage_paths_must_be_absolute_non_root_and_distinct() {
     for (key, value) in [
         ("storage.root", "relative"),

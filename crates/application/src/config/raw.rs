@@ -128,10 +128,20 @@ impl Default for RawAuth {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct RawMail {
     pub(super) smtp_url: Option<String>,
+    pub(super) from_address: String,
+}
+
+impl Default for RawMail {
+    fn default() -> Self {
+        Self {
+            smtp_url: None,
+            from_address: "noreply@localhost".to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -193,6 +203,7 @@ fn environment_path(key: &str) -> Option<&'static str> {
         "FOLIOHARBOR_AUTH_INVITATION_ENABLED" => Some("auth.invitation_enabled"),
         "FOLIOHARBOR_AUTH_PASSWORD_RESET_ENABLED" => Some("auth.password_reset_enabled"),
         "FOLIOHARBOR_MAIL_SMTP_URL" => Some("mail.smtp_url"),
+        "FOLIOHARBOR_MAIL_FROM_ADDRESS" => Some("mail.from_address"),
         "FOLIOHARBOR_WORKER_CONCURRENCY" => Some("worker.concurrency"),
         "FOLIOHARBOR_OBSERVABILITY_LOG_FILTER" => Some("observability.log_filter"),
         _ => None,
@@ -235,6 +246,7 @@ fn apply_values(
                 raw.auth.password_reset_enabled = parse(key, value)?;
             }
             "mail.smtp_url" => raw.mail.smtp_url = Some(value.clone()),
+            "mail.from_address" => raw.mail.from_address.clone_from(value),
             "worker.concurrency" => raw.worker.concurrency = parse(key, value)?,
             "observability.log_filter" => raw.observability.log_filter.clone_from(value),
             _ => return Err(ConfigError::invalid(key, "unknown configuration key")),

@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use folioharbor_application::ports::{
     AcceptInvitationOutcome, LibraryMutationOutcome, LibraryQueryRepository,
     LibraryQueryRepositoryError, LibraryRepository, LibraryRepositoryError, NewLibraryInvitation,
+    NewMailOutboxEntry,
 };
 use folioharbor_application::{
     audit::{AuditDecision, AuditEvent, AuditSource},
@@ -257,6 +258,62 @@ impl LibraryRepository for PgLibraryRepository {
         .map_err(persistence_error)?;
         tx.commit().await.map_err(persistence_error)?;
         mutation(&row.outcome)
+    }
+    async fn create_invitation_with_mail(
+        &self,
+        i: NewLibraryInvitation,
+        grant: AuthorizationGrant,
+        audit: AuditEvent,
+        mail: NewMailOutboxEntry,
+    ) -> Result<LibraryMutationOutcome, LibraryRepositoryError> {
+        let resource = ResourceRef::Invitation {
+            library_id: i.library_id,
+            invitation_id: i.invitation_id,
+        };
+        validate_facts(
+            grant,
+            &audit,
+            i.invited_by,
+            i.library_id,
+            Action::InviteMember,
+            resource,
+        )?;
+        if mail.delivery_address != i.normalized_email.as_str()
+            || mail.template_code != "invitation"
+            || mail.invitation_library_id != Some(i.library_id.as_uuid())
+            || mail.invitation_role.as_deref() != Some(i.role.as_str())
+        {
+            return Err(LibraryRepositoryError);
+        }
+        let mut tx = self.pool.begin().await.map_err(persistence_error)?;
+        PgTransactionContext::apply(
+            &mut tx,
+            &DatabaseContext::api(grant.actor(), grant.library_id(), audit.request_id),
+        )
+        .await
+        .map_err(persistence_error)?;
+        let row = sqlx::query!(
+            r#"SELECT folioharbor.library_create_invitation_authorized($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) AS "outcome!""#,
+            i.invitation_id.as_uuid(), i.library_id.as_uuid(), i.invited_by.as_uuid(),
+            i.normalized_email.as_str(), i.display_email, i.role.as_str(),
+            i.token_hash.as_bytes().as_slice(), i.created_at, i.expires_at,
+            grant.membership_version(), Uuid::now_v7(), audit.effective_actor.map(UserId::as_uuid),
+            audit.action.as_str(), audit.resource.resource_type(), resource_id(audit.resource),
+            audit.decision.as_str(), audit.reason_code, audit.request_id.as_ulid().to_string(),
+            audit.source.as_str(), audit.occurred_at,
+            audit.network_hmac.as_ref().map(<[u8; 32]>::as_slice),
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(persistence_error)?;
+        let outcome = mutation(&row.outcome)?;
+        if outcome == LibraryMutationOutcome::Applied {
+            crate::mail::insert_mail(&mut tx, mail)
+                .await
+                .map_err(persistence_error)?;
+        }
+        tx.commit().await.map_err(persistence_error)?;
+        Ok(outcome)
     }
     async fn accept_invitation(
         &self,

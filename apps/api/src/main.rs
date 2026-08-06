@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 
-use async_trait::async_trait;
 use folioharbor_api::{
     build_catalog_api, build_download, build_progress_api, build_reader_api, build_upload_api,
 };
@@ -8,12 +7,10 @@ use folioharbor_application::{
     config::{ConfigSources, Settings},
     identity::IdentityApi,
     libraries::LibraryService,
-    ports::{
-        Argon2PasswordHasher, Clock, LibraryInvitationContext, MailError, Mailer, RandomSource,
-    },
+    mail::MailOutbox,
+    ports::{Argon2PasswordHasher, Clock, RandomSource},
     rate_limit::DurableRateLimiter,
 };
-use folioharbor_domain::identity::NormalizedEmail;
 use folioharbor_http::AppState;
 use folioharbor_postgres::{
     PgAuditRepository, PgAuthorizationRepository, PgRateLimitRepository, connect_api,
@@ -38,38 +35,6 @@ impl RandomSource for SystemRandom {
         }
     }
 }
-#[derive(Clone, Copy)]
-struct DeferredMailer;
-#[async_trait]
-impl Mailer for DeferredMailer {
-    async fn preflight_library_invitation(&self) -> Result<(), MailError> {
-        Err(MailError)
-    }
-
-    async fn send_verification(
-        &self,
-        _: &NormalizedEmail,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        Err(MailError)
-    }
-    async fn send_password_reset(
-        &self,
-        _: &NormalizedEmail,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        Err(MailError)
-    }
-    async fn send_library_invitation(
-        &self,
-        _: &NormalizedEmail,
-        _: LibraryInvitationContext,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        Err(MailError)
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -89,15 +54,7 @@ async fn main() -> anyhow::Result<()> {
     let progress_api = build_progress_api(pool.clone());
     let (download_api, download_blobs) = build_download(&settings, pool.clone());
     let library_repository = PgLibraryRepository::new(pool.clone());
-    let identity = Arc::new(IdentityApi::new_configured(
-        PgIdentityRepository::new(pool.clone()),
-        Argon2PasswordHasher::new(SystemRandom),
-        DeferredMailer,
-        SystemClock,
-        SystemRandom,
-        settings.auth.personal_library_enabled,
-        library_repository.clone(),
-    ));
+    let personal_library_enabled = settings.auth.personal_library_enabled;
     let secret = SecretString::from(
         settings
             .auth
@@ -107,6 +64,16 @@ async fn main() -> anyhow::Result<()> {
             .expose_secret()
             .to_owned(),
     );
+    let mail_outbox = MailOutbox::new(Arc::new(settings.auth.application_secrets));
+    let identity = Arc::new(IdentityApi::new_configured(
+        PgIdentityRepository::new(pool.clone()),
+        Argon2PasswordHasher::new(SystemRandom),
+        mail_outbox.clone(),
+        SystemClock,
+        SystemRandom,
+        personal_library_enabled,
+        library_repository.clone(),
+    ));
     let limiter = Arc::new(DurableRateLimiter::new(
         PgRateLimitRepository::new(pool.clone()),
         secret,
@@ -116,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
         library_repository,
         PgAuthorizationRepository::new(pool.clone()),
         PgAuditRepository::new(pool),
-        DeferredMailer,
+        mail_outbox,
         SystemClock,
         SystemRandom,
     ));

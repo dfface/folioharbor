@@ -12,9 +12,10 @@ use crate::{
     audit::AuditEvent,
     authorization::{Action, Authorization, ResourceRef},
     error::AppError,
+    mail::MailIntentSealer,
     ports::{
         AuditSink, AuthorizationRepository, Clock, LibraryQueryRepository, LibraryRepository,
-        Mailer, RandomSource,
+        RandomSource,
     },
 };
 
@@ -158,7 +159,7 @@ where
     R: LibraryRepository + LibraryQueryRepository,
     A: AuthorizationRepository,
     S: AuditSink,
-    M: Mailer,
+    M: MailIntentSealer,
     C: Clock,
     N: RandomSource,
 {

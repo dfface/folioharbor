@@ -38,7 +38,7 @@ fn localized_document(code: &str, accept_language: &str) -> Option<Documentation
             escape(title),
             escape(title),
             escape(detail),
-            escape(&code)
+            escape(code)
         ),
     })
 }

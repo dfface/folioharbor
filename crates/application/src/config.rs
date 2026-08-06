@@ -7,6 +7,8 @@ use std::{collections::BTreeMap, fmt};
 use secrecy::SecretString;
 use thiserror::Error;
 
+use folioharbor_domain::identity::NormalizedEmail;
+
 use raw::RawSettings;
 use secret::{load_secret_ring, secret_environment};
 pub use types::{
@@ -85,6 +87,30 @@ impl Settings {
                 "is required when email verification, invitations, or password reset is enabled",
             ));
         }
+        let from_address = NormalizedEmail::parse(&raw.mail.from_address).map_err(|_| {
+            ConfigError::invalid("mail.from_address", "must be a valid email address")
+        })?;
+        let username = environment
+            .get("FOLIOHARBOR_MAIL_USERNAME")
+            .cloned()
+            .map(secret_string);
+        let password =
+            secret_environment(environment, "FOLIOHARBOR_MAIL_PASSWORD")?.map(secret_string);
+        match (username.is_some(), password.is_some()) {
+            (true, false) => {
+                return Err(ConfigError::invalid(
+                    "FOLIOHARBOR_MAIL_PASSWORD",
+                    "is required when FOLIOHARBOR_MAIL_USERNAME is configured",
+                ));
+            }
+            (false, true) => {
+                return Err(ConfigError::invalid(
+                    "FOLIOHARBOR_MAIL_USERNAME",
+                    "is required when FOLIOHARBOR_MAIL_PASSWORD is configured",
+                ));
+            }
+            (true, true) | (false, false) => {}
+        }
         let application_secrets = load_secret_ring(environment)?;
         Ok(Self {
             server: ServerSettings {
@@ -108,12 +134,9 @@ impl Settings {
             },
             mail: MailSettings {
                 smtp_url,
-                username: environment
-                    .get("FOLIOHARBOR_MAIL_USERNAME")
-                    .cloned()
-                    .map(secret_string),
-                password: secret_environment(environment, "FOLIOHARBOR_MAIL_PASSWORD")?
-                    .map(secret_string),
+                from_address,
+                username,
+                password,
             },
             worker: WorkerSettings {
                 concurrency: raw.worker.concurrency,

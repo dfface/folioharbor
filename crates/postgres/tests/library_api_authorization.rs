@@ -1,58 +1,48 @@
 #![allow(clippy::too_many_lines)]
 
-use async_trait::async_trait;
 use folioharbor_application::{
     error::AppError,
     libraries::{
         LibraryApi as _, LibraryService, ListLibrariesRequest, ReadLibraryRequest,
         UpdateSettingsRequest,
     },
-    ports::{LibraryInvitationContext, MailError, Mailer},
+    mail::{MailIntentSealer, MailMessage, MailOutboxError},
+    ports::NewMailOutboxEntry,
 };
-use folioharbor_domain::{
-    id::{LibraryId, RequestId, UserId},
-    identity::NormalizedEmail,
-};
+use folioharbor_domain::id::{LibraryId, RequestId, UserId};
 use folioharbor_postgres::{
     PgAuditRepository, PgAuthorizationRepository, PgPools, libraries::PgLibraryRepository,
     run_migrations,
 };
 use folioharbor_test_support::{clock::FixedClock, postgres::TestPostgres, random::FixedRandom};
-use secrecy::SecretString;
 use time::OffsetDateTime;
 
 #[derive(Clone, Copy)]
-struct NoopMailer;
+struct NoopSealer;
 
-#[async_trait]
-impl Mailer for NoopMailer {
-    async fn preflight_library_invitation(&self) -> Result<(), MailError> {
-        Ok(())
-    }
-
-    async fn send_verification(
+impl MailIntentSealer for NoopSealer {
+    fn seal(
         &self,
-        _: &NormalizedEmail,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        Ok(())
-    }
-
-    async fn send_password_reset(
-        &self,
-        _: &NormalizedEmail,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        Ok(())
-    }
-
-    async fn send_library_invitation(
-        &self,
-        _: &NormalizedEmail,
-        _: LibraryInvitationContext,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        Ok(())
+        message: MailMessage,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<NewMailOutboxEntry, MailOutboxError> {
+        Ok(NewMailOutboxEntry {
+            mail_id: message.mail_id(),
+            recipient_account_id: message.recipient_account_id(),
+            delivery_address: message.recipient().as_str().to_owned(),
+            template_code: message.template().code(),
+            template_version: 1,
+            locale: message.locale().as_str(),
+            token_ciphertext: vec![1],
+            encryption_key_id: "test-key".to_owned(),
+            nonce: vec![0; 12],
+            idempotency_key: message.idempotency_key(),
+            invitation_library_id: message.invitation_library_id(),
+            invitation_role: message.invitation_role().map(str::to_owned),
+            next_run_at: now,
+            expires_at,
+        })
     }
 }
 
@@ -94,7 +84,7 @@ async fn facade_enforces_owner_editor_reader_and_unrelated_matrix_with_audit() -
         PgLibraryRepository::new(pools.api.clone()),
         PgAuthorizationRepository::new(pools.api.clone()),
         PgAuditRepository::new(pools.api.clone()),
-        NoopMailer,
+        NoopSealer,
         FixedClock::new(now),
         FixedRandom::new(9),
     );

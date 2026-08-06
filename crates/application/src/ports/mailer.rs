@@ -1,38 +1,48 @@
 use async_trait::async_trait;
-use folioharbor_domain::{id::LibraryId, identity::NormalizedEmail, libraries::role::RoleCode};
-use secrecy::SecretString;
+use folioharbor_domain::identity::NormalizedEmail;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 #[error("mail delivery failed")]
-pub struct MailError;
+pub struct MailError {
+    transient: bool,
+    code: &'static str,
+}
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LibraryInvitationContext {
-    pub library_id: LibraryId,
-    pub role: RoleCode,
+impl MailError {
+    #[must_use]
+    pub const fn transient(code: &'static str) -> Self {
+        Self {
+            transient: true,
+            code,
+        }
+    }
+
+    #[must_use]
+    pub const fn permanent(code: &'static str) -> Self {
+        Self {
+            transient: false,
+            code,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_transient(&self) -> bool {
+        self.transient
+    }
+
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
 }
 
 #[async_trait]
 pub trait Mailer: Send + Sync {
-    async fn preflight_library_invitation(&self) -> Result<(), MailError>;
-
-    async fn send_verification(
-        &self,
-        email: &NormalizedEmail,
-        token: SecretString,
-    ) -> Result<(), MailError>;
-
-    async fn send_password_reset(
-        &self,
-        email: &NormalizedEmail,
-        token: SecretString,
-    ) -> Result<(), MailError>;
-
-    async fn send_library_invitation(
+    async fn deliver(
         &self,
         recipient: &NormalizedEmail,
-        context: LibraryInvitationContext,
-        token: SecretString,
+        idempotency_key: &str,
+        message: &crate::mail::RenderedMail,
     ) -> Result<(), MailError>;
 }

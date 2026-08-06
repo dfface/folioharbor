@@ -8,6 +8,8 @@ use folioharbor_domain::{
 };
 use thiserror::Error;
 
+use super::NewMailOutboxEntry;
+
 #[derive(Debug, Error)]
 #[error("library persistence failed")]
 pub struct LibraryRepositoryError;
@@ -57,6 +59,16 @@ pub trait LibraryRepository: Send + Sync {
         _: NewLibraryInvitation,
         _: AuthorizationGrant,
         _: AuditEvent,
+    ) -> Result<LibraryMutationOutcome, LibraryRepositoryError> {
+        Err(LibraryRepositoryError)
+    }
+    /// Atomically persists an invitation, its allowed audit event, and its mail intent.
+    async fn create_invitation_with_mail(
+        &self,
+        _: NewLibraryInvitation,
+        _: AuthorizationGrant,
+        _: AuditEvent,
+        _: NewMailOutboxEntry,
     ) -> Result<LibraryMutationOutcome, LibraryRepositoryError> {
         Err(LibraryRepositoryError)
     }

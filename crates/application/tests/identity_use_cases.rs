@@ -8,12 +8,13 @@ use folioharbor_application::{
     error::AppError,
     identity::{
         CompletePasswordReset, CompletePasswordResetCommand, CurrentSession, ListSessions, Login,
-        LoginCommand, Logout, LogoutCommand, PasswordResetRequested, PendingAccount,
-        RegisterAccount, RegisterAccountCommand, RequestPasswordReset, RequestPasswordResetCommand,
+        LoginCommand, Logout, LogoutCommand, PendingAccount, RegisterAccount,
+        RegisterAccountCommand, RequestPasswordReset, RequestPasswordResetCommand,
     },
+    mail::{MailIntentSealer, MailOutboxError},
     ports::{
         Argon2PasswordHasher, IdentityRepository, IdentityRepositoryError, LibraryRepository,
-        LibraryRepositoryError, LoginIdentity, MailError, Mailer, NewAccount, NewSession,
+        LibraryRepositoryError, LoginIdentity, NewAccount, NewMailOutboxEntry, NewSession,
         PasswordHashError, PasswordHasher, PasswordResetSession, RandomSource, RegisterOutcome,
         SessionPrincipal, SessionRecord,
     },
@@ -113,6 +114,7 @@ struct FakeRepository {
     revocations: Mutex<Vec<SessionRevocationReason>>,
     sessions: Mutex<Vec<SessionRecord>>,
     reset_session: Mutex<Option<PasswordResetSession>>,
+    mail_registrations: AtomicUsize,
 }
 
 impl FakeRepository {
@@ -126,6 +128,7 @@ impl FakeRepository {
             revocations: Mutex::new(Vec::new()),
             sessions: Mutex::new(Vec::new()),
             reset_session: Mutex::new(None),
+            mail_registrations: AtomicUsize::new(0),
         }
     }
 }
@@ -133,6 +136,14 @@ impl FakeRepository {
 #[async_trait]
 impl IdentityRepository for FakeRepository {
     async fn register(&self, _: NewAccount) -> Result<RegisterOutcome, IdentityRepositoryError> {
+        Ok(self.register_outcome)
+    }
+    async fn register_with_verification(
+        &self,
+        _: NewAccount,
+        _: NewMailOutboxEntry,
+    ) -> Result<RegisterOutcome, IdentityRepositoryError> {
+        self.mail_registrations.fetch_add(1, Ordering::SeqCst);
         Ok(self.register_outcome)
     }
     async fn verify_email(
@@ -188,6 +199,22 @@ impl IdentityRepository for FakeRepository {
     ) -> Result<bool, IdentityRepositoryError> {
         Ok(self.reset_exists)
     }
+    async fn mail_recipient_account_id(
+        &self,
+        _: &NormalizedEmail,
+    ) -> Result<Option<UserId>, IdentityRepositoryError> {
+        Ok(self.reset_exists.then(UserId::new))
+    }
+    async fn issue_password_reset_with_mail(
+        &self,
+        _: &NormalizedEmail,
+        _: TokenHash,
+        _: OffsetDateTime,
+        _: OffsetDateTime,
+        _: NewMailOutboxEntry,
+    ) -> Result<bool, IdentityRepositoryError> {
+        Ok(self.reset_exists)
+    }
     async fn reset_password(
         &self,
         _: TokenHash,
@@ -211,6 +238,59 @@ impl IdentityRepository for FakeRepository {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone())
     }
+}
+
+struct FixedIntentSealer;
+impl MailIntentSealer for FixedIntentSealer {
+    fn seal(
+        &self,
+        _: folioharbor_application::mail::MailMessage,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<NewMailOutboxEntry, MailOutboxError> {
+        Ok(NewMailOutboxEntry {
+            mail_id: uuid::Uuid::now_v7(),
+            recipient_account_id: Some(uuid::Uuid::now_v7()),
+            delivery_address: "reader@example.com".to_owned(),
+            template_code: "verification",
+            template_version: 1,
+            locale: "en",
+            token_ciphertext: vec![1],
+            encryption_key_id: "test".to_owned(),
+            nonce: vec![2; 12],
+            idempotency_key: "mail:test".to_owned(),
+            invitation_library_id: None,
+            invitation_role: None,
+            next_run_at: now,
+            expires_at,
+        })
+    }
+}
+
+#[tokio::test]
+async fn registration_uses_the_combined_account_and_outbox_repository_operation() {
+    let repository = FakeRepository {
+        register_outcome: RegisterOutcome::Created,
+        ..FakeRepository::empty()
+    };
+    let result = RegisterAccount::new(
+        &repository,
+        &SpyHasher {
+            valid: true,
+            dummy_calls: AtomicUsize::new(0),
+        },
+        &FixedIntentSealer,
+        &fixture_clock(),
+        &FixedRandom::new(11),
+    )
+    .execute(RegisterAccountCommand {
+        email: "reader@example.com".to_owned(),
+        password: SecretString::from("password".to_owned()),
+    })
+    .await;
+
+    assert!(matches!(result, Ok(PendingAccount)));
+    assert_eq!(repository.mail_registrations.load(Ordering::SeqCst), 1);
 }
 
 struct SpyHasher {
@@ -246,40 +326,46 @@ struct SpyMailer {
     resets: AtomicUsize,
     fail: bool,
 }
-#[async_trait]
-impl Mailer for SpyMailer {
-    async fn preflight_library_invitation(&self) -> Result<(), MailError> {
-        Ok(())
-    }
-
-    async fn send_verification(
+impl MailIntentSealer for SpyMailer {
+    fn seal(
         &self,
-        _: &NormalizedEmail,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        self.verification.fetch_add(1, Ordering::SeqCst);
-        if self.fail { Err(MailError) } else { Ok(()) }
-    }
-    async fn send_password_reset(
-        &self,
-        _: &NormalizedEmail,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        self.resets.fetch_add(1, Ordering::SeqCst);
-        if self.fail { Err(MailError) } else { Ok(()) }
-    }
-    async fn send_library_invitation(
-        &self,
-        _: &NormalizedEmail,
-        _: folioharbor_application::ports::LibraryInvitationContext,
-        _: SecretString,
-    ) -> Result<(), MailError> {
-        if self.fail { Err(MailError) } else { Ok(()) }
+        message: folioharbor_application::mail::MailMessage,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<NewMailOutboxEntry, MailOutboxError> {
+        match message.template() {
+            folioharbor_application::mail::MailTemplate::Verification => {
+                self.verification.fetch_add(1, Ordering::SeqCst);
+            }
+            folioharbor_application::mail::MailTemplate::PasswordReset => {
+                self.resets.fetch_add(1, Ordering::SeqCst);
+            }
+            folioharbor_application::mail::MailTemplate::Invitation => {}
+        }
+        if self.fail {
+            return Err(MailOutboxError::Encryption);
+        }
+        Ok(NewMailOutboxEntry {
+            mail_id: message.mail_id(),
+            recipient_account_id: message.recipient_account_id(),
+            delivery_address: message.recipient().as_str().to_owned(),
+            template_code: message.template().code(),
+            template_version: 1,
+            locale: message.locale().as_str(),
+            token_ciphertext: vec![1],
+            encryption_key_id: "test".to_owned(),
+            nonce: vec![2; 12],
+            idempotency_key: message.idempotency_key(),
+            invitation_library_id: None,
+            invitation_role: None,
+            next_run_at: now,
+            expires_at,
+        })
     }
 }
 
 #[tokio::test]
-async fn failing_mail_delivery_cannot_enumerate_registration_or_reset_accounts() {
+async fn failing_mail_sealing_has_the_same_public_error_for_known_and_unknown_accounts() {
     let known = FakeRepository {
         register_outcome: RegisterOutcome::Created,
         reset_exists: true,
@@ -310,8 +396,11 @@ async fn failing_mail_delivery_cannot_enumerate_registration_or_reset_accounts()
             password: SecretString::from("password".to_owned()),
         })
         .await;
-    assert!(matches!(known_registration, Ok(PendingAccount)));
-    assert!(matches!(unknown_registration, Ok(PendingAccount)));
+    assert!(matches!(known_registration, Err(AppError::Internal { .. })));
+    assert!(matches!(
+        unknown_registration,
+        Err(AppError::Internal { .. })
+    ));
     assert_eq!(mailer.verification.load(Ordering::SeqCst), 2);
 
     let known_reset = RequestPasswordReset::new(&known, &mailer, &clock, &random)
@@ -324,8 +413,8 @@ async fn failing_mail_delivery_cannot_enumerate_registration_or_reset_accounts()
             email: "unknown@example.com".to_owned(),
         })
         .await;
-    assert!(matches!(known_reset, Ok(PasswordResetRequested)));
-    assert!(matches!(unknown_reset, Ok(PasswordResetRequested)));
+    assert!(matches!(known_reset, Err(AppError::Internal { .. })));
+    assert!(matches!(unknown_reset, Err(AppError::Internal { .. })));
     assert_eq!(mailer.resets.load(Ordering::SeqCst), 2);
 }
 
