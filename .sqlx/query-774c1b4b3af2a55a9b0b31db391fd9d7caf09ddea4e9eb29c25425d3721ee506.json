@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT upload_id AS \"upload_id!\",storage_key AS \"storage_key!\",delete_file AS \"delete_file!\" FROM folioharbor.import_claim_failed_purges_worker($1,$2,$3)",
+  "query": "SELECT upload_id AS \"upload_id!\",storage_key AS \"storage_key!\",delete_file AS \"delete_file!\" FROM folioharbor.import_claim_failed_purges_worker($1,$2,$3,$4)",
   "describe": {
     "columns": [
       {
@@ -23,6 +23,7 @@
       "Left": [
         "Text",
         "Timestamptz",
+        "Timestamptz",
         "Int8"
       ]
     },
@@ -32,5 +33,5 @@
       null
     ]
   },
-  "hash": "e5928b4e43ebde2e2ac52a4576ce3a364c816ff27522f47f7b2902dce82fe884"
+  "hash": "774c1b4b3af2a55a9b0b31db391fd9d7caf09ddea4e9eb29c25425d3721ee506"
 }

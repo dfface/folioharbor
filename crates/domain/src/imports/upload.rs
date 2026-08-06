@@ -16,10 +16,11 @@ pub enum UploadState {
     Failed,
     Expired,
     RetryWait,
+    OperatorRequired,
 }
 
 impl UploadState {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Created,
         Self::Receiving,
         Self::Received,
@@ -31,6 +32,7 @@ impl UploadState {
         Self::Failed,
         Self::Expired,
         Self::RetryWait,
+        Self::OperatorRequired,
     ];
 
     #[must_use]
@@ -47,6 +49,7 @@ impl UploadState {
             Self::Failed => "failed",
             Self::Expired => "expired",
             Self::RetryWait => "retry_wait",
+            Self::OperatorRequired => "operator_required",
         }
     }
 
@@ -61,15 +64,22 @@ impl UploadState {
             (self, next),
             (Self::Created, Self::Receiving | Self::Expired)
                 | (Self::Receiving, Self::Received | Self::Failed)
-                | (Self::Received | Self::RetryWait, Self::Queued)
+                | (
+                    Self::Received | Self::RetryWait | Self::OperatorRequired,
+                    Self::Queued
+                )
                 | (Self::Queued, Self::Validating)
                 | (
                     Self::Validating,
-                    Self::Importing | Self::Failed | Self::RetryWait
+                    Self::Importing | Self::Failed | Self::RetryWait | Self::OperatorRequired
                 )
                 | (
                     Self::Importing,
-                    Self::Ready | Self::Duplicate | Self::Failed | Self::RetryWait
+                    Self::Ready
+                        | Self::Duplicate
+                        | Self::Failed
+                        | Self::RetryWait
+                        | Self::OperatorRequired
                 )
                 | (Self::Failed, Self::Receiving)
         )

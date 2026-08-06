@@ -197,7 +197,7 @@ impl ProcessImportJob {
                 transient(self.retries, job, now, "blob_io_unavailable"),
             ),
             PublicationParserError::Configuration => (
-                UploadState::Failed,
+                UploadState::OperatorRequired,
                 "parser_configuration_invalid",
                 operator(
                     "parser_configuration_invalid",
@@ -205,7 +205,7 @@ impl ProcessImportJob {
                 ),
             ),
             PublicationParserError::Capacity => (
-                UploadState::Failed,
+                UploadState::OperatorRequired,
                 "storage_capacity_exhausted",
                 operator(
                     "storage_capacity_exhausted",

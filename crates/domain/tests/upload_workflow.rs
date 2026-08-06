@@ -3,8 +3,8 @@ use folioharbor_domain::imports::upload::UploadState;
 #[test]
 fn upload_state_machine_allows_only_documented_transitions() {
     use UploadState::{
-        Created, Duplicate, Expired, Failed, Importing, Queued, Ready, Received, Receiving,
-        RetryWait, Validating,
+        Created, Duplicate, Expired, Failed, Importing, OperatorRequired, Queued, Ready, Received,
+        Receiving, RetryWait, Validating,
     };
 
     let allowed = [
@@ -17,10 +17,13 @@ fn upload_state_machine_allows_only_documented_transitions() {
         (Validating, Importing),
         (Validating, Failed),
         (Validating, RetryWait),
+        (Validating, OperatorRequired),
         (Importing, Ready),
         (Importing, Duplicate),
         (Importing, Failed),
         (Importing, RetryWait),
+        (Importing, OperatorRequired),
+        (OperatorRequired, Queued),
         (RetryWait, Queued),
         (Failed, Receiving),
     ];

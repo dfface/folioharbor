@@ -70,4 +70,9 @@ pub trait JobRepository: Send + Sync {
         code: &str,
         summary: &str,
     ) -> Result<bool, JobRepositoryError>;
+    async fn resume_operator_required(
+        &self,
+        id: JobId,
+        now: OffsetDateTime,
+    ) -> Result<bool, JobRepositoryError>;
 }

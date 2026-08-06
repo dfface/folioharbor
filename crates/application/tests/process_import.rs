@@ -254,13 +254,13 @@ async fn parser_dependency_and_configuration_failures_choose_retry_or_operator_a
         ),
         (
             PublicationParserError::Configuration,
-            UploadState::Failed,
+            UploadState::OperatorRequired,
             "parser_configuration_invalid",
             true,
         ),
         (
             PublicationParserError::Capacity,
-            UploadState::Failed,
+            UploadState::OperatorRequired,
             "storage_capacity_exhausted",
             true,
         ),

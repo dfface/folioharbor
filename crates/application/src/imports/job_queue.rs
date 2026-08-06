@@ -124,4 +124,15 @@ impl<R: JobRepository> JobQueue<R> {
             .operator_required(id, owner, now, code, summary)
             .await
     }
+    /// Atomically resumes an operator-paused import and its retained upload.
+    ///
+    /// # Errors
+    /// Returns a repository error when durable persistence is unavailable.
+    pub async fn resume_operator_required(
+        &self,
+        id: JobId,
+        now: OffsetDateTime,
+    ) -> Result<bool, JobRepositoryError> {
+        self.repository.resume_operator_required(id, now).await
+    }
 }

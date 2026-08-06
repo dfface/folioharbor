@@ -50,6 +50,7 @@ impl ImportCleanupRepository for CleanupRepo {
         &self,
         _: &str,
         _: CleanupCursor,
+        _: OffsetDateTime,
     ) -> Result<Vec<FailedUploadPurge>, ImportCleanupRepositoryError> {
         Ok(self.claims.lock().expect("claim fixture").clone())
     }

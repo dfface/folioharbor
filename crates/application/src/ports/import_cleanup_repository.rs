@@ -56,6 +56,7 @@ pub trait ImportCleanupRepository: Send + Sync {
         &self,
         owner: &str,
         cursor: CleanupCursor,
+        claim_now: OffsetDateTime,
     ) -> Result<Vec<FailedUploadPurge>, ImportCleanupRepositoryError>;
     async fn complete_failed_purge(
         &self,

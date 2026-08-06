@@ -113,12 +113,14 @@ impl ImportCleanupRepository for PgImportCleanupRepository {
         &self,
         owner: &str,
         cursor: CleanupCursor,
+        claim_now: OffsetDateTime,
     ) -> Result<Vec<FailedUploadPurge>, ImportCleanupRepositoryError> {
         let mut transaction = cleanup_transaction(&self.pool, RequestId::new()).await?;
         let rows = sqlx::query!(
-            r#"SELECT upload_id AS "upload_id!",storage_key AS "storage_key!",delete_file AS "delete_file!" FROM folioharbor.import_claim_failed_purges_worker($1,$2,$3)"#,
+            r#"SELECT upload_id AS "upload_id!",storage_key AS "storage_key!",delete_file AS "delete_file!" FROM folioharbor.import_claim_failed_purges_worker($1,$2,$3,$4)"#,
             owner,
             cursor.not_after(),
+            claim_now,
             i64::from(cursor.limit()),
         )
         .fetch_all(&mut *transaction)

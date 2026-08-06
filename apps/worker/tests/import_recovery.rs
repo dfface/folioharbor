@@ -8,7 +8,10 @@ use std::{
 use async_trait::async_trait;
 use folioharbor_application::{
     imports::{CleanupImports, JobFailure, ProcessImportJob, RetrySchedule},
-    ports::{BlobStore, ImportRepository, JobRepository, LeaseJobs, PublicationParser},
+    ports::{
+        BlobStore, ImportCleanupRepository, ImportRepository, JobRepository, LeaseJobs,
+        PublicationParser,
+    },
 };
 use folioharbor_domain::{
     id::{JobId, LibraryId, RequestId, UploadId, UserId},
@@ -71,6 +74,147 @@ fn subprocess_worker_child() -> anyhow::Result<()> {
             pool.close().await;
             Ok::<_, anyhow::Error>(())
         })
+}
+
+#[test]
+fn subprocess_cleanup_claim_crash_child() -> anyhow::Result<()> {
+    let Ok(database_url) = std::env::var("FOLIOHARBOR_TEST_CLEANUP_DATABASE_URL") else {
+        return Ok(());
+    };
+    let sentinel = std::env::var("FOLIOHARBOR_TEST_CLEANUP_SENTINEL")?;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async move {
+            let pool = connect_worker(&SecretString::from(database_url.into_boxed_str())).await?;
+            let repository = PgImportCleanupRepository::new(pool);
+            let claim_now = OffsetDateTime::now_utc();
+            let cursor = repository
+                .begin_pass(
+                    JobKind::PurgeFailedUploads,
+                    "os-crash-cleanup",
+                    claim_now,
+                    10,
+                )
+                .await?;
+            let claims = repository
+                .claim_failed_purges("os-crash-cleanup", cursor, claim_now)
+                .await?;
+            anyhow::ensure!(claims.len() == 1, "crash child did not acquire one purge");
+            std::fs::write(sentinel, b"durable purge claim acquired")?;
+            std::process::exit(86);
+        })
+}
+
+#[test]
+fn subprocess_cleanup_recovery_child() -> anyhow::Result<()> {
+    let Ok(database_url) = std::env::var("FOLIOHARBOR_TEST_CLEANUP_DATABASE_URL") else {
+        return Ok(());
+    };
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async move {
+            let pool = connect_worker(&SecretString::from(database_url.into_boxed_str())).await?;
+            let repository = PgImportCleanupRepository::new(pool.clone());
+            let claim_now = OffsetDateTime::now_utc() + Duration::minutes(6);
+            let cursor = repository
+                .begin_pass(
+                    JobKind::PurgeFailedUploads,
+                    "os-crash-cleanup",
+                    claim_now,
+                    10,
+                )
+                .await?;
+            let claims = repository
+                .claim_failed_purges("os-crash-cleanup", cursor, claim_now)
+                .await?;
+            anyhow::ensure!(
+                claims.len() == 1,
+                "recovery child did not reclaim the purge"
+            );
+            for claim in claims {
+                anyhow::ensure!(
+                    repository
+                        .complete_failed_purge(claim.upload_id, "os-crash-cleanup", cursor)
+                        .await?,
+                    "recovery child did not complete the purge"
+                );
+            }
+            anyhow::ensure!(
+                !repository
+                    .has_pending(JobKind::PurgeFailedUploads, cursor)
+                    .await?,
+                "recovered cutoff is not stable"
+            );
+            repository
+                .complete_pass(JobKind::PurgeFailedUploads, "os-crash-cleanup", cursor)
+                .await?;
+            pool.close().await;
+            Ok::<_, anyhow::Error>(())
+        })
+}
+
+#[tokio::test]
+async fn cleanup_claim_survives_a_real_process_crash_and_is_reclaimed() -> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let now = OffsetDateTime::now_utc();
+    let actor = UserId::new();
+    let library = LibraryId::new();
+    let upload = UploadId::new();
+    sqlx::query("INSERT INTO folioharbor.user_accounts(user_id,normalized_email,display_email,status,created_at,verified_at) VALUES($1,'cleanup-crash@test.invalid','cleanup-crash@test.invalid','verified',$2,$2)")
+        .bind(actor.as_uuid()).bind(now).execute(&pools.owner).await?;
+    sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,created_at,updated_at) VALUES($1,'Cleanup crash',$2,$2)")
+        .bind(library.as_uuid()).bind(now).execute(&pools.owner).await?;
+    sqlx::query("INSERT INTO folioharbor.upload_sessions(upload_id,library_id,created_by,file_name,media_type,declared_bytes,received_bytes,state,dedup_scope,storage_key,sha256,error_code,expires_at,created_at,updated_at) VALUES($1,$2,$3,'crash.epub','application/epub+zip',1,1,'failed','instance','blob:cleanup-crash',decode(repeat('55',32),'hex'),'invalid_epub',$4,$5,$5)")
+        .bind(upload.as_uuid()).bind(library.as_uuid()).bind(actor.as_uuid())
+        .bind(now+Duration::hours(1)).bind(now).execute(&pools.owner).await?;
+    sqlx::query("INSERT INTO folioharbor.failed_upload_purges(upload_id,storage_key,delete_file,eligible_at,created_at,updated_at) VALUES($1,'blob:cleanup-crash',false,$2,$2,$2)")
+        .bind(upload.as_uuid()).bind(now).execute(&pools.owner).await?;
+    let sentinel_directory = tempfile::tempdir()?;
+    let sentinel = sentinel_directory.path().join("claimed");
+    let executable = std::env::current_exe()?;
+    let worker_url = database.worker_url()?;
+    let status = std::process::Command::new(&executable)
+        .args([
+            "--exact",
+            "subprocess_cleanup_claim_crash_child",
+            "--nocapture",
+        ])
+        .env("FOLIOHARBOR_TEST_CLEANUP_DATABASE_URL", &worker_url)
+        .env("FOLIOHARBOR_TEST_CLEANUP_SENTINEL", &sentinel)
+        .status()?;
+    assert_eq!(status.code(), Some(86));
+    assert!(sentinel.exists());
+    let claimed: (String, String, bool) = sqlx::query_as(
+        "SELECT purge.state,purge.lease_owner,boundary.active_cutoff IS NOT NULL FROM folioharbor.failed_upload_purges purge CROSS JOIN folioharbor.cleanup_boundaries boundary WHERE purge.upload_id=$1 AND boundary.cleanup_kind='purge_failed_uploads'",
+    )
+    .bind(upload.as_uuid()).fetch_one(&pools.owner).await?;
+    assert_eq!(claimed, ("leased".into(), "os-crash-cleanup".into(), true));
+    let recovered = std::process::Command::new(&executable)
+        .args([
+            "--exact",
+            "subprocess_cleanup_recovery_child",
+            "--nocapture",
+        ])
+        .env("FOLIOHARBOR_TEST_CLEANUP_DATABASE_URL", &worker_url)
+        .status()?;
+    assert!(recovered.success());
+    let terminal: (String, bool, bool) = sqlx::query_as(
+        "SELECT purge.state,purge.completed_at IS NOT NULL,boundary.active_cutoff IS NULL FROM folioharbor.failed_upload_purges purge CROSS JOIN folioharbor.cleanup_boundaries boundary WHERE purge.upload_id=$1 AND boundary.cleanup_kind='purge_failed_uploads'",
+    )
+    .bind(upload.as_uuid()).fetch_one(&pools.owner).await?;
+    assert_eq!(terminal, ("completed".into(), true, true));
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
 }
 
 struct FailureDispatcher(Mutex<HashMap<String, Option<JobFailure>>>);
@@ -253,6 +397,11 @@ async fn durable_cleanup_jobs_dispatch_all_closed_kinds_and_restart_with_new_cut
         "cleanup-process-b".into(),
         RunnerConfig::new(1).expect("one cleanup slot"),
     );
+    assert_eq!(restarted.run_once().await?, 0);
+    sqlx::query("UPDATE folioharbor.background_jobs SET next_run_at=$1 WHERE kind='expire_uploads_and_reservations'")
+        .bind(OffsetDateTime::now_utc())
+        .execute(&pools.owner)
+        .await?;
     assert_eq!(restarted.run_once().await?, 1);
     let advanced: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM folioharbor.cleanup_boundaries WHERE updated_at>$1",
@@ -355,6 +504,110 @@ fn import_service(pools: &PgPools, blobs: Arc<dyn BlobStore>, owner: &str) -> Wo
         owner.to_owned(),
         RunnerConfig::new(1).expect("one matrix slot"),
     )
+}
+
+#[tokio::test]
+async fn operator_paused_import_retains_source_past_cleanup_then_resumes_to_success()
+-> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let directory = tempfile::tempdir()?;
+    let blobs: Arc<dyn BlobStore> = Arc::new(LocalBlobStore::new(directory.path()));
+    let seeded = seed_import(&pools, &blobs, 90).await?;
+    let now = OffsetDateTime::now_utc();
+    let jobs = PgJobRepository::new(pools.worker.clone());
+    let leased = jobs
+        .lease(LeaseJobs {
+            owner: "operator-pause".into(),
+            now,
+            lease_for: Duration::minutes(5),
+            limit: 1,
+            request_id: RequestId::new(),
+        })
+        .await?;
+    assert_eq!(leased.len(), 1);
+    let imports = PgImportRepository::new(pools.worker.clone());
+    let reconciliation = imports
+        .reconcile(seeded.upload, seeded.library, RequestId::new(), now)
+        .await?;
+    let folioharbor_application::ports::ImportReconciliation::Work(work) = reconciliation else {
+        anyhow::bail!("queued import did not reconcile to work");
+    };
+    imports
+        .record_failure(
+            &work,
+            folioharbor_domain::imports::upload::UploadState::OperatorRequired,
+            "parser_configuration_invalid",
+            RequestId::new(),
+            now,
+        )
+        .await?;
+    assert!(
+        jobs.operator_required(
+            seeded.job,
+            "operator-pause",
+            now,
+            "parser_configuration_invalid",
+            "operator action required",
+        )
+        .await?
+    );
+    let cleanup = CleanupImports::new(
+        Arc::new(PgImportCleanupRepository::new(pools.worker.clone())),
+        blobs.clone(),
+    );
+    let after_retention = now + Duration::days(2);
+    cleanup
+        .run_kind(
+            "operator-retention",
+            JobKind::ExpireUploadsAndReservations,
+            after_retention,
+            100,
+        )
+        .await?;
+    cleanup
+        .run_kind(
+            "operator-retention",
+            JobKind::PurgeFailedUploads,
+            after_retention,
+            100,
+        )
+        .await?;
+    let retained: (String, i64, String, i64) = sqlx::query_as(
+        "SELECT upload.state,library.quota_reserved_bytes,reservation.state,(SELECT count(*) FROM folioharbor.failed_upload_purges WHERE upload_id=$1) FROM folioharbor.upload_sessions upload JOIN folioharbor.libraries library USING(library_id) JOIN folioharbor.quota_reservations reservation USING(upload_id) WHERE upload.upload_id=$1",
+    )
+    .bind(seeded.upload.as_uuid()).fetch_one(&pools.owner).await?;
+    assert_eq!(
+        retained,
+        ("operator_required".into(), seeded.bytes, "active".into(), 0)
+    );
+    assert!(
+        jobs.resume_operator_required(seeded.job, OffsetDateTime::now_utc())
+            .await?
+    );
+    assert_eq!(
+        import_service(&pools, blobs, "operator-resumed")
+            .run_once()
+            .await?,
+        1
+    );
+    let terminal: (String, String, i64, i64, i64) = sqlx::query_as(
+        "SELECT upload.state,job.state,library.quota_reserved_bytes,library.quota_used_bytes,(SELECT count(*) FROM folioharbor.items) FROM folioharbor.upload_sessions upload JOIN folioharbor.background_jobs job ON job.job_id=$2 JOIN folioharbor.libraries library ON library.library_id=upload.library_id WHERE upload.upload_id=$1",
+    )
+    .bind(seeded.upload.as_uuid()).bind(seeded.job.as_uuid()).fetch_one(&pools.owner).await?;
+    assert_eq!(
+        terminal,
+        ("ready".into(), "succeeded".into(), 0, seeded.bytes, 1)
+    );
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
 }
 
 #[tokio::test]

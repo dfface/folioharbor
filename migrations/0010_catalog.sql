@@ -318,12 +318,14 @@ CREATE FUNCTION folioharbor.import_reconcile_worker(
     storage_key text, upload_state text, error_code text
 ) LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 DECLARE upload folioharbor.upload_sessions%ROWTYPE;
+DECLARE reservation folioharbor.quota_reservations%ROWTYPE;
 DECLARE resolved_blob uuid;
 DECLARE namespace text;
 BEGIN
     IF session_user <> 'folioharbor_worker' OR NOT folioharbor.is_worker()
        OR p_library IS DISTINCT FROM folioharbor.current_library_id()
        OR p_request IS DISTINCT FROM folioharbor.current_request_id() THEN RETURN; END IF;
+    PERFORM 1 FROM folioharbor.libraries WHERE library_id=p_library FOR UPDATE;
     SELECT * INTO upload FROM folioharbor.upload_sessions
       WHERE upload_id=p_upload AND library_id=p_library FOR UPDATE;
     IF upload.upload_id IS NULL THEN RETURN; END IF;
@@ -333,6 +335,14 @@ BEGIN
       RETURN;
     END IF;
     IF upload.state='failed' AND upload.storage_key IS NOT NULL THEN
+      SELECT * INTO reservation FROM folioharbor.quota_reservations
+       WHERE upload_id=p_upload FOR UPDATE;
+      IF reservation.state='active' THEN
+       UPDATE folioharbor.libraries SET quota_reserved_bytes=quota_reserved_bytes-reservation.reserved_bytes
+        WHERE library_id=p_library;
+       UPDATE folioharbor.quota_reservations SET state='released',updated_at=p_now
+        WHERE upload_id=p_upload;
+      END IF;
       INSERT INTO folioharbor.failed_upload_purges(upload_id,storage_key,delete_file,eligible_at,created_at,updated_at)
        VALUES(p_upload,upload.storage_key,upload.dedup_scope='disabled',p_now+interval '24 hours',p_now,p_now)
        ON CONFLICT(upload_id) DO NOTHING;

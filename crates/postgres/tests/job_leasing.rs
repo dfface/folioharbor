@@ -169,6 +169,10 @@ async fn retry_schedule_and_heartbeat_survive_repository_restart() -> anyhow::Re
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the real PostgreSQL operator lifecycle is clearest as one linear scenario"
+)]
 async fn operator_required_is_durable_distinct_and_never_leased_after_restart() -> anyhow::Result<()>
 {
     let database = TestPostgres::provision().await?;
@@ -187,13 +191,23 @@ async fn operator_required_is_durable_distinct_and_never_leased_after_restart() 
     sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,created_at,updated_at) VALUES($1,'Operator',$2,$2)")
         .bind(library.as_uuid()).bind(now).execute(&pools.owner).await?;
     let id = JobId::new();
+    let upload = UploadId::new();
+    sqlx::query("UPDATE folioharbor.libraries SET quota_reserved_bytes=10 WHERE library_id=$1")
+        .bind(library.as_uuid())
+        .execute(&pools.owner)
+        .await?;
+    sqlx::query("INSERT INTO folioharbor.upload_sessions(upload_id,library_id,created_by,file_name,media_type,declared_bytes,received_bytes,state,dedup_scope,storage_key,sha256,expires_at,created_at,updated_at) VALUES($1,$2,$3,'operator.epub','application/epub+zip',10,10,'operator_required','instance','blob:operator',decode(repeat('44',32),'hex'),$4,$5,$5)")
+        .bind(upload.as_uuid()).bind(library.as_uuid()).bind(user.as_uuid())
+        .bind(now+Duration::hours(1)).bind(now).execute(&pools.owner).await?;
+    sqlx::query("INSERT INTO folioharbor.quota_reservations(upload_id,library_id,reserved_bytes,expires_at,state) VALUES($1,$2,10,$3,'active')")
+        .bind(upload.as_uuid()).bind(library.as_uuid()).bind(now+Duration::hours(1)).execute(&pools.owner).await?;
     let repository = PgJobRepository::new(pools.worker.clone());
     repository
         .enqueue(
             id,
             Some(library),
             JobKind::ImportEpub,
-            JobInput::upload_v1(UploadId::new().as_uuid().to_string()),
+            JobInput::upload_v1(upload.as_uuid().to_string()),
             "operator:one",
             now,
         )
@@ -248,12 +262,49 @@ async fn operator_required_is_durable_distinct_and_never_leased_after_restart() 
             .await?
             .is_empty()
     );
+    let retained: (String, String, i64, i64) = sqlx::query_as(
+        "SELECT upload.state,upload.storage_key,library.quota_reserved_bytes,(SELECT count(*) FROM folioharbor.failed_upload_purges WHERE upload_id=$1) FROM folioharbor.upload_sessions upload JOIN folioharbor.libraries library USING(library_id) WHERE upload.upload_id=$1",
+    )
+    .bind(upload.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_eq!(
+        retained,
+        ("operator_required".into(), "blob:operator".into(), 10, 0)
+    );
+    assert!(
+        restarted
+            .resume_operator_required(id, now + Duration::days(1))
+            .await?
+    );
+    let resumed: (String, String, i64) = sqlx::query_as(
+        "SELECT upload.state,job.state,library.quota_reserved_bytes FROM folioharbor.upload_sessions upload JOIN folioharbor.background_jobs job ON job.job_id=$2 JOIN folioharbor.libraries library ON library.library_id=upload.library_id WHERE upload.upload_id=$1",
+    )
+    .bind(upload.as_uuid()).bind(id.as_uuid()).fetch_one(&pools.owner).await?;
+    assert_eq!(resumed, ("queued".into(), "pending".into(), 10));
+    assert_eq!(
+        restarted
+            .lease(LeaseJobs {
+                owner: "worker-c".into(),
+                now: now + Duration::days(1),
+                lease_for: Duration::minutes(1),
+                limit: 1,
+                request_id: RequestId::new()
+            })
+            .await?
+            .len(),
+        1
+    );
     pools.close().await;
     database.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the three cleanup schedules are verified together as one singleton lifecycle"
+)]
 async fn cleanup_job_kinds_are_global_idempotent_leasable_and_recurring() -> anyhow::Result<()> {
     let database = TestPostgres::provision().await?;
     let pools = PgPools::connect_for_tests(
@@ -310,15 +361,60 @@ async fn cleanup_job_kinds_are_global_idempotent_leasable_and_recurring() -> any
                 .await?
         );
     }
-    repository
-        .ensure_cleanup_jobs(now + Duration::minutes(1))
-        .await?;
+    let scheduled_at = now + Duration::seconds(1);
+    repository.ensure_cleanup_jobs(scheduled_at).await?;
+    repository.ensure_cleanup_jobs(scheduled_at).await?;
     let recurring: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM folioharbor.background_jobs WHERE kind<>'import_epub' AND state='pending'",
     )
     .fetch_one(&pools.owner)
     .await?;
     assert_eq!(recurring, 3);
+    let schedules: Vec<(String, OffsetDateTime)> = sqlx::query_as(
+        "SELECT kind,next_run_at FROM folioharbor.background_jobs WHERE kind<>'import_epub' ORDER BY kind",
+    )
+    .fetch_all(&pools.owner)
+    .await?;
+    assert_eq!(
+        schedules,
+        vec![
+            (
+                "collect_blobs_later".into(),
+                scheduled_at + Duration::hours(1),
+            ),
+            (
+                "expire_uploads_and_reservations".into(),
+                scheduled_at + Duration::minutes(1),
+            ),
+            (
+                "purge_failed_uploads".into(),
+                scheduled_at + Duration::minutes(5),
+            ),
+        ]
+    );
+    assert!(
+        repository
+            .lease(LeaseJobs {
+                owner: "cleanup-worker".into(),
+                now: scheduled_at + Duration::minutes(1) - Duration::milliseconds(1),
+                lease_for: Duration::minutes(5),
+                limit: 3,
+                request_id: RequestId::new(),
+            })
+            .await?
+            .is_empty()
+    );
+    let due = repository
+        .lease(LeaseJobs {
+            owner: "cleanup-worker".into(),
+            now: scheduled_at + Duration::minutes(1),
+            lease_for: Duration::minutes(5),
+            limit: 3,
+            request_id: RequestId::new(),
+        })
+        .await?;
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].kind, JobKind::ExpireUploadsAndReservations);
     pools.close().await;
     database.cleanup().await?;
     Ok(())

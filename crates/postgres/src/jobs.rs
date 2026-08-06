@@ -259,4 +259,22 @@ impl JobRepository for PgJobRepository {
         })
         .await
     }
+
+    async fn resume_operator_required(
+        &self,
+        id: JobId,
+        now: OffsetDateTime,
+    ) -> Result<bool, JobRepositoryError> {
+        let mut transaction = self.transaction(RequestId::new(), None).await?;
+        let changed = sqlx::query_scalar!(
+            r#"SELECT folioharbor.job_resume_operator_worker($1,$2) AS "changed!""#,
+            id.as_uuid(),
+            now,
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(persistence_error)?;
+        transaction.commit().await.map_err(persistence_error)?;
+        Ok(changed)
+    }
 }

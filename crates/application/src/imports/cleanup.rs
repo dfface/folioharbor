@@ -62,7 +62,10 @@ impl CleanupImports {
         cursor: CleanupCursor,
     ) -> Result<CleanupOutcome, ImportCleanupRepositoryError> {
         let expired = self.repository.expire_abandoned(cursor).await?;
-        let claims = self.repository.claim_failed_purges(owner, cursor).await?;
+        let claims = self
+            .repository
+            .claim_failed_purges(owner, cursor, OffsetDateTime::now_utc())
+            .await?;
         let mut purged = 0_u64;
         for claim in claims {
             if claim.delete_file && self.blobs.delete(&claim.storage_key).await.is_err() {
@@ -110,7 +113,11 @@ impl CleanupImports {
                 }
             },
             JobKind::PurgeFailedUploads => loop {
-                let claims = self.repository.claim_failed_purges(owner, cursor).await?;
+                let claim_now = OffsetDateTime::now_utc();
+                let claims = self
+                    .repository
+                    .claim_failed_purges(owner, cursor, claim_now)
+                    .await?;
                 let short_batch = claims.len() < cursor.limit() as usize;
                 for claim in claims {
                     if claim.delete_file && self.blobs.delete(&claim.storage_key).await.is_err() {
