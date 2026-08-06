@@ -263,6 +263,7 @@ mod smtp_capture_tests {
         AsyncSmtpTransport, Tokio1Executor,
         transport::smtp::{client::Tls, client::TlsParameters},
     };
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::{SMTP_TIMEOUT, SmtpMailer, SmtpSecurity, smtp_message};
 
@@ -335,5 +336,48 @@ mod smtp_capture_tests {
             )
             .await
             .expect("STARTTLS capture delivery");
+
+        let api_port = env::var("FOLIOHARBOR_SMTP_CAPTURE_API_PORT")
+            .expect("capture API port")
+            .parse::<u16>()
+            .expect("numeric capture API port");
+        let captured = mailpit_latest(api_port).await;
+        let link = "https://library.example/verify-email?token=capture-token";
+        let text = captured["Text"].as_str().expect("decoded text alternative");
+        let html = captured["HTML"].as_str().expect("decoded HTML alternative");
+        assert_eq!(text.matches(link).count(), 1);
+        assert_eq!(html.matches(link).count(), 1);
+        assert!(captured["MessageID"].as_str().is_some_and(|id| id.contains(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef@folioharbor"
+        )));
+        assert_eq!(
+            captured["Attachments"]
+                .as_array()
+                .map_or(0, std::vec::Vec::len),
+            0
+        );
+        assert!(!html.contains("<img"));
+        assert!(!html.contains("src="));
+    }
+
+    async fn mailpit_latest(port: u16) -> serde_json::Value {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect to Mailpit API");
+        stream
+            .write_all(b"GET /api/v1/message/latest HTTP/1.0\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("request latest captured message");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read Mailpit API response");
+        let response = String::from_utf8(response).expect("Mailpit response is UTF-8");
+        assert!(response.starts_with("HTTP/1.0 200") || response.starts_with("HTTP/1.1 200"));
+        let (_, body) = response
+            .split_once("\r\n\r\n")
+            .expect("Mailpit HTTP response body");
+        serde_json::from_str(body).expect("Mailpit message JSON")
     }
 }

@@ -38,11 +38,12 @@ fn approved_defaults_are_stable() {
     assert!(settings.auth.email_verification_enabled);
     assert!(settings.auth.personal_library_enabled);
     assert!(!settings.auth.reader_download_enabled);
+    let features = settings.auth.features();
     assert!(settings.mail.mode.is_enabled());
-    assert!(settings.mail.mode.registration_enabled());
-    assert!(settings.mail.mode.email_verification_enabled());
-    assert!(settings.mail.mode.invitation_enabled());
-    assert!(settings.mail.mode.password_reset_enabled());
+    assert!(features.registration_enabled());
+    assert!(features.email_verification_enabled());
+    assert!(features.invitation_enabled());
+    assert!(features.password_reset_enabled());
     assert_eq!(settings.storage.library_quota.as_u64(), 5 * GIB);
     assert_eq!(settings.storage.upload_limit.as_u64(), GIB);
     assert_eq!(settings.storage.free_reserve.as_u64(), GIB);
@@ -181,6 +182,56 @@ fn disabled_mail_mode_accepts_an_absent_smtp_relay() {
 
     assert!(!settings.mail.mode.is_enabled());
     assert!(settings.mail.smtp_url.is_none());
+}
+
+#[test]
+fn every_mail_flag_combination_preserves_features_or_rejects_registration_without_verification() {
+    for registration in [false, true] {
+        for verification in [false, true] {
+            for invitation in [false, true] {
+                for password_reset in [false, true] {
+                    let mut environment = minimum_environment();
+                    for (key, enabled) in [
+                        ("FOLIOHARBOR_AUTH_REGISTRATION_ENABLED", registration),
+                        ("FOLIOHARBOR_AUTH_EMAIL_VERIFICATION_ENABLED", verification),
+                        ("FOLIOHARBOR_AUTH_INVITATION_ENABLED", invitation),
+                        ("FOLIOHARBOR_AUTH_PASSWORD_RESET_ENABLED", password_reset),
+                    ] {
+                        environment.insert(key.to_owned(), enabled.to_string());
+                    }
+                    if !(verification || invitation || password_reset) {
+                        environment.remove("FOLIOHARBOR_MAIL_SMTP_URL");
+                    }
+
+                    let result = Settings::load(ConfigSources {
+                        environment,
+                        ..ConfigSources::default()
+                    });
+                    if registration && !verification {
+                        let error = result.expect_err(
+                            "registration without verification must be rejected explicitly",
+                        );
+                        assert!(
+                            error
+                                .to_string()
+                                .contains("auth.email_verification_enabled")
+                        );
+                        continue;
+                    }
+
+                    let settings = result.expect("supported feature combination must load");
+                    assert_eq!(settings.auth.registration_enabled, registration);
+                    assert_eq!(settings.auth.email_verification_enabled, verification);
+                    assert_eq!(settings.auth.invitation_enabled, invitation);
+                    assert_eq!(settings.auth.password_reset_enabled, password_reset);
+                    assert_eq!(
+                        settings.mail.mode.is_enabled(),
+                        verification || invitation || password_reset
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]

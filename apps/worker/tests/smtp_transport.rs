@@ -1,6 +1,9 @@
 #![allow(clippy::expect_used)]
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use folioharbor_application::config::{ConfigSources, Settings};
 use folioharbor_application::{mail::RenderedMail, ports::Mailer as _};
@@ -66,12 +69,116 @@ fn mail_disabled_settings() -> Settings {
     .expect("valid mail-disabled settings")
 }
 
+fn credentialed_settings() -> Settings {
+    let mut environment = BTreeMap::from([
+        (
+            "FOLIOHARBOR_AUTH_APPLICATION_SECRET_KEY_ID".to_owned(),
+            "smtp-test".to_owned(),
+        ),
+        (
+            "FOLIOHARBOR_AUTH_APPLICATION_SECRET".to_owned(),
+            "0123456789abcdef0123456789abcdef".to_owned(),
+        ),
+        (
+            "FOLIOHARBOR_MAIL_SMTP_URL".to_owned(),
+            "smtp://mail.example:2525".to_owned(),
+        ),
+        (
+            "FOLIOHARBOR_MAIL_FROM_ADDRESS".to_owned(),
+            "noreply@example.com".to_owned(),
+        ),
+        (
+            "FOLIOHARBOR_MAIL_USERNAME".to_owned(),
+            "credential-user-sentinel".to_owned(),
+        ),
+    ]);
+    environment.insert(
+        "FOLIOHARBOR_MAIL_PASSWORD".to_owned(),
+        "credential-password-sentinel".to_owned(),
+    );
+    Settings::load(ConfigSources {
+        environment,
+        ..ConfigSources::default()
+    })
+    .expect("valid credentialed SMTP settings")
+}
+
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+struct CapturedWriter(Arc<Mutex<Vec<u8>>>);
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CapturedWriter(Arc::clone(&self.0))
+    }
+}
+
+impl std::io::Write for CapturedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[test]
 fn disabled_mail_mode_builds_no_smtp_transport_for_the_worker() {
     let transport = SmtpMailer::for_mode(&mail_disabled_settings().mail)
         .expect("disabled mode is valid worker configuration");
 
     assert!(transport.is_none());
+}
+
+#[tokio::test]
+async fn smtp_configuration_and_failure_logs_exclude_credentials_tokens_and_full_links() {
+    let capture = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(capture.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    tracing::info!("mail-redaction-capture-active");
+
+    let mailer = SmtpMailer::new(&credentialed_settings().mail).expect("transport configures");
+    let recipient = NormalizedEmail::parse("reader@example.com").expect("recipient");
+    let token = "token-redaction-sentinel";
+    let full_link = format!("https://library.example/reset-password?token={token}");
+    let rendered = RenderedMail {
+        subject: "Redaction".to_owned(),
+        text: full_link.clone(),
+        html: format!("<a href=\"{full_link}\">reset</a>"),
+    };
+    let failure = mailer
+        .deliver(&recipient, "invalid-idempotency-key", &rendered)
+        .await
+        .expect_err("invalid key fails before network I/O");
+    assert_eq!(failure.code(), "invalid_idempotency_key");
+
+    let logs = String::from_utf8(
+        capture
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone(),
+    )
+    .expect("captured logs are UTF-8");
+    assert!(logs.contains("mail-redaction-capture-active"));
+    for secret in [
+        "credential-user-sentinel",
+        "credential-password-sentinel",
+        token,
+        full_link.as_str(),
+    ] {
+        assert!(!logs.contains(secret), "logs leaked {secret}");
+    }
 }
 
 #[tokio::test]

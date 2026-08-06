@@ -12,10 +12,10 @@ use folioharbor_domain::identity::NormalizedEmail;
 use raw::RawSettings;
 use secret::{load_secret_ring, secret_environment};
 pub use types::{
-    ApplicationSecretKeyId, ApplicationSecretRing, AuthSettings, ByteSize, DatabaseSettings,
-    DecryptionSecret, DedupScope, Duration, EncryptionSecret, MailFlows, MailMode, MailSettings,
-    ObservabilitySettings, PublicUrl, ServerSettings, Settings, SmtpUrl, StorageSettings,
-    WorkerSettings,
+    ApplicationSecretKeyId, ApplicationSecretRing, AuthFeatures, AuthSettings, ByteSize,
+    DatabaseSettings, DecryptionSecret, DedupScope, Duration, EncryptionSecret, MailMode,
+    MailSettings, ObservabilitySettings, PublicUrl, ServerSettings, Settings, SmtpUrl,
+    StorageSettings, WorkerSettings,
 };
 
 #[derive(Clone, Default)]
@@ -76,8 +76,13 @@ impl Settings {
                 "must be greater than zero",
             ));
         }
+        if raw.auth.registration_enabled && !raw.auth.email_verification_enabled {
+            return Err(ConfigError::invalid(
+                "auth.email_verification_enabled",
+                "must be enabled when registration is enabled",
+            ));
+        }
         let mail_mode = MailMode::from_flags(
-            raw.auth.registration_enabled,
             raw.auth.email_verification_enabled,
             raw.auth.invitation_enabled,
             raw.auth.password_reset_enabled,

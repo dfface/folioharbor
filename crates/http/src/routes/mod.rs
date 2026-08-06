@@ -10,7 +10,7 @@ use crate::middleware;
 use axum::{Router, middleware as axum_middleware};
 use folioharbor_application::{
     catalog::{CatalogApi, DownloadApi, UnavailableCatalogApi, UnavailableDownloadApi},
-    config::MailMode,
+    config::AuthFeatures,
     identity::{
         AuthenticateSessionUseCase, CompletePasswordResetUseCase, CurrentSessionUseCase,
         ListSessionsUseCase, LoginUseCase, LogoutUseCase, RegisterAccountUseCase,
@@ -46,7 +46,7 @@ pub struct AppState {
     pub progress_api: Arc<dyn ProgressApi>,
     pub download_api: Arc<dyn DownloadApi>,
     pub download_blobs: Option<Arc<dyn BlobStore>>,
-    mail_mode: Option<MailMode>,
+    auth_features: Option<AuthFeatures>,
 }
 impl AppState {
     #[allow(clippy::too_many_arguments)]
@@ -85,14 +85,14 @@ impl AppState {
             progress_api: Arc::new(UnavailableProgressApi),
             download_api: Arc::new(UnavailableDownloadApi),
             download_blobs: None,
-            mail_mode: None,
+            auth_features: None,
         }
     }
 
-    /// Applies the same validated, flag-derived mail mode used by the worker.
+    /// Applies the independently configured optional authentication features.
     #[must_use]
-    pub fn with_mail_mode(mut self, mail_mode: MailMode) -> Self {
-        self.mail_mode = Some(mail_mode);
+    pub fn with_auth_features(mut self, auth_features: AuthFeatures) -> Self {
+        self.auth_features = Some(auth_features);
         self
     }
 
@@ -138,13 +138,13 @@ impl AppState {
     }
 }
 pub fn router(state: AppState) -> Router {
-    let mail_mode = state.mail_mode;
+    let auth_features = state.auth_features;
     Router::new()
         .nest("/problems", problems::router())
-        .nest("/api/v1/auth", auth::router(mail_mode))
+        .nest("/api/v1/auth", auth::router(auth_features))
         .nest(
             "/api/v1/libraries",
-            libraries::router(mail_mode)
+            libraries::router(auth_features)
                 .merge(uploads::router())
                 .merge(catalog::router()),
         )

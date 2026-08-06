@@ -65,10 +65,26 @@ fn preferred_chinese(header: &str) -> bool {
         .filter_map(|item| {
             let mut pieces = item.trim().split(';');
             let lang = pieces.next()?.trim().to_ascii_lowercase();
-            let q = pieces
-                .find_map(|part| part.trim().strip_prefix("q=")?.parse::<f32>().ok())
-                .unwrap_or(1.0);
-            (q.is_finite() && (0.0..=1.0).contains(&q)).then_some((lang, q))
+            if lang.is_empty() {
+                return None;
+            }
+            let mut q = None;
+            for parameter in pieces {
+                let parameter = parameter.trim();
+                let Some((name, value)) = parameter.split_once('=') else {
+                    if parameter.eq_ignore_ascii_case("q") {
+                        return None;
+                    }
+                    continue;
+                };
+                if name.trim().eq_ignore_ascii_case("q") {
+                    if q.is_some() {
+                        return None;
+                    }
+                    q = Some(parse_quality(value.trim())?);
+                }
+            }
+            Some((lang, q.unwrap_or(1.0)))
         })
         .collect::<Vec<_>>();
     let en = supported_quality(&ranges, "en");
@@ -77,24 +93,39 @@ fn preferred_chinese(header: &str) -> bool {
 }
 
 fn supported_quality(ranges: &[(String, f32)], supported: &str) -> f32 {
-    let primary = supported.split('-').next().unwrap_or(supported);
     let mut selected: Option<(u8, f32)> = None;
     for (range, quality) in ranges {
-        let range_primary = range.split('-').next().unwrap_or(range);
-        let specificity = if range == supported {
-            2
-        } else if range != "*" && range_primary == primary {
-            1
-        } else if range == "*" {
+        let specificity = if range == "*" {
             0
+        } else if supported == range
+            || supported
+                .strip_prefix(range)
+                .is_some_and(|suffix| suffix.starts_with('-'))
+        {
+            u8::try_from(range.split('-').count()).unwrap_or(u8::MAX)
         } else {
             continue;
         };
-        if selected.is_none_or(|(current, _)| specificity > current) {
+        if selected.is_none_or(|(current_specificity, current_quality)| {
+            specificity > current_specificity
+                || (specificity == current_specificity && *quality > current_quality)
+        }) {
             selected = Some((specificity, *quality));
         }
     }
     selected.map_or(0.0, |(_, quality)| quality)
+}
+
+fn parse_quality(value: &str) -> Option<f32> {
+    let (whole, fraction) = value.split_once('.').map_or((value, ""), |parts| parts);
+    if fraction.len() > 3 || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    match whole {
+        "0" => value.parse().ok(),
+        "1" if fraction.bytes().all(|byte| byte == b'0') => value.parse().ok(),
+        _ => None,
+    }
 }
 
 const fn copy(kind: ProblemDocumentKind, chinese: bool) -> (&'static str, &'static str) {

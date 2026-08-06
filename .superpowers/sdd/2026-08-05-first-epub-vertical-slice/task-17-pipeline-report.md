@@ -154,3 +154,40 @@ cargo test -p folioharbor-worker --test smtp_transport --lib -- --nocapture
 cargo test --workspace --all-targets --all-features --quiet
 # exit 0; all executed tests passed; one external STARTTLS capture test remained intentionally ignored
 ```
+
+## Re-review follow-up
+
+- Mail acquisition now uses one materialized PostgreSQL `clock_timestamp()` for expiry sweeping, eligibility, lease start, and lease end. The caller timestamp no longer controls acquisition. The stale-client regression was RED with four leases, including a database-expired intent; GREEN returns only the three valid intents with database-valid five-minute leases, sweeps the expired ciphertext, and retains owner checks.
+- Authentication feature routing is separate from worker mail enablement. `AuthFeatures` preserves each independent flag for API composition, while `MailMode` answers only whether SMTP delivery is required. Because registration currently always produces verification mail, `registration_enabled=true` with verification disabled is now rejected as `auth.email_verification_enabled` instead of silently removing `/register`. An exhaustive 16-combination matrix covers all registration/verification/invitation/reset combinations, and mixed route tests verify only independently enabled endpoints are mounted.
+- Accept-Language uses basic range matching: generic `zh` matches `zh-CN`, while `zh-TW`, `zh-HK`, and `en-US` do not match shorter/different supported tags. Malformed or over-precision q-values are discarded, and duplicate equally specific ranges retain the highest valid quality.
+- The ignored STARTTLS Mailpit fixture is now self-verifying when invoked: after SMTP acceptance it queries `/api/v1/message/latest` and asserts decoded text/HTML links, stable Message-ID, no attachments, and no remote content. A regular in-process tracing capture proves the capture is active and asserts configuration/failure paths exclude username, password, token, and full-link sentinels. The external Mailpit fixture compiled but was not executed in this follow-up because no capture service was supplied.
+
+### Re-review RED/GREEN and fresh verification
+
+```text
+# RED: stale client time leased 4 rows instead of 3, including an expired intent
+cargo test -p folioharbor-postgres --test mail_pipeline stale_client_time_cannot_lease_an_expired_intent_or_create_an_expired_lease -- --exact --nocapture
+
+# RED: the 16-combination matrix accepted registration=true/verification=false
+cargo test -p folioharbor-application --test config_contract every_mail_flag_combination_preserves_features_or_rejects_registration_without_verification -- --exact --nocapture
+
+# RED: zh-TW incorrectly selected zh-CN
+cargo test -p folioharbor-http --test problem_documents language_negotiation_ranks_only_supported_ranges -- --exact --nocapture
+
+cargo fmt --all -- --check
+git diff --check
+cargo check --workspace --all-targets
+# all exit 0
+
+cargo test -p folioharbor-application --test config_contract --quiet
+# 20 passed
+
+cargo test -p folioharbor-postgres --test mail_pipeline --quiet
+# 6 passed
+
+cargo test -p folioharbor-http --test problem_documents --test auth_routes --test library_routes --quiet
+# problem documents 2, auth routes 12, library routes 4 passed
+
+cargo test -p folioharbor-worker --test smtp_transport --lib --quiet
+# SMTP transport 4 passed; worker library 2 passed, 1 external capture ignored
+```

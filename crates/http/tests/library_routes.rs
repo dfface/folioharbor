@@ -9,7 +9,7 @@ use axum::{
 };
 use folioharbor_application::{
     actor::Actor,
-    config::MailMode,
+    config::AuthFeatures,
     error::AppError,
     identity::{
         AuthenticateSessionCommand, AuthenticateSessionUseCase, AuthenticatedSession,
@@ -259,7 +259,7 @@ fn openapi_exposes_the_complete_library_authorization_surface()
 }
 
 #[tokio::test]
-async fn disabled_mail_mode_removes_the_invitation_route_without_removing_library_routes()
+async fn disabled_invitation_feature_removes_its_route_without_removing_library_routes()
 -> anyhow::Result<()> {
     let owner = UserId::new();
     let auth = Arc::new(RouteAuth(HashMap::from([("owner".to_owned(), owner)])));
@@ -277,7 +277,7 @@ async fn disabled_mail_mode_removes_the_invitation_route_without_removing_librar
         auth.clone(),
         auth,
     )
-    .with_mail_mode(MailMode::Disabled);
+    .with_auth_features(AuthFeatures::new(false, false, false, false));
     let app = router(state);
     let invitation = app
         .clone()

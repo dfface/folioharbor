@@ -19,7 +19,7 @@ use axum::{
 };
 use folioharbor_application::{
     actor::Actor,
-    config::{ConfigSources, MailMode, Settings},
+    config::{AuthFeatures, ConfigSources, Settings},
     error::AppError,
     identity::{
         AuthenticateSessionCommand, AuthenticateSessionUseCase, AuthenticatedSession,
@@ -227,7 +227,7 @@ fn app(fake: Arc<FakeAuth>) -> axum::Router {
     ))
 }
 
-fn app_with_mail_mode(fake: Arc<FakeAuth>, mode: MailMode) -> axum::Router {
+fn app_with_auth_features(fake: Arc<FakeAuth>, features: AuthFeatures) -> axum::Router {
     router(
         AppState::new(
             Url::parse("https://library.example").expect("valid test URL"),
@@ -243,11 +243,11 @@ fn app_with_mail_mode(fake: Arc<FakeAuth>, mode: MailMode) -> axum::Router {
             fake.clone(),
             fake,
         )
-        .with_mail_mode(mode),
+        .with_auth_features(features),
     )
 }
 
-fn enabled_mail_mode() -> MailMode {
+fn enabled_auth_features() -> AuthFeatures {
     Settings::load(ConfigSources {
         environment: BTreeMap::from([
             (
@@ -266,8 +266,8 @@ fn enabled_mail_mode() -> MailMode {
         ..ConfigSources::default()
     })
     .expect("valid enabled mail configuration")
-    .mail
-    .mode
+    .auth
+    .features()
 }
 
 async fn response_json(response: axum::response::Response) -> serde_json::Value {
@@ -331,51 +331,86 @@ async fn request_validation_failures_are_correlated_problem_details() {
 }
 
 #[tokio::test]
-async fn disabled_mail_mode_removes_all_mail_producing_auth_routes() {
+async fn disabled_auth_features_remove_all_optional_auth_routes() {
     for path in [
         "/api/v1/auth/register",
         "/api/v1/auth/verify-email",
         "/api/v1/auth/forgot-password",
         "/api/v1/auth/reset-password",
     ] {
-        let response = app_with_mail_mode(Arc::new(FakeAuth::default()), MailMode::Disabled)
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(path)
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from("{}"))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND, "route {path}");
-    }
-
-    let login = app_with_mail_mode(Arc::new(FakeAuth::default()), MailMode::Disabled)
+        let response = app_with_auth_features(
+            Arc::new(FakeAuth::default()),
+            AuthFeatures::new(false, false, false, false),
+        )
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/v1/auth/login")
+                .uri(path)
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from("{}"))
                 .expect("request"),
         )
         .await
         .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "route {path}");
+    }
+
+    let login = app_with_auth_features(
+        Arc::new(FakeAuth::default()),
+        AuthFeatures::new(false, false, false, false),
+    )
+    .oneshot(
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/auth/login")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .expect("request"),
+    )
+    .await
+    .expect("response");
     assert_ne!(login.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn enabled_mail_mode_keeps_all_mail_producing_auth_routes() {
+async fn enabled_auth_features_keep_all_optional_auth_routes() {
     for path in [
         "/api/v1/auth/register",
         "/api/v1/auth/verify-email",
         "/api/v1/auth/forgot-password",
         "/api/v1/auth/reset-password",
     ] {
-        let response = app_with_mail_mode(Arc::new(FakeAuth::default()), enabled_mail_mode())
+        let response =
+            app_with_auth_features(Arc::new(FakeAuth::default()), enabled_auth_features())
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(path)
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from("{}"))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+
+        assert_ne!(response.status(), StatusCode::NOT_FOUND, "route {path}");
+    }
+}
+
+#[tokio::test]
+async fn mixed_auth_features_mount_only_the_independently_enabled_routes() {
+    let features = AuthFeatures::new(false, true, false, false);
+    for (path, expected) in [
+        ("/api/v1/auth/register", StatusCode::NOT_FOUND),
+        (
+            "/api/v1/auth/verify-email",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        ("/api/v1/auth/forgot-password", StatusCode::NOT_FOUND),
+        ("/api/v1/auth/reset-password", StatusCode::NOT_FOUND),
+    ] {
+        let response = app_with_auth_features(Arc::new(FakeAuth::default()), features)
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -386,8 +421,7 @@ async fn enabled_mail_mode_keeps_all_mail_producing_auth_routes() {
             )
             .await
             .expect("response");
-
-        assert_ne!(response.status(), StatusCode::NOT_FOUND, "route {path}");
+        assert_eq!(response.status(), expected, "route {path}");
     }
 }
 

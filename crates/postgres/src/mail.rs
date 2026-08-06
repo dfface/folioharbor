@@ -40,13 +40,6 @@ impl MailRepository for PgMailRepository {
         )
         .await
         .map_err(|_| MailRepositoryError)?;
-        sqlx::query(
-            "UPDATE folioharbor.mail_outbox SET state='expired',token_ciphertext=''::bytea,lease_owner=NULL,lease_expires_at=NULL,last_error_code='intent_expired',updated_at=$1 WHERE state IN ('pending','retry_wait','leased') AND expires_at <= $1",
-        )
-        .bind(request.now)
-        .execute(&mut *transaction)
-        .await
-        .map_err(|_| MailRepositoryError)?;
         let rows: Vec<(
             Uuid,
             Option<Uuid>,
@@ -64,12 +57,11 @@ impl MailRepository for PgMailRepository {
             time::OffsetDateTime,
             time::OffsetDateTime,
         )> = sqlx::query_as(
-            "WITH candidates AS (SELECT mail_id FROM folioharbor.mail_outbox WHERE expires_at > $1 AND next_run_at <= $1 AND (state IN ('pending','retry_wait') OR (state='leased' AND lease_expires_at <= $1)) ORDER BY next_run_at,created_at FOR UPDATE SKIP LOCKED LIMIT $2) UPDATE folioharbor.mail_outbox m SET state='leased',lease_owner=$3,lease_expires_at=$4,attempt_count=m.attempt_count+1,last_error_code=NULL,updated_at=$1 FROM candidates c WHERE m.mail_id=c.mail_id RETURNING m.mail_id,m.recipient_account_id,m.delivery_address,m.template_code,m.template_version,m.locale,m.token_ciphertext,m.encryption_key_id,m.token_nonce,m.idempotency_key,m.invitation_library_id,m.invitation_role,m.attempt_count,m.expires_at,m.lease_expires_at",
+            "WITH database_clock AS MATERIALIZED (SELECT clock_timestamp() AS db_now), expired AS (UPDATE folioharbor.mail_outbox m SET state='expired',token_ciphertext=''::bytea,lease_owner=NULL,lease_expires_at=NULL,last_error_code='intent_expired',updated_at=database_clock.db_now FROM database_clock WHERE m.state IN ('pending','retry_wait','leased') AND m.expires_at<=database_clock.db_now RETURNING m.mail_id), candidates AS (SELECT m.mail_id FROM folioharbor.mail_outbox m CROSS JOIN database_clock WHERE m.expires_at>database_clock.db_now AND m.next_run_at<=database_clock.db_now AND (m.state IN ('pending','retry_wait') OR (m.state='leased' AND m.lease_expires_at<=database_clock.db_now)) ORDER BY m.next_run_at,m.created_at FOR UPDATE OF m SKIP LOCKED LIMIT $1) UPDATE folioharbor.mail_outbox m SET state='leased',lease_owner=$2,lease_expires_at=database_clock.db_now+$3,attempt_count=m.attempt_count+1,last_error_code=NULL,updated_at=database_clock.db_now FROM candidates c CROSS JOIN database_clock WHERE m.mail_id=c.mail_id RETURNING m.mail_id,m.recipient_account_id,m.delivery_address,m.template_code,m.template_version,m.locale,m.token_ciphertext,m.encryption_key_id,m.token_nonce,m.idempotency_key,m.invitation_library_id,m.invitation_role,m.attempt_count,m.expires_at,m.lease_expires_at",
         )
-        .bind(request.now)
         .bind(i64::from(request.limit))
         .bind(&request.owner)
-        .bind(request.now + request.lease_for)
+        .bind(request.lease_for)
         .fetch_all(&mut *transaction)
         .await
         .map_err(|_| MailRepositoryError)?;

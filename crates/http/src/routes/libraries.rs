@@ -12,7 +12,7 @@ use axum::{
     routing::{get, patch, post},
 };
 use folioharbor_application::{
-    config::MailMode,
+    config::AuthFeatures,
     error::{AppError, FieldViolation},
     libraries::{
         ChangeLibraryMemberRequest, InviteLibraryMemberRequest, ListLibrariesRequest,
@@ -25,7 +25,7 @@ use folioharbor_domain::{
 };
 use serde::{Deserialize, Serialize};
 
-pub fn router(mail_mode: Option<MailMode>) -> Router<AppState> {
+pub fn router(auth_features: Option<AuthFeatures>) -> Router<AppState> {
     let router = Router::new()
         .route("/", get(list_libraries))
         .route("/{library_id}", get(get_library))
@@ -35,7 +35,7 @@ pub fn router(mail_mode: Option<MailMode>) -> Router<AppState> {
             "/{library_id}/members/{user_id}",
             patch(change_member).delete(remove_member),
         );
-    if mail_mode.is_none_or(MailMode::invitation_enabled) {
+    if auth_features.is_none_or(AuthFeatures::invitation_enabled) {
         router.route("/{library_id}/invitations", post(invite_member))
     } else {
         router

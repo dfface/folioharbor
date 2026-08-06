@@ -752,6 +752,7 @@ dependencies = [
  "folioharbor-test-support",
  "lettre",
  "secrecy",
+ "serde_json",
  "sha2",
  "sqlx",
  "tempfile",

@@ -55,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let (download_api, download_blobs) = build_download(&settings, pool.clone());
     let library_repository = PgLibraryRepository::new(pool.clone());
     let personal_library_enabled = settings.auth.personal_library_enabled;
+    let auth_features = settings.auth.features();
     let secret = SecretString::from(
         settings
             .auth
@@ -101,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
         identity,
         limiter,
     )
-    .with_mail_mode(settings.mail.mode)
+    .with_auth_features(auth_features)
     .with_library_api(library_api)
     .with_upload_api(upload_api)
     .with_catalog_api(catalog_api);

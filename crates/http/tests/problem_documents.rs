@@ -129,6 +129,13 @@ async fn language_negotiation_ranks_only_supported_ranges() {
         ("fr;q=1, *;q=0.6, zh-CN;q=0", "en"),
         ("*;q=0.9, zh-CN;q=0.8", "en"),
         ("fr", "en"),
+        ("zh;q=0.9, en;q=0.8", "zh-CN"),
+        ("zh-TW;q=1, en;q=0.8", "en"),
+        ("zh-HK;q=1, en;q=0.8", "en"),
+        ("en-US;q=1, zh;q=0.8", "zh-CN"),
+        ("zh-CN;q=bogus, en;q=0.8", "en"),
+        ("zh-CN;q=0.1234, en;q=0.8", "en"),
+        ("zh-CN;q=0.2, zh-CN;q=0.9, en;q=0.8", "zh-CN"),
     ];
     for (accept, expected) in cases {
         let response = get("item-not-found", Some(accept)).await;

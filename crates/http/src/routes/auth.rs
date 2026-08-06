@@ -17,7 +17,7 @@ use axum::{
     routing::{get, post},
 };
 use folioharbor_application::{
-    config::MailMode,
+    config::AuthFeatures,
     error::AppError,
     identity::{
         CompletePasswordResetCommand, LoginCommand, LogoutCommand, RegisterAccountCommand,
@@ -32,20 +32,20 @@ use folioharbor_domain::{
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize};
 
-pub fn router(mail_mode: Option<MailMode>) -> Router<AppState> {
+pub fn router(auth_features: Option<AuthFeatures>) -> Router<AppState> {
     let mut router = Router::new()
         .route("/login", post(login))
         .route("/logout", post(logout))
         .route("/session", get(current_session))
         .route("/sessions", get(list_sessions))
         .route("/sessions/{session_id}/revoke", post(revoke_session));
-    if mail_mode.is_none_or(MailMode::registration_enabled) {
+    if auth_features.is_none_or(AuthFeatures::registration_enabled) {
         router = router.route("/register", post(register));
     }
-    if mail_mode.is_none_or(MailMode::email_verification_enabled) {
+    if auth_features.is_none_or(AuthFeatures::email_verification_enabled) {
         router = router.route("/verify-email", post(verify_email));
     }
-    if mail_mode.is_none_or(MailMode::password_reset_enabled) {
+    if auth_features.is_none_or(AuthFeatures::password_reset_enabled) {
         router = router
             .route("/forgot-password", post(forgot_password))
             .route("/reset-password", post(reset_password));

@@ -113,8 +113,8 @@ async fn enqueue_conflict_returns_the_id_that_is_actually_stored() -> anyhow::Re
 }
 
 #[tokio::test]
-async fn every_worker_transition_rejects_an_expired_lease_using_database_time() -> anyhow::Result<()>
-{
+async fn stale_client_time_cannot_lease_an_expired_intent_or_create_an_expired_lease()
+-> anyhow::Result<()> {
     let database = TestPostgres::provision().await?;
     let pools = PgPools::connect_for_tests(
         &database.owner_url()?,
@@ -164,6 +164,9 @@ async fn every_worker_transition_rejects_an_expired_lease_using_database_time() 
         .bind(actual_now - time::Duration::minutes(1))
         .execute(&pools.owner)
         .await?;
+    let database_time_before_lease: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&pools.owner)
+        .await?;
     let leased = worker
         .lease(LeaseMail {
             owner: "stale-worker".to_owned(),
@@ -172,77 +175,55 @@ async fn every_worker_transition_rejects_an_expired_lease_using_database_time() 
             limit: 4,
         })
         .await?;
-    assert_eq!(leased.len(), 4);
+    assert_eq!(leased.len(), 3);
+    assert!(leased.iter().all(|mail| mail.mail_id != ids[3]));
+    assert!(
+        leased
+            .iter()
+            .all(|mail| mail.expires_at > database_time_before_lease)
+    );
+    assert!(leased.iter().all(|mail| {
+        mail.lease_expires_at > database_time_before_lease + time::Duration::minutes(4)
+    }));
 
     assert!(
         !worker
-            .mark_sent(ids[0], "stale-worker", stale_batch_start)
+            .mark_sent(leased[0].mail_id, "wrong-worker", stale_batch_start)
             .await?
     );
     assert!(
-        !worker
+        worker
+            .mark_sent(leased[0].mail_id, "stale-worker", stale_batch_start)
+            .await?
+    );
+    assert!(
+        worker
             .retry(
-                ids[1],
+                leased[1].mail_id,
                 "stale-worker",
                 stale_batch_start,
-                actual_now + time::Duration::minutes(1),
+                stale_batch_start + time::Duration::minutes(1),
                 "smtp_transient",
             )
             .await?
     );
     assert!(
-        !worker
-            .mark_failed(ids[2], "stale-worker", stale_batch_start, "smtp_permanent")
-            .await?
-    );
-    assert!(
-        !worker
-            .mark_failed(ids[3], "stale-worker", stale_batch_start, "intent_expired")
-            .await?
-    );
-    let states: Vec<String> = sqlx::query_scalar(
-        "SELECT state FROM folioharbor.mail_outbox WHERE mail_id = ANY($1) ORDER BY delivery_address",
-    )
-    .bind(&ids)
-    .fetch_all(&pools.owner)
-    .await?;
-    assert_eq!(states, vec!["leased", "leased", "leased", "leased"]);
-
-    let ownership_id = api
-        .enqueue(NewMailOutboxEntry {
-            recipient_account_id: None,
-            ..mail_entry(
-                UserId::new(),
-                "owned-lease@example.com",
-                "verification",
-                "en",
-                actual_now,
-            )
-        })
-        .await?;
-    let ownership_lease = worker
-        .lease(LeaseMail {
-            owner: "right-worker".to_owned(),
-            now: OffsetDateTime::now_utc(),
-            lease_for: time::Duration::minutes(5),
-            limit: 5,
-        })
-        .await?;
-    assert!(
-        ownership_lease
-            .iter()
-            .any(|mail| mail.mail_id == ownership_id)
-    );
-    assert!(
-        !worker
-            .mark_sent(ownership_id, "wrong-worker", actual_now)
-            .await?
-    );
-    assert!(
         worker
-            .mark_sent(ownership_id, "right-worker", actual_now)
+            .mark_failed(
+                leased[2].mail_id,
+                "stale-worker",
+                stale_batch_start,
+                "smtp_permanent",
+            )
             .await?
     );
+    let expired: (String, Vec<u8>) = sqlx::query_as(
+        "SELECT state,token_ciphertext FROM folioharbor.mail_outbox WHERE mail_id=$1",
+    )
+    .bind(ids[3])
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_eq!(expired, ("expired".to_owned(), Vec::new()));
 
     pools.close().await;
     database.cleanup().await?;
@@ -260,7 +241,7 @@ async fn registration_and_verification_intent_commit_or_roll_back_together() -> 
     .await?;
     run_migrations(&pools.owner).await?;
     let repository = PgIdentityRepository::new(pools.api.clone());
-    let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
+    let now = OffsetDateTime::now_utc();
 
     let committed_user = UserId::new();
     assert_eq!(
@@ -551,7 +532,7 @@ async fn worker_leases_retry_and_terminal_transitions_wipe_ciphertext() -> anyho
     )
     .await?;
     run_migrations(&pools.owner).await?;
-    let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
+    let now = OffsetDateTime::now_utc() - time::Duration::minutes(1);
     let api = PgMailRepository::new(pools.api.clone());
     let worker = PgMailRepository::new(pools.worker.clone());
     let mail_id = api
@@ -584,6 +565,19 @@ async fn worker_leases_retry_and_terminal_transitions_wipe_ciphertext() -> anyho
             .retry(mail_id, "worker-a", now, retry_at, "smtp_451")
             .await?
     );
+    let retry_is_delayed: bool = sqlx::query_scalar(
+        "SELECT next_run_at>clock_timestamp() FROM folioharbor.mail_outbox WHERE mail_id=$1",
+    )
+    .bind(mail_id)
+    .fetch_one(&pools.owner)
+    .await?;
+    assert!(retry_is_delayed);
+    sqlx::query(
+        "UPDATE folioharbor.mail_outbox SET next_run_at=clock_timestamp() WHERE mail_id=$1",
+    )
+    .bind(mail_id)
+    .execute(&pools.owner)
+    .await?;
     let second = worker
         .lease(LeaseMail {
             owner: "worker-b".to_owned(),
@@ -658,10 +652,16 @@ async fn worker_leases_retry_and_terminal_transitions_wipe_ciphertext() -> anyho
         })
         .await?;
     assert_eq!(abandoned[0].mail_id, recovery_id);
+    sqlx::query(
+        "UPDATE folioharbor.mail_outbox SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE mail_id=$1",
+    )
+    .bind(recovery_id)
+    .execute(&pools.owner)
+    .await?;
     let recovered = worker
         .lease(LeaseMail {
             owner: "worker-e".to_owned(),
-            now: now + time::Duration::minutes(6),
+            now,
             lease_for: time::Duration::minutes(5),
             limit: 1,
         })
@@ -672,7 +672,7 @@ async fn worker_leases_retry_and_terminal_transitions_wipe_ciphertext() -> anyho
     let expired_id = api
         .enqueue(NewMailOutboxEntry {
             recipient_account_id: None,
-            expires_at: now + time::Duration::seconds(1),
+            expires_at: now + time::Duration::hours(1),
             ..mail_entry(
                 UserId::new(),
                 "expired@example.com",
@@ -682,10 +682,16 @@ async fn worker_leases_retry_and_terminal_transitions_wipe_ciphertext() -> anyho
             )
         })
         .await?;
+    sqlx::query(
+        "UPDATE folioharbor.mail_outbox SET created_at=clock_timestamp()-interval '2 seconds',expires_at=clock_timestamp()-interval '1 second' WHERE mail_id=$1",
+    )
+    .bind(expired_id)
+    .execute(&pools.owner)
+    .await?;
     let _ = worker
         .lease(LeaseMail {
             owner: "worker-f".to_owned(),
-            now: now + time::Duration::seconds(2),
+            now,
             lease_for: time::Duration::minutes(5),
             limit: 1,
         })

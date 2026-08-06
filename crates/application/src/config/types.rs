@@ -266,38 +266,76 @@ pub struct AuthSettings {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MailFlows {
+pub struct AuthFeatures {
     registration: bool,
     email_verification: bool,
     invitation: bool,
     password_reset: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MailMode {
-    Disabled,
-    Enabled(MailFlows),
-}
-
-impl MailMode {
-    pub(super) const fn from_flags(
+impl AuthFeatures {
+    #[must_use]
+    pub const fn new(
         registration: bool,
         email_verification: bool,
         invitation: bool,
         password_reset: bool,
     ) -> Self {
-        let flows = MailFlows {
-            registration: registration && email_verification,
+        Self {
+            registration,
             email_verification,
             invitation,
             password_reset,
-        };
-        if flows.registration
-            || flows.email_verification
-            || flows.invitation
-            || flows.password_reset
-        {
-            Self::Enabled(flows)
+        }
+    }
+
+    #[must_use]
+    pub const fn registration_enabled(self) -> bool {
+        self.registration
+    }
+
+    #[must_use]
+    pub const fn email_verification_enabled(self) -> bool {
+        self.email_verification
+    }
+
+    #[must_use]
+    pub const fn invitation_enabled(self) -> bool {
+        self.invitation
+    }
+
+    #[must_use]
+    pub const fn password_reset_enabled(self) -> bool {
+        self.password_reset
+    }
+}
+
+impl AuthSettings {
+    #[must_use]
+    pub const fn features(&self) -> AuthFeatures {
+        AuthFeatures::new(
+            self.registration_enabled,
+            self.email_verification_enabled,
+            self.invitation_enabled,
+            self.password_reset_enabled,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MailMode {
+    Disabled,
+    Enabled,
+}
+
+impl MailMode {
+    pub(super) const fn from_flags(
+        email_verification: bool,
+        invitation: bool,
+        password_reset: bool,
+    ) -> Self {
+        if email_verification || invitation || password_reset {
+            Self::Enabled
         } else {
             Self::Disabled
         }
@@ -305,51 +343,7 @@ impl MailMode {
 
     #[must_use]
     pub const fn is_enabled(self) -> bool {
-        matches!(self, Self::Enabled(_))
-    }
-
-    #[must_use]
-    pub const fn registration_enabled(self) -> bool {
-        matches!(
-            self,
-            Self::Enabled(MailFlows {
-                registration: true,
-                ..
-            })
-        )
-    }
-
-    #[must_use]
-    pub const fn email_verification_enabled(self) -> bool {
-        matches!(
-            self,
-            Self::Enabled(MailFlows {
-                email_verification: true,
-                ..
-            })
-        )
-    }
-
-    #[must_use]
-    pub const fn invitation_enabled(self) -> bool {
-        matches!(
-            self,
-            Self::Enabled(MailFlows {
-                invitation: true,
-                ..
-            })
-        )
-    }
-
-    #[must_use]
-    pub const fn password_reset_enabled(self) -> bool {
-        matches!(
-            self,
-            Self::Enabled(MailFlows {
-                password_reset: true,
-                ..
-            })
-        )
+        matches!(self, Self::Enabled)
     }
 }
 
