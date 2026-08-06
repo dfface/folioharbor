@@ -776,8 +776,10 @@ the real PostgreSQL, HTTP, OpenAPI, and SQLx metadata files govern authorization
 query-count, and checked-query behavior. These are Task 13 integration boundaries, not Task 14
 reader/resource work. Migration `0010_catalog.sql` remains unchanged; the additive
 `0011_catalog_queries.sql` hardens the authorized projection and keyset index. Consequently, the
-not-yet-implemented migrations originally numbered 0011 through 0014 are reserved as 0012 through
-0015 below.
+not-yet-implemented migrations originally numbered 0011 through 0014 were initially reserved as
+0012 through 0015 below. Task 14 now also owns additive migration `0013` to correct the committed
+reader projection without rewriting migration history, so the remaining planned migrations are
+renumbered 0014 through 0017.
 
 - [ ] **Step 1: Write failing list/detail tests**
 
@@ -810,23 +812,42 @@ git commit -m "feat: expose authorized library catalog queries"
 
 - Create: `.sqlx/query-f5227dcc927da07bef1f71f2e39ef09ef6e75b3001dcbd1d8113109a12620afc.json`
 - Create: `migrations/0012_reader_projection.sql`
+- Create: `migrations/0013_reader_item_read_authorization.sql`
 - Create: `crates/application/src/reader/{mod,get_manifest,get_resource}.rs`
 - Create: `crates/application/src/ports/publication_resource_reader.rs`
 - Create: `crates/http/src/routes/reader.rs`
 - Create: `crates/http/tests/reader_routes.rs`
 - Create: `crates/postgres/src/reader_projection.rs`
-- Modify: `crates/postgres/src/catalog.rs`
-- Modify: `crates/epub/src/lib.rs`
+- Modify: `crates/application/src/{lib.rs,ports/mod.rs}`
+- Modify: `crates/application/tests/reader_use_cases.rs`
+- Modify: `crates/postgres/src/{catalog.rs,lib.rs}`
+- Modify: `crates/postgres/tests/{catalog_visibility,migration_from_zero}.rs`
+- Modify: `crates/epub/src/{lib,resource_reader,sanitize}.rs`
+- Modify: `crates/epub/tests/{resource_reader,sanitize_content}.rs`
+- Modify: `crates/http/src/routes/mod.rs`
 - Modify: `crates/{epub,http}/Cargo.toml`
 - Modify: `apps/api/{Cargo.toml,src/lib.rs,src/main.rs,tests/upload_composition.rs}`
 - Modify: `Cargo.lock`
 - Modify: `openapi/folioharbor-v1.yaml`
+- Modify: `docs/superpowers/plans/2026-08-05-first-epub-vertical-slice.md`
 
 **Interfaces:**
 
-- Produces `GetPublicationManifest::execute(actor, item_id) -> PublicationManifest`.
-- Produces `GetPublicationResource::execute(actor, item_id, ResourceId) -> ResourceResponse`.
+- Produces `GetPublicationManifest::execute(actor, item_id, RequestId) -> PublicationManifest`.
+- Produces `GetPublicationResource::execute(actor, item_id, ResourceId, RequestId) -> ResourceResponse`.
+- Uses the existing domain `RequestId` on every repository transaction and reader HTTP request.
 - Produces `GET /api/v1/items/{item_id}/manifest` and `GET /api/v1/items/{item_id}/resources/{resource_id}`.
+- Produces sanitized XHTML/CSS references as same-origin
+  `/api/v1/items/{item_id}/resources/{opaque-id}` URLs; attacker-controlled EPUB authority and ZIP
+  paths never enter returned URLs.
+
+**Task 14 implementation amendment (2026-08-06):** Migration `0012_reader_projection.sql`
+remains immutable after commit. Additive migration `0013_reader_item_read_authorization.sql`
+replaces its projection function so every manifest and resource call requires a fresh `item.read`
+permission independently of `holding.view`, retains an empty function search path, revokes PUBLIC
+and Worker execution, and grants execution only to the API role. Task 14 owns the server-side CSP
+and browser-resolvable resource URL contract. Task 21 owns implementation and enforcement tests for
+the Web `ReaderFrame` sandbox; no iframe implementation is pulled forward into Task 14.
 
 - [ ] **Step 1: Write failing manifest/resource contract tests**
 
@@ -842,7 +863,11 @@ Resolve opaque ID to normalized entry only after authorization. Seek/read only t
 
 - [ ] **Step 4: Apply browser isolation headers**
 
-Return `Content-Security-Policy: default-src 'none'` with the minimum data/blob/style/font/img allowances actually required, `X-Content-Type-Options: nosniff`, restrictive referrer policy, and cache validators. The Web client must render documents in a sandboxed iframe without `allow-scripts`, `allow-forms`, or same-origin privilege unless a later security review proves a narrower safe mechanism.
+Return `Content-Security-Policy: default-src 'none'` with the minimum same-origin/data/blob
+style/font/img allowances actually required, explicit script/form/frame denial,
+`X-Content-Type-Options: nosniff`, restrictive referrer policy, and cache validators. Task 21 must
+render documents in a sandboxed `ReaderFrame` without `allow-scripts`, `allow-forms`, or
+same-origin privilege unless a later security review proves a narrower safe mechanism.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -857,7 +882,7 @@ git commit -m "feat: serve authorized EPUB reading resources"
 
 **Files:**
 
-- Create: `migrations/0013_reading_state.sql`
+- Create: `migrations/0014_reading_state.sql`
 - Create: `crates/domain/src/reader/{mod,locator,reading_state}.rs`
 - Create: `crates/application/src/reader/{get_progress,update_progress}.rs`
 - Create: `crates/application/src/ports/reading_repository.rs`
@@ -895,7 +920,7 @@ Return an ETag derived from state version; accept `If-Match` and require the JSO
 Run concurrent updates from two devices, offline retry order permutations, RLS privacy tests, HTTP ETag tests, and workspace gate. Commit:
 
 ```bash
-git add migrations/0013_reading_state.sql crates/domain crates/application crates/postgres crates/http openapi
+git add migrations/0014_reading_state.sql crates/domain crates/application crates/postgres crates/http openapi
 git commit -m "feat: synchronize versioned reading progress"
 ```
 
@@ -944,7 +969,7 @@ git commit -m "feat: stream authorized original EPUB downloads"
 
 **Files:**
 
-- Create: `migrations/0014_outbox.sql`
+- Create: `migrations/0015_outbox.sql`
 - Create: `crates/application/src/mail/{mod,enqueue,deliver}.rs`
 - Create: `crates/application/src/ports/mail_repository.rs`
 - Create: `crates/postgres/src/mail.rs`
@@ -980,7 +1005,7 @@ Render one public, locale-negotiated explanation per stable problem code without
 Run against a local SMTP capture service in integration tests, inspect captured text/HTML, force retry/failure, scan logs for test token values, then run workspace gate. Commit:
 
 ```bash
-git add migrations/0014_outbox.sql crates/application crates/postgres crates/http apps/worker deploy
+git add migrations/0015_outbox.sql crates/application crates/postgres crates/http apps/worker deploy
 git commit -m "feat: deliver transactional account and invitation email"
 ```
 
@@ -988,7 +1013,7 @@ git commit -m "feat: deliver transactional account and invitation email"
 
 **Files:**
 
-- Create: `migrations/0015_deletion_and_gc.sql`
+- Create: `migrations/0016_deletion_and_gc.sql`
 - Create: `crates/domain/src/catalog/lifecycle.rs`
 - Create: `crates/application/src/catalog/{delete_item,restore_item,garbage_collect}.rs`
 - Create: `crates/application/tests/item_lifecycle.rs`
@@ -1024,7 +1049,7 @@ Select a limited `SKIP LOCKED` batch, recheck authoritative references in the tr
 Run shared-Blob deletion, concurrent import-versus-GC, storage failure/retry, progress preservation, quota release, and audit retention tests. Run workspace gate. Commit:
 
 ```bash
-git add migrations/0015_deletion_and_gc.sql crates/domain crates/application crates/postgres crates/http apps/worker openapi
+git add migrations/0016_deletion_and_gc.sql crates/domain crates/application crates/postgres crates/http apps/worker openapi
 git commit -m "feat: add recoverable item deletion and safe blob GC"
 ```
 
@@ -1178,7 +1203,7 @@ git commit -m "feat: add secure EPUB reader and progress sync"
 
 **Files:**
 
-- Create: `migrations/0016_operations.sql`
+- Create: `migrations/0017_operations.sql`
 - Create: `crates/application/src/operations/{mod,health,bootstrap_admin,consistency_check}.rs`
 - Create: `crates/postgres/src/operations.rs`
 - Create: `crates/http/src/routes/health.rs`
@@ -1220,7 +1245,7 @@ Migration completes before API/Worker; runtime processes use distinct role secre
 Document PostgreSQL plus Blob volume as one business backup set, schema version and Blob watermark recording, restore ordering, and post-restore `storage check` for missing Blob, orphan location, and hash mismatch. Do not claim crash-consistent cross-volume snapshots unless the operator provides them. Run CLI/health/Compose config tests and workspace/Web gates. Commit:
 
 ```bash
-git add migrations/0016_operations.sql crates apps deploy docs/operations
+git add migrations/0017_operations.sql crates apps deploy docs/operations
 git commit -m "feat: add deployment operations and observability"
 ```
 

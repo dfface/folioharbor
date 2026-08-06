@@ -99,6 +99,7 @@ impl<C: ReaderCatalogRepository + ?Sized, R: PublicationResourceReader + ?Sized>
         let bytes = self
             .reader
             .read(ResourceReadRequest {
+                item_id: publication.item_id,
                 blob_id: publication.blob_id,
                 storage_key: publication.storage_key,
                 package_id: publication.package_id,
@@ -112,7 +113,8 @@ impl<C: ReaderCatalogRepository + ?Sized, R: PublicationResourceReader + ?Sized>
             bytes,
             media_type: resource.media_type,
             etag: format!(
-                "\"resource-{}-{}-sanitizer-v1\"",
+                "\"resource-{}-{}-{}-sanitizer-v2\"",
+                publication.item_id.as_uuid(),
                 publication.package_id.as_uuid(),
                 resource_id.as_str()
             ),

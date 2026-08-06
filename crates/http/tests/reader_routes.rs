@@ -6,7 +6,8 @@ use axum::{
     http::{
         Request, StatusCode,
         header::{
-            CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG, X_CONTENT_TYPE_OPTIONS,
+            CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG, REFERRER_POLICY,
+            X_CONTENT_TYPE_OPTIONS,
         },
     },
 };
@@ -179,8 +180,26 @@ impl ReaderApi for Reader {
                 relation: String::new(),
                 title: None,
             }],
-            resources: Vec::new(),
-            toc: Vec::new(),
+            resources: vec![
+                ManifestLink {
+                    href: format!("/api/v1/items/{}/resources/cover", self.item.as_uuid()),
+                    media_type: "image/png".to_owned(),
+                    relation: "resource".to_owned(),
+                    title: None,
+                },
+                ManifestLink {
+                    href: format!("/api/v1/items/{}/resources/styles", self.item.as_uuid()),
+                    media_type: "text/css".to_owned(),
+                    relation: "resource".to_owned(),
+                    title: None,
+                },
+            ],
+            toc: vec![ManifestLink {
+                href: format!("/api/v1/items/{}/resources/safe#start", self.item.as_uuid()),
+                media_type: "application/xhtml+xml".to_owned(),
+                relation: String::new(),
+                title: Some("Chapter 1".to_owned()),
+            }],
             links: vec![ManifestLink {
                 href: format!("/api/v1/items/{}/manifest", self.item.as_uuid()),
                 media_type: "application/webpub+json".to_owned(),
@@ -248,6 +267,43 @@ fn request(uri: &str, actor: &str) -> Request<Body> {
         .expect("request")
 }
 
+fn manifest_golden(item: ItemId, manifestation: ManifestationId) -> serde_json::Value {
+    serde_json::json!({
+        "metadata": {
+            "title": "Safe Book",
+            "authors": ["Writer"],
+            "languages": ["en"]
+        },
+        "manifestationId": manifestation.as_uuid().to_string(),
+        "readingOrder": [{
+            "href": format!("/api/v1/items/{}/resources/safe", item.as_uuid()),
+            "type": "application/xhtml+xml"
+        }],
+        "resources": [
+            {
+                "href": format!("/api/v1/items/{}/resources/cover", item.as_uuid()),
+                "type": "image/png",
+                "rel": "resource"
+            },
+            {
+                "href": format!("/api/v1/items/{}/resources/styles", item.as_uuid()),
+                "type": "text/css",
+                "rel": "resource"
+            }
+        ],
+        "toc": [{
+            "href": format!("/api/v1/items/{}/resources/safe#start", item.as_uuid()),
+            "type": "application/xhtml+xml",
+            "title": "Chapter 1"
+        }],
+        "links": [{
+            "href": format!("/api/v1/items/{}/manifest", item.as_uuid()),
+            "type": "application/webpub+json",
+            "rel": "self"
+        }]
+    })
+}
+
 #[tokio::test]
 async fn serves_readium_manifest_and_isolated_resource_without_internal_paths() {
     let (app, item, manifestation) = app();
@@ -271,8 +327,7 @@ async fn serves_readium_manifest_and_isolated_resource_without_internal_paths() 
         .expect("body")
         .to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
-    assert_eq!(json["metadata"]["title"], "Safe Book");
-    assert_eq!(json["manifestationId"], manifestation.as_uuid().to_string());
+    assert_eq!(json, manifest_golden(item, manifestation));
     assert!(!String::from_utf8_lossy(&body).contains("OPS/"));
 
     let resource = app
@@ -297,7 +352,7 @@ async fn serves_readium_manifest_and_isolated_resource_without_internal_paths() 
             .get(CONTENT_SECURITY_POLICY)
             .and_then(|v| v.to_str().ok()),
         Some(
-            "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data: blob:"
+            "default-src 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'none'; form-action 'none'; frame-src 'none'"
         )
     );
     assert_eq!(
@@ -383,11 +438,18 @@ fn malicious_archive() -> Vec<u8> {
         .start_file("OPS/chapter.xhtml", SimpleFileOptions::default())
         .expect("entry");
     writer.write_all(br#"<html><head><meta http-equiv="refresh" content="0;url=https://evil.test"></head><body onload="steal()"><script>steal()</script><form>x</form><iframe src="https://evil.test"></iframe><object>x</object><p onclick="x()">safe boundary</p></body></html>"#).expect("html");
+    writer
+        .start_file("OPS/book.css", SimpleFileOptions::default())
+        .expect("css entry");
+    writer.write_all(br"@import url('https://evil.test/import.css'); p{color:red;background-image:url(cover.png);list-style-image:url(javascript:alert(1))}").expect("css");
+    writer
+        .start_file("OPS/cover.png", SimpleFileOptions::default())
+        .expect("image entry");
+    writer.write_all(b"PNG").expect("image");
     writer.finish().expect("archive").into_inner()
 }
 
-#[tokio::test]
-async fn malicious_epub_content_is_sanitized_through_the_real_http_boundary() {
+fn real_reader_app() -> (axum::Router, ItemId, PublicationPackageId) {
     let allowed = UserId::new();
     let item = ItemId::new();
     let package = PublicationPackageId::new();
@@ -402,17 +464,26 @@ async fn malicious_epub_content_is_sanitized_through_the_real_http_boundary() {
         primary_title: "Unsafe input".to_owned(),
         authors: Vec::new(),
         languages: Vec::new(),
-        resources: vec![ReaderResource {
-            normalized_href: "OPS/chapter.xhtml".to_owned(),
-            media_type: "application/xhtml+xml".to_owned(),
-        }],
+        resources: vec![
+            ReaderResource {
+                normalized_href: "OPS/chapter.xhtml".to_owned(),
+                media_type: "application/xhtml+xml".to_owned(),
+            },
+            ReaderResource {
+                normalized_href: "OPS/book.css".to_owned(),
+                media_type: "text/css".to_owned(),
+            },
+            ReaderResource {
+                normalized_href: "OPS/cover.png".to_owned(),
+                media_type: "image/png".to_owned(),
+            },
+        ],
         reading_order: vec![ReaderSpineEntry {
             normalized_href: "OPS/chapter.xhtml".to_owned(),
             linear: true,
         }],
         toc: Vec::new(),
     };
-    let resource_id = ResourceId::for_resource(package, "OPS/chapter.xhtml");
     let reader: Arc<dyn ReaderApi> = Arc::new(ReaderService::new(
         ReadableCatalog {
             allowed,
@@ -439,7 +510,14 @@ async fn malicious_epub_content_is_sanitized_through_the_real_http_boundary() {
         identity,
     )
     .with_reader_api(reader);
-    let response = router(state)
+    (router(state), item, package)
+}
+
+#[tokio::test]
+async fn malicious_epub_content_is_sanitized_through_the_real_http_boundary() {
+    let (app, item, package) = real_reader_app();
+    let resource_id = ResourceId::for_resource(package, "OPS/chapter.xhtml");
+    let response = app
         .oneshot(request(
             &format!(
                 "/api/v1/items/{}/resources/{}",
@@ -470,5 +548,73 @@ async fn malicious_epub_content_is_sanitized_through_the_real_http_boundary() {
         "https://",
     ] {
         assert!(!html.contains(forbidden), "found {forbidden}: {html}");
+    }
+}
+
+#[tokio::test]
+async fn standalone_css_is_sanitized_and_isolated_through_the_real_http_boundary() {
+    let (app, item, package) = real_reader_app();
+    let css_id = ResourceId::for_resource(package, "OPS/book.css");
+    let image_id = ResourceId::for_resource(package, "OPS/cover.png");
+    let response = app
+        .oneshot(request(
+            &format!(
+                "/api/v1/items/{}/resources/{}",
+                item.as_uuid(),
+                css_id.as_str()
+            ),
+            "allowed",
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/css")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(CONTENT_SECURITY_POLICY)
+            .and_then(|value| value.to_str().ok()),
+        Some(
+            "default-src 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'none'; form-action 'none'; frame-src 'none'"
+        )
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(X_CONTENT_TYPE_OPTIONS)
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(REFERRER_POLICY)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-referrer")
+    );
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let css = String::from_utf8_lossy(&body).to_ascii_lowercase();
+    assert!(css.contains("color:red"), "{css}");
+    assert!(
+        css.contains(&format!(
+            "/api/v1/items/{}/resources/{}",
+            item.as_uuid(),
+            image_id.as_str().to_ascii_lowercase()
+        )),
+        "{css}"
+    );
+    for forbidden in ["@import", "https://", "javascript:", "OPS/", "resource:"] {
+        assert!(!css.contains(forbidden), "found {forbidden}: {css}");
     }
 }

@@ -19,7 +19,7 @@ pub trait ResourceResolver {
     /// Returns the trusted EPUB document path used as the base for relative references.
     fn base(&self) -> &EpubPath;
 
-    /// Resolves a validated, canonical, fragment-free EPUB path to an opaque identifier.
+    /// Resolves a validated, canonical, fragment-free EPUB path to a trusted same-origin URL.
     fn resolve(&self, reference: &EpubPath) -> Option<String>;
 }
 
@@ -812,26 +812,31 @@ fn sanitize_url(
     let Ok(canonical) = EpubPath::resolve_from(resolver.base().as_str(), &decoded) else {
         return Ok(None);
     };
-    let Some(opaque) = resolver.resolve(&canonical) else {
+    let Some(resource_url) = resolver.resolve(&canonical) else {
         return Ok(None);
     };
-    check_string_budget(&opaque, BudgetPoint::Attribute, budget)?;
-    if opaque.is_empty()
-        || opaque.len() > limits.max_output_bytes
-        || !opaque
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-    {
+    check_string_budget(&resource_url, BudgetPoint::Attribute, budget)?;
+    if !safe_same_origin_url(&resource_url, limits.max_output_bytes) {
         return Ok(None);
     }
     let mut rewritten = BoundedOutput::new(limits.max_output_bytes);
-    rewritten.push_str("resource:", budget)?;
-    rewritten.push_str(&opaque, budget)?;
+    rewritten.push_str(&resource_url, budget)?;
     if let Some(fragment) = fragment.filter(|fragment| safe_fragment(fragment)) {
         rewritten.push('#', budget)?;
         rewritten.push_str(fragment, budget)?;
     }
     Ok(Some(rewritten.value))
+}
+
+fn safe_same_origin_url(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && value.starts_with('/')
+        && !value.starts_with("//")
+        && !value.contains(['\\', '#', '?', '\0'])
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '/' | '_' | '-' | '.')
+        })
 }
 
 fn decode_safe_reference(

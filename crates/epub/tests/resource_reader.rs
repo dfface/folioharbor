@@ -14,7 +14,7 @@ use folioharbor_application::ports::{
     ResourceReadRequest,
 };
 use folioharbor_domain::{
-    id::{BlobId, PublicationPackageId},
+    id::{BlobId, ItemId, PublicationPackageId},
     imports::blob::{BlobIdentity, StorageKey},
 };
 use folioharbor_epub::{EpubResourceReader, ResourceCacheLimits};
@@ -67,14 +67,12 @@ fn archive() -> Vec<u8> {
     writer
         .start_file("OPS/chapter.xhtml", options)
         .expect("fixture entry");
-    writer.write_all(br#"<html><head><meta http-equiv="refresh" content="0;url=https://evil.test"></head><body onload="steal()"><script>steal()</script><form>x</form><iframe src="x"></iframe><object>x</object><p style="background:url(https://evil.test/x)">safe</p><img src="cover.png"></body></html>"#).expect("fixture html");
+    writer.write_all(br#"<html><head><meta http-equiv="refresh" content="0;url=https://evil.test"><link rel="stylesheet" href="book.css"></head><body onload="steal()"><script>steal()</script><form>x</form><iframe src="x"></iframe><object>x</object><p style="background:url(https://evil.test/x)">safe</p><img src="cover.png"></body></html>"#).expect("fixture html");
     writer
         .start_file("OPS/book.css", options)
         .expect("fixture entry");
     writer
-        .write_all(
-            b"@import 'https://evil.test/a'; p{color:red;background:url(https://evil.test/x)}",
-        )
+        .write_all(b"@import 'https://evil.test/a'; p{color:red;background-image:url(cover.png)}")
         .expect("fixture css");
     writer
         .start_file("OPS/cover.png", options)
@@ -85,6 +83,7 @@ fn archive() -> Vec<u8> {
 
 fn request(href: &str, media_type: &str) -> ResourceReadRequest {
     ResourceReadRequest {
+        item_id: ItemId::from_uuid(uuid::Uuid::from_u128(3)),
         blob_id: BlobId::from_uuid(uuid::Uuid::from_u128(5)),
         storage_key: StorageKey::from_opaque("blob:instance-v1:digest:42".to_owned()),
         package_id: PublicationPackageId::from_uuid(uuid::Uuid::from_u128(4)),
@@ -144,7 +143,24 @@ async fn sanitizes_malicious_html_and_uses_bounded_disposable_cache() {
         assert!(!html.contains(forbidden), "found {forbidden}: {html}");
     }
     assert!(html.contains("safe"));
-    assert!(html.contains("resource:"));
+    let item = uuid::Uuid::from_u128(3);
+    let package = PublicationPackageId::from_uuid(uuid::Uuid::from_u128(4));
+    let image_id =
+        folioharbor_application::reader::ResourceId::for_resource(package, "OPS/cover.png");
+    let css_id = folioharbor_application::reader::ResourceId::for_resource(package, "OPS/book.css");
+    assert!(
+        html.contains(&format!(
+            "/api/v1/items/{item}/resources/{}",
+            image_id.as_str().to_ascii_lowercase()
+        )),
+        "{html}"
+    );
+    assert!(html.contains(&format!(
+        "/api/v1/items/{item}/resources/{}",
+        css_id.as_str().to_ascii_lowercase()
+    )));
+    assert!(!html.contains("resource:"));
+    assert!(!html.contains("OPS/"));
     assert_eq!(first, second);
     assert_eq!(blobs.opens.load(Ordering::SeqCst), 1);
 }
@@ -166,6 +182,19 @@ async fn sanitizes_external_urls_from_standalone_css() {
     assert!(!css.contains("@import"));
     assert!(!css.contains("https://"));
     assert!(css.contains("color:red"));
+    let image_id = folioharbor_application::reader::ResourceId::for_resource(
+        PublicationPackageId::from_uuid(uuid::Uuid::from_u128(4)),
+        "OPS/cover.png",
+    );
+    assert!(
+        css.contains(&format!(
+            "/api/v1/items/{}/resources/{}",
+            uuid::Uuid::from_u128(3),
+            image_id.as_str().to_ascii_lowercase()
+        )),
+        "{css}"
+    );
+    assert!(!css.contains("OPS/"));
 }
 
 #[tokio::test]

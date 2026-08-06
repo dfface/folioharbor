@@ -12,11 +12,11 @@ use folioharbor_application::{
     },
     reader::ResourceId,
 };
-use folioharbor_domain::id::{BlobId, PublicationPackageId};
+use folioharbor_domain::id::{BlobId, ItemId, PublicationPackageId};
 
 use crate::{ContentSanitizer, EpubPath, ResourceResolver, SanitizerLimits};
 
-const SANITIZER_VERSION: &str = "sanitizer-v1";
+const SANITIZER_VERSION: &str = "sanitizer-v2";
 
 #[derive(Clone, Copy, Debug)]
 pub struct ResourceCacheLimits {
@@ -37,6 +37,7 @@ impl Default for ResourceCacheLimits {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct CacheKey {
+    item: ItemId,
     blob: BlobId,
     package: PublicationPackageId,
     resource: String,
@@ -106,6 +107,7 @@ impl PublicationResourceReader for EpubResourceReader {
         }
         EpubPath::new(&request.normalized_href).map_err(|_| ResourceReaderError::Malformed)?;
         let key = CacheKey {
+            item: request.item_id,
             blob: request.blob_id,
             package: request.package_id,
             resource: request.normalized_href.clone(),
@@ -192,6 +194,7 @@ fn transform(
 
 struct OpaqueResolver {
     base: EpubPath,
+    item: ItemId,
     resources: BTreeMap<EpubPath, String>,
 }
 
@@ -214,7 +217,11 @@ impl OpaqueResolver {
             })
             .collect::<Result<_, _>>()
             .map_err(|_| ResourceReaderError::Malformed)?;
-        Ok(Self { base, resources })
+        Ok(Self {
+            base,
+            item: request.item_id,
+            resources,
+        })
     }
 }
 
@@ -223,7 +230,9 @@ impl ResourceResolver for OpaqueResolver {
         &self.base
     }
     fn resolve(&self, reference: &EpubPath) -> Option<String> {
-        self.resources.get(reference).cloned()
+        self.resources
+            .get(reference)
+            .map(|opaque| format!("/api/v1/items/{}/resources/{opaque}", self.item.as_uuid()))
     }
 }
 

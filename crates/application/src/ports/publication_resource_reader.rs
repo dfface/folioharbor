@@ -40,6 +40,7 @@ pub struct ReaderPublication {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResourceReadRequest {
+    pub item_id: ItemId,
     pub blob_id: BlobId,
     pub storage_key: StorageKey,
     pub package_id: PublicationPackageId,

@@ -79,6 +79,12 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
     .await?;
     assert!(api_can_read);
     assert!(!worker_can_read);
+    let public_can_read: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pg_proc function JOIN pg_namespace namespace ON namespace.oid=function.pronamespace CROSS JOIN LATERAL aclexplode(function.proacl) privilege WHERE namespace.nspname='folioharbor' AND function.proname='reader_publication_visible' AND privilege.grantee=0 AND privilege.privilege_type='EXECUTE')",
+    )
+    .fetch_one(&pools.owner)
+    .await?;
+    assert!(!public_can_read);
     let now = OffsetDateTime::now_utc();
     let allowed = UserId::new();
     let outsider = UserId::new();
@@ -206,6 +212,51 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
     );
     assert_eq!(readable.toc[0].label, "Chapter");
     assert!(!readable.storage_key.as_str().is_empty());
+
+    sqlx::query(
+        "INSERT INTO folioharbor.roles(role_code,display_name) VALUES('reader-test','Reader test')",
+    )
+    .execute(&pools.owner)
+    .await?;
+    sqlx::query(
+        "INSERT INTO folioharbor.role_permissions(role_code,permission_code) VALUES('reader-test','holding.view')",
+    )
+    .execute(&pools.owner)
+    .await?;
+    sqlx::query("UPDATE folioharbor.library_memberships SET role_code='reader-test',version=version+1 WHERE library_id=$1 AND user_id=$2")
+        .bind(library.as_uuid()).bind(allowed.as_uuid()).execute(&pools.owner).await?;
+    assert!(
+        catalog
+            .find_readable_publication(allowed, item, RequestId::new())
+            .await?
+            .is_none(),
+        "holding.view without item.read must not authorize EPUB reading"
+    );
+    sqlx::query("DELETE FROM folioharbor.role_permissions WHERE role_code='reader-test'")
+        .execute(&pools.owner)
+        .await?;
+    sqlx::query(
+        "INSERT INTO folioharbor.role_permissions(role_code,permission_code) VALUES('reader-test','item.read')",
+    )
+    .execute(&pools.owner)
+    .await?;
+    assert!(
+        catalog
+            .find_readable_publication(allowed, item, RequestId::new())
+            .await?
+            .is_some(),
+        "item.read must authorize independently of holding.view"
+    );
+    sqlx::query("DELETE FROM folioharbor.role_permissions WHERE role_code='reader-test' AND permission_code='item.read'")
+        .execute(&pools.owner)
+        .await?;
+    assert!(
+        catalog
+            .find_readable_publication(allowed, item, RequestId::new())
+            .await?
+            .is_none(),
+        "revoking item.read must stop the next reader request"
+    );
     sqlx::query("UPDATE folioharbor.library_memberships SET status='removed',removed_at=$3,version=version+1 WHERE library_id=$1 AND user_id=$2")
         .bind(library.as_uuid()).bind(allowed.as_uuid()).bind(now).execute(&pools.owner).await?;
     assert!(

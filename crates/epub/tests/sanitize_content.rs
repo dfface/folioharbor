@@ -24,11 +24,11 @@ fn resolver() -> Resolver {
         resources: BTreeMap::from([
             (
                 trusted_path("EPUB/text/images/cover.png"),
-                "asset_7Q2M9K".into(),
+                "/api/v1/items/00000000-0000-0000-0000-000000000003/resources/asset_7Q2M9K".into(),
             ),
             (
                 trusted_path("EPUB/text/styles/book.css"),
-                "asset_42X".into(),
+                "/api/v1/items/00000000-0000-0000-0000-000000000003/resources/asset_42X".into(),
             ),
         ]),
     }
@@ -68,8 +68,8 @@ fn removes_executable_and_interactive_html() {
 fn rewrites_internal_urls_to_opaque_resource_identifiers() {
     let html = r##"<img src="images/cover.png"/><link rel="stylesheet" href="styles/book.css"/><a href="#note">note</a>"##;
     let output = sanitize(html);
-    assert!(output.html.contains("resource:asset_7Q2M9K"));
-    assert!(output.html.contains("resource:asset_42X"));
+    assert!(output.html.contains("/resources/asset_7Q2M9K"));
+    assert!(output.html.contains("/resources/asset_42X"));
     assert!(output.html.contains("href=\"#note\""));
     assert!(!output.html.contains("../"));
 }
@@ -86,7 +86,7 @@ fn keeps_safe_layout_css_and_rejects_unsafe_css() {
     assert!(!lower.contains("position:fixed"));
     assert!(lower.contains("writing-mode"));
     assert!(lower.contains("color"));
-    assert!(lower.contains("resource:asset_7q2m9k"));
+    assert!(lower.contains("/resources/asset_7q2m9k"));
 }
 
 #[test]
@@ -181,7 +181,7 @@ impl ResourceResolver for SpyResolver {
 
     fn resolve(&self, reference: &EpubPath) -> Option<String> {
         self.calls.borrow_mut().push(reference.clone());
-        Some("asset_safe".into())
+        Some("/api/v1/items/00000000-0000-0000-0000-000000000003/resources/asset_safe".into())
     }
 }
 
@@ -199,7 +199,7 @@ fn resolver_only_receives_canonical_non_traversing_paths() {
         resolver.calls.borrow().as_slice(),
         &[trusted_path("EPUB/text/images/cover art.png")]
     );
-    assert!(output.html.contains("resource:asset_safe#note"));
+    assert!(output.html.contains("/resources/asset_safe#note"));
     assert!(!output.html.contains("secret"));
 }
 

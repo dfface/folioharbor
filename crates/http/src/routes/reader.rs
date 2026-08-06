@@ -26,8 +26,7 @@ use crate::{
     problem::{ProblemContext, response as problem_response},
 };
 
-const CONTENT_POLICY: &str =
-    "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data: blob:";
+const CONTENT_POLICY: &str = "default-src 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'none'; form-action 'none'; frame-src 'none'";
 
 pub fn router() -> Router<AppState> {
     Router::new()

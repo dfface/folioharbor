@@ -134,6 +134,12 @@ async fn resource_reauthorizes_every_request_and_revocation_beats_reader_cache()
         .await
         .unwrap_or_else(|_| std::process::abort());
     assert_eq!(first.bytes, b"<p>safe</p>");
+    assert!(
+        first
+            .etag
+            .contains(&publication().item_id.as_uuid().to_string()),
+        "resource bytes embed the Item-scoped HTTP rewrite base, so the strong ETag must be Item-scoped"
+    );
 
     let denied = service
         .execute(UserId::new(), publication().item_id, id, RequestId::new())
