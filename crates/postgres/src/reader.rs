@@ -139,17 +139,18 @@ impl ReadingRepository for PgReadingRepository {
             (None, false)
         };
         let outcome = update_outcome(global.as_ref(), &device, updated);
-        let mutation_bytes = store_mutation(
+        let retry_after = capacity_retry_after(&mut tx, command.actor, now).await?;
+        if let Err(error) = store_mutation(
             &mut tx,
             &command,
             &fingerprint,
             global.as_ref(),
             &device,
             updated,
+            retry_after,
         )
-        .await?;
-        if !reserve_mutation_usage(&mut tx, command.actor, mutation_bytes, now).await? {
-            let error = capacity_error(&mut tx, command.actor, now).await?;
+        .await
+        {
             tx.rollback().await.map_err(persistence)?;
             return Err(error);
         }
@@ -203,14 +204,26 @@ async fn store_mutation(
     global: Option<&ReadingProgress>,
     device: &DeviceReadingState,
     updated: bool,
-) -> Result<i64, ReadingRepositoryError> {
+    retry_after: Duration,
+) -> Result<(), ReadingRepositoryError> {
     let version = global.map_or(Ok(0), |state| {
         i64::try_from(state.version).map_err(|_| ReadingRepositoryError::Persistence)
     })?;
     sqlx::query("INSERT INTO folioharbor.reading_mutations(user_id,client_mutation_id,manifestation_id,device_id,outcome,global_package_id,global_content_unit_id,global_locator,global_version,global_updated_at,device_locator,device_updated_at,request_fingerprint) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)")
-        .bind(command.actor.as_uuid()).bind(command.client_mutation_id).bind(command.manifestation_id.as_uuid()).bind(command.device_id.as_uuid()).bind(if updated { "updated" } else { "conflict" }).bind(global.and_then(|state|state.package_id.map(PublicationPackageId::as_uuid))).bind(global.and_then(|state|state.content_unit_id.map(ContentUnitId::as_uuid))).bind(global.map(|state|locator_to_json(&state.locator))).bind(version).bind(global.map(|state|state.updated_at)).bind(locator_to_json(&device.locator)).bind(device.updated_at).bind(fingerprint.as_slice()).execute(&mut **tx).await.map_err(persistence)?;
-    sqlx::query_scalar("SELECT (pg_column_size(mutation)+COALESCE(pg_column_size(global_locator),0)+pg_column_size(device_locator))::bigint FROM folioharbor.reading_mutations mutation WHERE user_id=$1 AND client_mutation_id=$2")
-        .bind(command.actor.as_uuid()).bind(command.client_mutation_id).fetch_one(&mut **tx).await.map_err(persistence)
+        .bind(command.actor.as_uuid()).bind(command.client_mutation_id).bind(command.manifestation_id.as_uuid()).bind(command.device_id.as_uuid()).bind(if updated { "updated" } else { "conflict" }).bind(global.and_then(|state|state.package_id.map(PublicationPackageId::as_uuid))).bind(global.and_then(|state|state.content_unit_id.map(ContentUnitId::as_uuid))).bind(global.map(|state|locator_to_json(&state.locator))).bind(version).bind(global.map(|state|state.updated_at)).bind(locator_to_json(&device.locator)).bind(device.updated_at).bind(fingerprint.as_slice()).execute(&mut **tx).await.map_err(|error| mutation_persistence(&error, retry_after))?;
+    Ok(())
+}
+
+fn mutation_persistence(error: &sqlx::Error, retry_after: Duration) -> ReadingRepositoryError {
+    if error
+        .as_database_error()
+        .and_then(|error| error.constraint())
+        == Some("reading_mutation_quota")
+    {
+        ReadingRepositoryError::MutationCapacity { retry_after }
+    } else {
+        ReadingRepositoryError::Persistence
+    }
 }
 
 async fn prune_expired_mutations(
@@ -218,11 +231,13 @@ async fn prune_expired_mutations(
     actor: UserId,
     now: OffsetDateTime,
 ) -> Result<(), ReadingRepositoryError> {
-    sqlx::query("INSERT INTO folioharbor.reading_mutation_usage(user_id,live_count,live_bytes,updated_at) VALUES($1,0,0,$2) ON CONFLICT(user_id) DO NOTHING")
-        .bind(actor.as_uuid()).bind(now).execute(&mut **tx).await.map_err(persistence)?;
     let cutoff = now - time::Duration::days(MUTATION_RETENTION_DAYS);
-    sqlx::query("WITH deleted AS (DELETE FROM folioharbor.reading_mutations AS mutation WHERE user_id=$1 AND created_at<$2 RETURNING (pg_column_size(mutation)+COALESCE(pg_column_size(global_locator),0)+pg_column_size(device_locator))::bigint AS bytes), removed AS (SELECT count(*)::bigint AS count,COALESCE(sum(bytes),0)::bigint AS bytes FROM deleted) UPDATE folioharbor.reading_mutation_usage usage SET live_count=usage.live_count-removed.count,live_bytes=usage.live_bytes-removed.bytes,updated_at=$3 FROM removed WHERE usage.user_id=$1")
-        .bind(actor.as_uuid()).bind(cutoff).bind(now).execute(&mut **tx).await.map_err(persistence)?;
+    sqlx::query("DELETE FROM folioharbor.reading_mutations WHERE user_id=$1 AND created_at<$2")
+        .bind(actor.as_uuid())
+        .bind(cutoff)
+        .execute(&mut **tx)
+        .await
+        .map_err(persistence)?;
     Ok(())
 }
 
@@ -231,29 +246,20 @@ async fn ensure_row_capacity(
     actor: UserId,
     now: OffsetDateTime,
 ) -> Result<(), ReadingRepositoryError> {
-    let usage: (i64, i64) = sqlx::query_as(
+    let usage: Option<(i64, i64)> = sqlx::query_as(
         "SELECT live_count,live_bytes FROM folioharbor.reading_mutation_usage WHERE user_id=$1",
     )
     .bind(actor.as_uuid())
-    .fetch_one(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(persistence)?;
-    if usage.0 >= MUTATION_MAX_ROWS_PER_USER || usage.1 >= MUTATION_MAX_BYTES_PER_USER {
+    if usage.is_some_and(|usage| {
+        usage.0 >= MUTATION_MAX_ROWS_PER_USER || usage.1 >= MUTATION_MAX_BYTES_PER_USER
+    }) {
         Err(capacity_error(tx, actor, now).await?)
     } else {
         Ok(())
     }
-}
-
-async fn reserve_mutation_usage(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    actor: UserId,
-    mutation_bytes: i64,
-    now: OffsetDateTime,
-) -> Result<bool, ReadingRepositoryError> {
-    let reserved = sqlx::query_scalar::<_, i64>("UPDATE folioharbor.reading_mutation_usage SET live_count=live_count+1,live_bytes=live_bytes+$2,updated_at=$3 WHERE user_id=$1 AND live_count<$4 AND live_bytes<=$5-$2 RETURNING live_count")
-        .bind(actor.as_uuid()).bind(mutation_bytes).bind(now).bind(MUTATION_MAX_ROWS_PER_USER).bind(MUTATION_MAX_BYTES_PER_USER).fetch_optional(&mut **tx).await.map_err(persistence)?;
-    Ok(reserved.is_some())
 }
 
 async fn capacity_error(
@@ -261,6 +267,16 @@ async fn capacity_error(
     actor: UserId,
     now: OffsetDateTime,
 ) -> Result<ReadingRepositoryError, ReadingRepositoryError> {
+    Ok(ReadingRepositoryError::MutationCapacity {
+        retry_after: capacity_retry_after(tx, actor, now).await?,
+    })
+}
+
+async fn capacity_retry_after(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    actor: UserId,
+    now: OffsetDateTime,
+) -> Result<Duration, ReadingRepositoryError> {
     let oldest: Option<OffsetDateTime> = sqlx::query_scalar(
         "SELECT min(created_at) FROM folioharbor.reading_mutations WHERE user_id=$1",
     )
@@ -268,14 +284,19 @@ async fn capacity_error(
     .fetch_one(&mut **tx)
     .await
     .map_err(persistence)?;
-    let seconds = oldest.map_or(1, |created_at| {
-        (created_at + time::Duration::days(MUTATION_RETENTION_DAYS) - now)
-            .whole_seconds()
-            .max(1)
-    });
-    Ok(ReadingRepositoryError::MutationCapacity {
-        retry_after: Duration::from_secs(u64::try_from(seconds).unwrap_or(1)),
-    })
+    Ok(oldest.map_or(Duration::from_secs(1), |created_at| {
+        retry_after_duration(
+            created_at + time::Duration::days(MUTATION_RETENTION_DAYS),
+            now,
+        )
+    }))
+}
+
+fn retry_after_duration(expires_at: OffsetDateTime, now: OffsetDateTime) -> Duration {
+    const NANOS_PER_SECOND: i128 = 1_000_000_000;
+    let remaining_nanos = (expires_at - now).whole_nanoseconds();
+    let rounded_seconds = ((remaining_nanos + NANOS_PER_SECOND - 1) / NANOS_PER_SECOND).max(1);
+    Duration::from_secs(u64::try_from(rounded_seconds).unwrap_or(u64::MAX))
 }
 
 async fn require_readable(
@@ -580,5 +601,21 @@ fn optional_u32(
             .and_then(|n| u32::try_from(n).ok())
             .map(Some)
             .ok_or(ReadingRepositoryError::Persistence),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_after_rounds_up_fractional_seconds() {
+        let now = OffsetDateTime::UNIX_EPOCH;
+        let expires_at = now + time::Duration::milliseconds(1_001);
+
+        assert_eq!(
+            retry_after_duration(expires_at, now),
+            Duration::from_secs(2)
+        );
     }
 }

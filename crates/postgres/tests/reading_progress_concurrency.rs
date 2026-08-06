@@ -144,6 +144,10 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
         &database.worker_url()?,
     )
     .await?;
+    let concurrent_api = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database.api_url()?)
+        .await?;
     run_migrations(&pools.owner).await?;
     for table in [
         "reading_states",
@@ -197,6 +201,85 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
         .await?;
     assert!(matches!(first, ReadingUpdateOutcome::Updated { .. }));
     assert_eq!(global(&first).version, 1);
+
+    let direct_mutation = Uuid::now_v7();
+    let usage_before_direct = recorded_usage(&pools.owner, alice).await?;
+    sqlx::query(
+        "INSERT INTO folioharbor.reading_mutations(user_id,client_mutation_id,manifestation_id,device_id,outcome,global_package_id,global_content_unit_id,global_locator,global_version,global_updated_at,device_locator,device_updated_at,created_at,request_fingerprint) SELECT user_id,$3,manifestation_id,device_id,outcome,global_package_id,global_content_unit_id,global_locator,global_version,global_updated_at,device_locator,device_updated_at,clock_timestamp(),request_fingerprint FROM folioharbor.reading_mutations WHERE user_id=$1 AND client_mutation_id=$2",
+    )
+    .bind(alice.as_uuid())
+    .bind(first_mutation)
+    .bind(direct_mutation)
+    .execute(&pools.owner)
+    .await?;
+    assert_eq!(
+        recorded_usage(&pools.owner, alice).await?,
+        actual_usage(&pools.owner, alice).await?,
+        "old-writer direct inserts must be counted at the database boundary"
+    );
+    assert!(recorded_usage(&pools.owner, alice).await?.0 > usage_before_direct.0);
+    sqlx::query(
+        "DELETE FROM folioharbor.reading_mutations WHERE user_id=$1 AND client_mutation_id=$2",
+    )
+    .bind(alice.as_uuid())
+    .bind(direct_mutation)
+    .execute(&pools.owner)
+    .await?;
+    assert_eq!(
+        recorded_usage(&pools.owner, alice).await?,
+        usage_before_direct,
+        "direct deletes must decrement exact usage"
+    );
+    let mut immutable_tx = pools.api.begin().await?;
+    PgTransactionContext::apply(
+        &mut immutable_tx,
+        &DatabaseContext::api_without_library(alice, RequestId::new()),
+    )
+    .await?;
+    let direct_update = sqlx::query(
+        "UPDATE folioharbor.reading_mutations SET created_at=created_at WHERE user_id=$1 AND client_mutation_id=$2",
+    )
+    .bind(alice.as_uuid())
+    .bind(first_mutation)
+    .execute(&mut *immutable_tx)
+    .await;
+    assert!(
+        direct_update.is_err(),
+        "the API role must not mutate immutable replay records"
+    );
+    immutable_tx.rollback().await?;
+    let owner_update = sqlx::query(
+        "UPDATE folioharbor.reading_mutations SET created_at=created_at WHERE user_id=$1 AND client_mutation_id=$2",
+    )
+    .bind(alice.as_uuid())
+    .bind(first_mutation)
+    .execute(&pools.owner)
+    .await
+    .expect_err("the database must reject owner-level mutation updates");
+    assert_eq!(
+        owner_update
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("reading_mutation_immutable")
+    );
+
+    let mut usage_tamper_tx = pools.api.begin().await?;
+    PgTransactionContext::apply(
+        &mut usage_tamper_tx,
+        &DatabaseContext::api_without_library(alice, RequestId::new()),
+    )
+    .await?;
+    let usage_tamper = sqlx::query(
+        "UPDATE folioharbor.reading_mutation_usage SET live_count=0,live_bytes=0 WHERE user_id=$1",
+    )
+    .bind(alice.as_uuid())
+    .execute(&mut *usage_tamper_tx)
+    .await;
+    assert!(
+        usage_tamper.is_err(),
+        "the API role must not tamper with database-owned quota counters"
+    );
+    usage_tamper_tx.rollback().await?;
 
     let inconsistent_zero_snapshot = sqlx::query(
         "INSERT INTO folioharbor.reading_mutations(user_id,client_mutation_id,manifestation_id,device_id,outcome,global_locator,global_version,global_updated_at,device_locator,device_updated_at,request_fingerprint) VALUES($1,$2,$3,$4,'updated',NULL,0,NULL,'{}'::jsonb,$5,$6)",
@@ -453,6 +536,39 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
         "migration backfill and repository accounting must match actual rows"
     );
 
+    let device_c = DeviceId::new();
+    sqlx::query("INSERT INTO folioharbor.user_devices(device_id,user_id,display_name,created_at,last_seen_at) VALUES($1,$2,'C',$3,$3)")
+        .bind(device_c.as_uuid())
+        .bind(alice.as_uuid())
+        .bind(now)
+        .execute(&pools.owner)
+        .await?;
+    let usage_before_cascade = recorded_usage(&pools.owner, alice).await?;
+    repository
+        .update_progress(command(
+            alice,
+            manifestation,
+            device_c,
+            Uuid::now_v7(),
+            0,
+            0.64,
+        ))
+        .await?;
+    sqlx::query("DELETE FROM folioharbor.user_devices WHERE user_id=$1 AND device_id=$2")
+        .bind(alice.as_uuid())
+        .bind(device_c.as_uuid())
+        .execute(&pools.owner)
+        .await?;
+    assert_eq!(
+        recorded_usage(&pools.owner, alice).await?,
+        usage_before_cascade,
+        "device cascades must decrement mutation usage"
+    );
+    assert_eq!(
+        recorded_usage(&pools.owner, alice).await?,
+        actual_usage(&pools.owner, alice).await?
+    );
+
     let large_mutation = Uuid::now_v7();
     let large_command = UpdateProgressRecord {
         actor: alice,
@@ -486,12 +602,11 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
     .execute(&pools.owner)
     .await?;
     let actual_after_fill = actual_usage(&pools.owner, alice).await?;
-    sqlx::query("UPDATE folioharbor.reading_mutation_usage SET live_count=$2,live_bytes=$3 WHERE user_id=$1")
-        .bind(alice.as_uuid())
-        .bind(actual_after_fill.0)
-        .bind(actual_after_fill.1)
-        .execute(&pools.owner)
-        .await?;
+    assert_eq!(
+        recorded_usage(&pools.owner, alice).await?,
+        actual_after_fill,
+        "bulk direct inserts must maintain exact byte usage"
+    );
     assert!(actual_after_fill.1 <= byte_limit);
     assert!(byte_limit - actual_after_fill.1 < large_row_bytes);
     let state_before_byte_rejection = repository
@@ -511,7 +626,12 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
     over_byte_limit.client_mutation_id = Uuid::now_v7();
     over_byte_limit.base_version = state_before_byte_rejection.version;
     over_byte_limit.locator = maximum_locator(0.8);
-    assert!(repository.update_progress(over_byte_limit).await.is_err());
+    let byte_capacity = repository.update_progress(over_byte_limit).await;
+    assert!(matches!(
+        byte_capacity,
+        Err(ReadingRepositoryError::MutationCapacity { retry_after })
+            if !retry_after.is_zero()
+    ));
     assert_eq!(
         repository
             .get_progress(alice, manifestation_b, RequestId::new())
@@ -546,12 +666,23 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
         large,
         "an exact replay inside the retention window bypasses capacity"
     );
-    sqlx::query("UPDATE folioharbor.reading_mutations SET created_at=clock_timestamp()-interval '31 days' WHERE user_id=$1 AND client_mutation_id=$2")
+    sqlx::query("DELETE FROM folioharbor.reading_mutations WHERE user_id=$1 AND request_fingerprint=(SELECT request_fingerprint FROM folioharbor.reading_mutations WHERE user_id=$1 AND client_mutation_id=$2) AND client_mutation_id<>$2")
         .bind(alice.as_uuid())
         .bind(large_mutation)
         .execute(&pools.owner)
         .await?;
-    let expired_reuse = repository.update_progress(large_command.clone()).await?;
+    let expired_mutation = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO folioharbor.reading_mutations(user_id,client_mutation_id,manifestation_id,device_id,outcome,global_package_id,global_content_unit_id,global_locator,global_version,global_updated_at,device_locator,device_updated_at,created_at,request_fingerprint) SELECT user_id,$3,manifestation_id,device_id,outcome,global_package_id,global_content_unit_id,global_locator,global_version,global_updated_at,device_locator,device_updated_at,clock_timestamp()-interval '31 days',request_fingerprint FROM folioharbor.reading_mutations WHERE user_id=$1 AND client_mutation_id=$2",
+    )
+    .bind(alice.as_uuid())
+    .bind(large_mutation)
+    .bind(expired_mutation)
+    .execute(&pools.owner)
+    .await?;
+    let mut expired_command = large_command.clone();
+    expired_command.client_mutation_id = expired_mutation;
+    let expired_reuse = repository.update_progress(expired_command).await?;
     assert!(matches!(
         expired_reuse,
         ReadingUpdateOutcome::Conflict { .. }
@@ -561,9 +692,11 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
         "expired ids are evaluated as new mutations"
     );
 
-    sqlx::query("UPDATE folioharbor.reading_mutations SET created_at=clock_timestamp()-interval '31 days' WHERE user_id=$1 AND request_fingerprint=(SELECT request_fingerprint FROM folioharbor.reading_mutations WHERE user_id=$1 AND client_mutation_id=$2) AND client_mutation_id<>$2")
+    sqlx::query(
+        "INSERT INTO folioharbor.reading_mutations(user_id,client_mutation_id,manifestation_id,device_id,outcome,global_package_id,global_content_unit_id,global_locator,global_version,global_updated_at,device_locator,device_updated_at,created_at,request_fingerprint) SELECT user_id,md5('expired-' || series::text)::uuid,manifestation_id,device_id,outcome,global_package_id,global_content_unit_id,global_locator,global_version,global_updated_at,device_locator,device_updated_at,clock_timestamp()-interval '31 days',request_fingerprint FROM folioharbor.reading_mutations CROSS JOIN generate_series(1,5) series WHERE user_id=$1 AND client_mutation_id=$2",
+    )
         .bind(alice.as_uuid())
-        .bind(large_mutation)
+        .bind(first_mutation)
         .execute(&pools.owner)
         .await?;
     let count_before_prune = actual_usage(&pools.owner, alice).await?.0;
@@ -600,36 +733,42 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
     .execute(&pools.owner)
     .await?;
     let actual_at_boundary = actual_usage(&pools.owner, alice).await?;
-    sqlx::query("UPDATE folioharbor.reading_mutation_usage SET live_count=$2,live_bytes=$3 WHERE user_id=$1")
-        .bind(alice.as_uuid())
-        .bind(actual_at_boundary.0)
-        .bind(actual_at_boundary.1)
-        .execute(&pools.owner)
-        .await?;
+    assert_eq!(
+        recorded_usage(&pools.owner, alice).await?,
+        actual_at_boundary,
+        "bulk direct inserts must maintain exact row usage"
+    );
     assert_eq!(actual_at_boundary.0, 9_999);
     assert!(actual_at_boundary.1 < byte_limit);
-    let current_version = repository
-        .get_progress(alice, manifestation_b, RequestId::new())
-        .await?
-        .expect("global")
-        .version;
     let barrier = Arc::new(tokio::sync::Barrier::new(3));
     let mut capacity_tasks = Vec::new();
-    for progression in [0.82, 0.83] {
-        let repository = repository.clone();
+    for mutation in [Uuid::now_v7(), Uuid::now_v7()] {
+        let pool = concurrent_api.clone();
         let barrier = barrier.clone();
         capacity_tasks.push(tokio::spawn(async move {
+            let mut tx = pool.begin().await.expect("capacity transaction");
+            PgTransactionContext::apply(
+                &mut tx,
+                &DatabaseContext::api_without_library(alice, RequestId::new()),
+            )
+            .await
+            .expect("capacity transaction context");
             barrier.wait().await;
-            repository
-                .update_progress(command(
-                    alice,
-                    manifestation_b,
-                    device_b,
-                    Uuid::now_v7(),
-                    current_version,
-                    progression,
-                ))
+            let inserted = sqlx::query(
+                "INSERT INTO folioharbor.reading_mutations(user_id,client_mutation_id,manifestation_id,device_id,outcome,global_package_id,global_content_unit_id,global_locator,global_version,global_updated_at,device_locator,device_updated_at,created_at,request_fingerprint) SELECT user_id,$3,manifestation_id,device_id,outcome,global_package_id,global_content_unit_id,global_locator,global_version,global_updated_at,device_locator,device_updated_at,clock_timestamp(),request_fingerprint FROM folioharbor.reading_mutations WHERE user_id=$1 AND client_mutation_id=$2",
+            )
+                .bind(alice.as_uuid())
+                .bind(first_mutation)
+                .bind(mutation)
+                .execute(&mut *tx)
                 .await
+                .is_ok();
+            if inserted {
+                tx.commit().await.expect("capacity commit");
+            } else {
+                tx.rollback().await.expect("capacity rollback");
+            }
+            inserted
         }));
     }
     barrier.wait().await;
@@ -637,18 +776,9 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
         capacity_tasks.remove(0).await.expect("task"),
         capacity_tasks.remove(0).await.expect("task"),
     ];
+    assert_eq!(capacity_results.iter().filter(|result| **result).count(), 1);
     assert_eq!(
-        capacity_results
-            .iter()
-            .filter(|result| result.is_ok())
-            .count(),
-        1
-    );
-    assert_eq!(
-        capacity_results
-            .iter()
-            .filter(|result| result.is_err())
-            .count(),
+        capacity_results.iter().filter(|result| !**result).count(),
         1
     );
     assert_eq!(actual_usage(&pools.owner, alice).await?.0, 10_000);
@@ -669,19 +799,21 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
     .bind(manifestation_b.as_uuid())
     .fetch_one(&pools.owner)
     .await?;
-    assert!(
-        repository
-            .update_progress(command(
-                alice,
-                manifestation_b,
-                device_a,
-                Uuid::now_v7(),
-                state_at_capacity.version,
-                0.99,
-            ))
-            .await
-            .is_err()
-    );
+    let row_capacity = repository
+        .update_progress(command(
+            alice,
+            manifestation_b,
+            device_a,
+            Uuid::now_v7(),
+            state_at_capacity.version,
+            0.99,
+        ))
+        .await;
+    assert!(matches!(
+        row_capacity,
+        Err(ReadingRepositoryError::MutationCapacity { retry_after })
+            if !retry_after.is_zero()
+    ));
     assert_eq!(
         repository
             .get_progress(alice, manifestation_b, RequestId::new())
@@ -752,6 +884,7 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
     .fetch_one(&pools.owner)
     .await?;
     assert_eq!(retained, 1);
+    concurrent_api.close().await;
     pools.close().await;
     database.cleanup().await?;
     Ok(())
