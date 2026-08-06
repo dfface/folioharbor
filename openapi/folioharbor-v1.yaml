@@ -219,6 +219,43 @@ paths:
         '415': {$ref: '#/components/responses/Problem'}
         '422': {$ref: '#/components/responses/Problem'}
         '507': {$ref: '#/components/responses/Problem'}
+  /api/v1/libraries/{library_id}/books:
+    get:
+      operationId: listLibraryBooks
+      description: Lists active Holdings visible in this Library with stable keyset pagination. The cursor is opaque and clients must not parse or construct it.
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/LibraryId'}
+        - {name: cursor, in: query, schema: {type: string}, description: Opaque keyset cursor returned by the previous page}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 25}}
+      responses:
+        '200':
+          description: One display-ready row per visible library Holding
+          content: {application/json: {schema: {$ref: '#/components/schemas/BookPage'}}}
+        '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+        '503': {$ref: '#/components/responses/Problem'}
+  /api/v1/libraries/{library_id}/items/{item_id}:
+    get:
+      operationId: getLibraryItem
+      description: Returns a transport-safe projection only after resolving the Item through a visible active Holding.
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/LibraryId'}
+        - {$ref: '#/components/parameters/ItemId'}
+      responses:
+        '200':
+          description: Authorized item detail without Blob, Package, storage, parser, or audit internals
+          headers:
+            ETag: {schema: {type: string}, description: Weak validator covering item and capability inputs}
+          content: {application/json: {schema: {$ref: '#/components/schemas/ItemDetail'}}}
+        '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+        '503': {$ref: '#/components/responses/Problem'}
 components:
   securitySchemes:
     cookieAuth: {type: apiKey, in: cookie, name: folioharbor_session}
@@ -242,6 +279,11 @@ components:
       schema: {type: string, format: uuid}
     UploadId:
       name: upload_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    ItemId:
+      name: item_id
       in: path
       required: true
       schema: {type: string, format: uuid}
@@ -397,6 +439,33 @@ components:
         state: {type: string, enum: [created, receiving, received, queued, validating, importing, ready, duplicate, failed, expired, retry_wait]}
         status_url: {type: string}
         error_code: {type: [string, 'null'], description: Stable safe code; implementation or storage details are never exposed}
+    BookSummary:
+      type: object
+      additionalProperties: false
+      required: [item_id, primary_title, authors, languages, media_type, can_read, can_download]
+      properties:
+        item_id: {type: string, format: uuid}
+        primary_title: {type: string}
+        authors: {type: array, items: {type: string}}
+        languages: {type: array, items: {type: string}}
+        media_type: {type: string, enum: [application/epub+zip]}
+        can_read: {type: boolean, description: Effective online-reading capability}
+        can_download: {type: boolean, description: Effective original-file download capability; independent from can_read}
+    BookPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/BookSummary'}}
+        next_cursor: {type: [string, 'null'], description: Opaque cursor; absent or null at the end}
+    ItemDetail:
+      allOf:
+        - {$ref: '#/components/schemas/BookSummary'}
+        - type: object
+          required: [manifestation_id, identifiers]
+          properties:
+            manifestation_id: {type: string, format: uuid}
+            identifiers: {type: array, items: {type: string}}
     ProblemDetails:
       type: object
       required: [type, title, status, detail, instance, code, request_id]

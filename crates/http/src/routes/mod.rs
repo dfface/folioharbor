@@ -1,9 +1,11 @@
 mod auth;
+mod catalog;
 mod libraries;
 mod uploads;
 use crate::middleware;
 use axum::{Router, middleware as axum_middleware};
 use folioharbor_application::{
+    catalog::{CatalogApi, UnavailableCatalogApi},
     identity::{
         AuthenticateSessionUseCase, CompletePasswordResetUseCase, CurrentSessionUseCase,
         ListSessionsUseCase, LoginUseCase, LogoutUseCase, RegisterAccountUseCase,
@@ -32,6 +34,7 @@ pub struct AppState {
     pub rate_limit: Arc<dyn RateLimitUseCase>,
     pub library_api: Arc<dyn LibraryApi>,
     pub upload_api: Arc<dyn UploadApi>,
+    pub catalog_api: Arc<dyn CatalogApi>,
 }
 impl AppState {
     #[allow(clippy::too_many_arguments)]
@@ -65,6 +68,7 @@ impl AppState {
             rate_limit,
             library_api: Arc::new(UnavailableLibraryApi),
             upload_api: Arc::new(UnavailableUploadApi),
+            catalog_api: Arc::new(UnavailableCatalogApi),
         }
     }
 
@@ -79,13 +83,21 @@ impl AppState {
         self.upload_api = upload_api;
         self
     }
+
+    #[must_use]
+    pub fn with_catalog_api(mut self, catalog_api: Arc<dyn CatalogApi>) -> Self {
+        self.catalog_api = catalog_api;
+        self
+    }
 }
 pub fn router(state: AppState) -> Router {
     Router::new()
         .nest("/api/v1/auth", auth::router())
         .nest(
             "/api/v1/libraries",
-            libraries::router().merge(uploads::router()),
+            libraries::router()
+                .merge(uploads::router())
+                .merge(catalog::router()),
         )
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),

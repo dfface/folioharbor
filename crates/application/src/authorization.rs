@@ -99,6 +99,7 @@ pub struct AuthorizationFact {
 pub struct AuthorizationGrant {
     actor: UserId,
     library_id: LibraryId,
+    role: RoleCode,
     action: Action,
     resource: ResourceRef,
     membership_version: i64,
@@ -124,6 +125,11 @@ impl AuthorizationGrant {
     #[must_use]
     pub const fn membership_version(self) -> i64 {
         self.membership_version
+    }
+
+    #[must_use]
+    pub const fn role(self) -> RoleCode {
+        self.role
     }
 }
 
@@ -175,6 +181,7 @@ impl<R: AuthorizationRepository + ?Sized> Authorization<'_, R> {
         Ok(AuthorizationGrant {
             actor,
             library_id: fact.library_id,
+            role: fact.role,
             action,
             resource,
             membership_version: fact.membership_version,

@@ -1,12 +1,13 @@
 #![forbid(unsafe_code)]
 
 use folioharbor_application::{
+    catalog::{CatalogApi, CatalogService},
     config::Settings,
     imports::{UploadApi, UploadService},
     ports::Clock,
 };
 use folioharbor_domain::imports::blob::DedupScope as DomainDedupScope;
-use folioharbor_postgres::{PgAuthorizationRepository, PgUploadRepository};
+use folioharbor_postgres::{PgAuthorizationRepository, PgCatalogRepository, PgUploadRepository};
 use folioharbor_storage_local::LocalBlobStore;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -31,5 +32,14 @@ pub fn build_upload_api(settings: &Settings, pool: PgPool) -> Arc<dyn UploadApi>
             folioharbor_application::config::DedupScope::Library => DomainDedupScope::Library,
             folioharbor_application::config::DedupScope::Disabled => DomainDedupScope::Disabled,
         },
+    ))
+}
+
+#[must_use]
+pub fn build_catalog_api(settings: &Settings, pool: PgPool) -> Arc<dyn CatalogApi> {
+    Arc::new(CatalogService::new(
+        PgCatalogRepository::new(pool.clone()),
+        PgAuthorizationRepository::new(pool),
+        settings.auth.reader_download_enabled,
     ))
 }

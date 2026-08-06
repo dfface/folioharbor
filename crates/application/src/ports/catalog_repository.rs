@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use folioharbor_domain::{
     catalog::CatalogPublication,
     id::{
-        BlobId, ItemId, LibraryId, ManifestationId, PublicationPackageId, RequestId, UploadId,
-        UserId,
+        BlobId, HoldingId, ItemId, LibraryId, ManifestationId, PublicationPackageId, RequestId,
+        UploadId, UserId,
     },
     imports::blob::ByteCount,
     time::OffsetDateTime,
@@ -76,21 +76,35 @@ pub trait CatalogRepository: Send + Sync {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VisibleCatalogItem {
+    pub holding_id: HoldingId,
     pub item_id: ItemId,
     pub manifestation_id: ManifestationId,
     pub package_id: PublicationPackageId,
     pub primary_title: String,
+    pub authors: Vec<String>,
+    pub languages: Vec<String>,
+    pub identifiers: Vec<String>,
+    pub media_type: String,
 }
 
 #[async_trait]
 pub trait CatalogQueryRepository: Send + Sync {
+    /// Lists bounded visible rows from Holding inward with one SQL query.
+    async fn list_visible_items(
+        &self,
+        grant: crate::authorization::AuthorizationGrant,
+        library_id: LibraryId,
+        after: Option<HoldingId>,
+        limit: u32,
+        request_id: RequestId,
+    ) -> Result<Vec<VisibleCatalogItem>, CatalogRepositoryError>;
+
     /// Resolves one Item through its visible Holding; global WEMI enumeration is not exposed.
     async fn find_visible_item(
         &self,
-        actor_id: UserId,
+        grant: crate::authorization::AuthorizationGrant,
         library_id: LibraryId,
         item_id: ItemId,
-        membership_version: i64,
         request_id: RequestId,
     ) -> Result<Option<VisibleCatalogItem>, CatalogRepositoryError>;
 }

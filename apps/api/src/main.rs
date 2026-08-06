@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use async_trait::async_trait;
-use folioharbor_api::build_upload_api;
+use folioharbor_api::{build_catalog_api, build_upload_api};
 use folioharbor_application::{
     config::{ConfigSources, Settings},
     identity::IdentityApi,
@@ -82,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("FOLIOHARBOR_DATABASE_URL is required"))?;
     let pool = connect_api(database_url).await?;
     let upload_api = build_upload_api(&settings, pool.clone());
+    let catalog_api = build_catalog_api(&settings, pool.clone());
     let library_repository = PgLibraryRepository::new(pool.clone());
     let identity = Arc::new(IdentityApi::new_configured(
         PgIdentityRepository::new(pool.clone()),
@@ -129,7 +130,8 @@ async fn main() -> anyhow::Result<()> {
         limiter,
     )
     .with_library_api(library_api)
-    .with_upload_api(upload_api);
+    .with_upload_api(upload_api)
+    .with_catalog_api(catalog_api);
     let listener = tokio::net::TcpListener::bind(&settings.server.bind_address).await?;
     axum::serve(
         listener,

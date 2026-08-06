@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use folioharbor_application::{
+    authorization::AuthorizationGrant,
     catalog::ImportCatalogResult,
     ports::{
         CatalogQueryRepository, CatalogRepository, CatalogRepositoryError, FinalizeCatalog,
@@ -76,34 +77,93 @@ impl CatalogRepository for PgCatalogRepository {
 
 #[async_trait]
 impl CatalogQueryRepository for PgCatalogRepository {
-    async fn find_visible_item(
+    async fn list_visible_items(
         &self,
-        actor_id: UserId,
+        grant: AuthorizationGrant,
         library_id: LibraryId,
-        item_id: ItemId,
-        membership_version: i64,
+        after: Option<HoldingId>,
+        limit: u32,
         request_id: RequestId,
-    ) -> Result<Option<VisibleCatalogItem>, CatalogRepositoryError> {
+    ) -> Result<Vec<VisibleCatalogItem>, CatalogRepositoryError> {
+        if grant.actor() == UserId::from_uuid(Uuid::nil())
+            || grant.library_id() != library_id
+            || grant.resource().library_id() != library_id
+        {
+            return Err(CatalogRepositoryError::Persistence);
+        }
         let mut transaction = self.pool.begin().await.map_err(persistence)?;
         PgTransactionContext::apply(
             &mut transaction,
-            &DatabaseContext::api(actor_id, library_id, request_id),
+            &DatabaseContext::api(grant.actor(), library_id, request_id),
+        )
+        .await
+        .map_err(persistence)?;
+        let rows = sqlx::query!(
+            r#"SELECT holding.holding_id AS "holding_id!",visible.item_id AS "item_id!",visible.package_id AS "package_id!",visible.manifestation_id AS "manifestation_id!",visible.primary_title AS "primary_title!" FROM folioharbor.holdings holding JOIN folioharbor.items item USING(holding_id) CROSS JOIN LATERAL folioharbor.catalog_item_visible($1,$2,item.item_id,$3) visible WHERE holding.library_id=$2 AND holding.state='active' AND item.state='active' AND ($4::uuid IS NULL OR holding.holding_id<$4) ORDER BY holding.holding_id DESC LIMIT $5"#,
+            grant.actor().as_uuid(),
+            library_id.as_uuid(),
+            grant.membership_version(),
+            after.map(HoldingId::as_uuid),
+            i64::from(limit),
+        )
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(persistence)?;
+        transaction.commit().await.map_err(persistence)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| VisibleCatalogItem {
+                holding_id: HoldingId::from_uuid(row.holding_id),
+                item_id: ItemId::from_uuid(row.item_id),
+                manifestation_id: ManifestationId::from_uuid(row.manifestation_id),
+                package_id: PublicationPackageId::from_uuid(row.package_id),
+                primary_title: row.primary_title,
+                authors: Vec::new(),
+                languages: Vec::new(),
+                identifiers: Vec::new(),
+                media_type: "application/epub+zip".to_owned(),
+            })
+            .collect())
+    }
+
+    async fn find_visible_item(
+        &self,
+        grant: AuthorizationGrant,
+        library_id: LibraryId,
+        item_id: ItemId,
+        request_id: RequestId,
+    ) -> Result<Option<VisibleCatalogItem>, CatalogRepositoryError> {
+        if grant.library_id() != library_id || grant.resource().library_id() != library_id {
+            return Err(CatalogRepositoryError::Persistence);
+        }
+        let mut transaction = self.pool.begin().await.map_err(persistence)?;
+        PgTransactionContext::apply(
+            &mut transaction,
+            &DatabaseContext::api(grant.actor(), library_id, request_id),
         )
         .await
         .map_err(persistence)?;
         let row = sqlx::query!(
-            "SELECT item_id AS \"item_id!\",package_id AS \"package_id!\",manifestation_id AS \"manifestation_id!\",primary_title AS \"primary_title!\" FROM folioharbor.catalog_item_visible($1,$2,$3,$4)",
-            actor_id.as_uuid(), library_id.as_uuid(), item_id.as_uuid(), membership_version
+            r#"SELECT holding.holding_id AS "holding_id!",visible.item_id AS "item_id!",visible.package_id AS "package_id!",visible.manifestation_id AS "manifestation_id!",visible.primary_title AS "primary_title!" FROM folioharbor.holdings holding JOIN folioharbor.items item USING(holding_id) CROSS JOIN LATERAL folioharbor.catalog_item_visible($1,$2,item.item_id,$4) visible WHERE holding.library_id=$2 AND item.item_id=$3 AND holding.state='active' AND item.state='active'"#,
+            grant.actor().as_uuid(),
+            library_id.as_uuid(),
+            item_id.as_uuid(),
+            grant.membership_version(),
         )
         .fetch_optional(&mut *transaction)
         .await
         .map_err(persistence)?;
         transaction.commit().await.map_err(persistence)?;
-        Ok(row.map(|item| VisibleCatalogItem {
-            item_id: ItemId::from_uuid(item.item_id),
-            manifestation_id: ManifestationId::from_uuid(item.manifestation_id),
-            package_id: PublicationPackageId::from_uuid(item.package_id),
-            primary_title: item.primary_title,
+        Ok(row.map(|row| VisibleCatalogItem {
+            holding_id: HoldingId::from_uuid(row.holding_id),
+            item_id: ItemId::from_uuid(row.item_id),
+            manifestation_id: ManifestationId::from_uuid(row.manifestation_id),
+            package_id: PublicationPackageId::from_uuid(row.package_id),
+            primary_title: row.primary_title,
+            authors: Vec::new(),
+            languages: Vec::new(),
+            identifiers: Vec::new(),
+            media_type: "application/epub+zip".to_owned(),
         }))
     }
 }

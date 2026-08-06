@@ -1,0 +1,49 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT holding.holding_id AS \"holding_id!\",visible.item_id AS \"item_id!\",visible.package_id AS \"package_id!\",visible.manifestation_id AS \"manifestation_id!\",visible.primary_title AS \"primary_title!\" FROM folioharbor.holdings holding JOIN folioharbor.items item USING(holding_id) CROSS JOIN LATERAL folioharbor.catalog_item_visible($1,$2,item.item_id,$4) visible WHERE holding.library_id=$2 AND item.item_id=$3 AND holding.state='active' AND item.state='active'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "holding_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "item_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "package_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "manifestation_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "primary_title!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "7382967416664cf811b8153ebfc13543ac085133347e385107030f6969849647"
+}

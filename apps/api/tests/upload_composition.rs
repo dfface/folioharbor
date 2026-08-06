@@ -1,8 +1,9 @@
 #![allow(clippy::expect_used)]
 
 use bytes::Bytes;
-use folioharbor_api::build_upload_api;
+use folioharbor_api::{build_catalog_api, build_upload_api};
 use folioharbor_application::{
+    catalog::PageRequest,
     config::{ConfigSources, Settings},
     imports::{CreateUploadRequest, ReceiveUploadRequest},
 };
@@ -82,6 +83,11 @@ async fn production_upload_composition_uses_postgres_and_local_blob_storage() ->
         })
         .await?;
     assert_eq!(queued.state.as_str(), "queued");
+    let catalog = build_catalog_api(&settings, pools.api.clone());
+    let page = catalog
+        .list_library_books(actor, library, RequestId::new(), PageRequest::default())
+        .await?;
+    assert!(page.items.is_empty());
     pools.close().await;
     database.cleanup().await?;
     Ok(())

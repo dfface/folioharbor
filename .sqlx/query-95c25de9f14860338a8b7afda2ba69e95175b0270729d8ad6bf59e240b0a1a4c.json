@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT holding.holding_id AS \"holding_id!\",visible.item_id AS \"item_id!\",visible.package_id AS \"package_id!\",visible.manifestation_id AS \"manifestation_id!\",visible.primary_title AS \"primary_title!\" FROM folioharbor.holdings holding JOIN folioharbor.items item USING(holding_id) CROSS JOIN LATERAL folioharbor.catalog_item_visible($1,$2,item.item_id,$3) visible WHERE holding.library_id=$2 AND holding.state='active' AND item.state='active' AND ($4::uuid IS NULL OR holding.holding_id<$4) ORDER BY holding.holding_id DESC LIMIT $5",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "holding_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "item_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "package_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "manifestation_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "primary_title!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "95c25de9f14860338a8b7afda2ba69e95175b0270729d8ad6bf59e240b0a1a4c"
+}
