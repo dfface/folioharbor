@@ -12,7 +12,7 @@ use std::{
 
 pub use error::{EpubError, EpubErrorCode};
 pub use package::{Metadata, ParsedPublication, PublicationResource, SpineItem, TocEntry};
-pub use sanitize::{ContentSanitizer, ResourceResolver, SanitizedContent};
+pub use sanitize::{ContentSanitizer, ResourceResolver, SanitizedContent, SanitizerLimits};
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct EpubPath(String);
