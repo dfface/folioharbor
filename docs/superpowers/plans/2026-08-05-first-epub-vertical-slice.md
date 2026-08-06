@@ -994,24 +994,50 @@ git commit -m "feat: synchronize versioned reading progress"
 
 **Files:**
 
+- Create: `.sqlx/query-69e0291a3a737dddd5c9ca05c764196d6c4e7073d49d5ab1bd4caebd9750a770.json`
+- Create: `.sqlx/query-ca25ddd7eb9d4e8f510b640da3fc5db0026e6eeb9f2d9bae6ad6c75f9f0c9551.json`
+- Create: `.sqlx/query-f5096f0a36f91f92182e3c1d5fb6f02f8679bbb6ab78fee05cd51af106250a81.json`
+- Modify: `Cargo.lock`
+- Modify: `Cargo.toml`
+- Modify: `apps/api/src/lib.rs`
+- Modify: `apps/api/src/main.rs`
+- Modify: `apps/api/tests/upload_composition.rs`
+- Modify: `crates/application/Cargo.toml`
+- Modify: `crates/application/src/authorization.rs`
 - Create: `crates/application/src/catalog/download_item.rs`
+- Modify: `crates/application/src/catalog/get_item.rs`
+- Modify: `crates/application/src/catalog/list_library_books.rs`
+- Modify: `crates/application/src/catalog/mod.rs`
+- Modify: `crates/application/src/libraries/api.rs`
+- Modify: `crates/application/src/libraries/settings.rs`
+- Modify: `crates/application/src/ports/catalog_repository.rs`
 - Create: `crates/application/src/ports/download_repository.rs`
+- Modify: `crates/application/src/ports/library_repository.rs`
+- Modify: `crates/application/src/ports/mod.rs`
+- Modify: `crates/application/tests/catalog_queries.rs`
+- Create: `crates/application/tests/download_item.rs`
+- Modify: `crates/application/tests/library_use_cases.rs`
+- Modify: `crates/http/Cargo.toml`
 - Create: `crates/http/src/routes/download.rs`
+- Modify: `crates/http/src/routes/libraries.rs`
+- Modify: `crates/http/src/routes/mod.rs`
+- Modify: `crates/http/tests/catalog_routes.rs`
 - Create: `crates/http/tests/download_routes.rs`
+- Modify: `crates/http/tests/reader_routes.rs`
+- Modify: `crates/postgres/src/catalog.rs`
+- Create: `crates/postgres/src/download.rs`
+- Modify: `crates/postgres/src/lib.rs`
+- Modify: `crates/postgres/src/libraries.rs`
+- Create: `crates/postgres/tests/download_authorization.rs`
+- Modify: `crates/postgres/tests/library_api_authorization.rs`
+- Modify: `crates/postgres/tests/migration_from_zero.rs`
+- Modify: `crates/storage-local/src/lib.rs`
+- Modify: `crates/storage-local/src/operations.rs`
+- Modify: `crates/storage-local/tests/storage_contract.rs`
+- Modify: `docs/superpowers/plans/2026-08-05-first-epub-vertical-slice.md`
 - Create: `migrations/0020_download_authorization.sql`
 - Create: `migrations/0021_download_semantics.sql`
 - Create: `migrations/0022_download_rbac.sql`
-- Modify: `Cargo.toml`
-- Modify: `Cargo.lock`
-- Modify: `crates/application/Cargo.toml`
-- Modify: `crates/application/src/catalog/mod.rs`
-- Modify: `crates/application/src/ports/mod.rs`
-- Modify: `crates/application/src/authorization.rs`
-- Modify: `crates/application/tests/download_item.rs`
-- Modify: `crates/http/tests/reader_routes.rs`
-- Modify: `crates/postgres/src/download.rs`
-- Modify: `crates/postgres/tests/download_authorization.rs`
-- Modify: `crates/storage-local/src/lib.rs`
 - Modify: `openapi/folioharbor-v1.yaml`
 
 **Interfaces:**
