@@ -97,7 +97,7 @@ impl ProblemDetails {
         let mapping = ProblemMapping::from(error);
         let request_id = context.request_id.to_public_string();
         let fields = match error {
-            AppError::Invalid { fields, .. } => {
+            AppError::BadRequest { fields, .. } | AppError::Invalid { fields, .. } => {
                 fields.iter().map(ProblemFieldViolation::from).collect()
             }
             _ => Vec::new(),
@@ -161,6 +161,12 @@ impl From<&AppError> for ProblemMapping {
                 code,
                 "Request conflict",
                 "The request conflicts with the current resource state.",
+            ),
+            AppError::BadRequest { code, .. } => Self::new(
+                400,
+                code,
+                "Malformed request",
+                "The request contains a malformed identifier.",
             ),
             AppError::Invalid { code, .. } => Self::new(
                 422,

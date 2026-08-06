@@ -454,7 +454,7 @@ components:
         primary_title: {type: string}
         authors: {type: array, items: {type: string}}
         languages: {type: array, items: {type: string}}
-        media_type: {type: string, enum: [application/epub+zip]}
+        media_type: {type: string, enum: [application/epub+zip, application/octet-stream]}
         can_read: {type: boolean, description: Effective online-reading capability}
         can_download: {type: boolean, description: Effective original-file download capability; independent from can_read}
     BookPage:
@@ -465,13 +465,19 @@ components:
         items: {type: array, items: {$ref: '#/components/schemas/BookSummary'}}
         next_cursor: {type: [string, 'null'], description: Opaque cursor; absent or null at the end}
     ItemDetail:
-      allOf:
-        - {$ref: '#/components/schemas/BookSummary'}
-        - type: object
-          required: [manifestation_id, identifiers]
-          properties:
-            manifestation_id: {type: string, format: uuid}
-            identifiers: {type: array, items: {type: string}}
+      type: object
+      additionalProperties: false
+      required: [item_id, manifestation_id, primary_title, authors, languages, identifiers, media_type, can_read, can_download]
+      properties:
+        item_id: {type: string, format: uuid}
+        manifestation_id: {type: string, format: uuid}
+        primary_title: {type: string}
+        authors: {type: array, items: {type: string}}
+        languages: {type: array, items: {type: string}}
+        identifiers: {type: array, items: {type: string}}
+        media_type: {type: string, enum: [application/epub+zip, application/octet-stream]}
+        can_read: {type: boolean, description: Effective online-reading capability}
+        can_download: {type: boolean, description: Effective original-file download capability; independent from can_read}
     ProblemDetails:
       type: object
       required: [type, title, status, detail, instance, code, request_id]

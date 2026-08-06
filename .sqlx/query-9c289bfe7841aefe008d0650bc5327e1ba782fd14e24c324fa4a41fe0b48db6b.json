@@ -1,0 +1,74 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT visible.holding_id AS \"holding_id!\",visible.item_id AS \"item_id!\",visible.package_id AS \"package_id!\",visible.manifestation_id AS \"manifestation_id!\",visible.primary_title AS \"primary_title!\",visible.authors AS \"authors!\",visible.languages AS \"languages!\",visible.identifiers AS \"identifiers!\",visible.media_type AS \"media_type!\" FROM folioharbor.holdings holding CROSS JOIN LATERAL (SELECT candidate.item_id FROM folioharbor.items candidate WHERE candidate.holding_id=holding.holding_id AND candidate.state='active' ORDER BY candidate.created_at DESC,candidate.item_id DESC LIMIT 1) selected CROSS JOIN LATERAL folioharbor.catalog_item_projection_visible($1,$2,selected.item_id,$3) visible WHERE holding.library_id=$2 AND holding.state='active' AND holding.holding_id<$4 ORDER BY holding.holding_id DESC LIMIT $5",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "holding_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "item_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "package_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "manifestation_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "primary_title!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "authors!",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 6,
+        "name": "languages!",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 7,
+        "name": "identifiers!",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 8,
+        "name": "media_type!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "9c289bfe7841aefe008d0650bc5327e1ba782fd14e24c324fa4a41fe0b48db6b"
+}

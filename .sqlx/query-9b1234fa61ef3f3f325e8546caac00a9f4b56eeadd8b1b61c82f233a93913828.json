@@ -1,0 +1,73 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT visible.holding_id AS \"holding_id!\",visible.item_id AS \"item_id!\",visible.package_id AS \"package_id!\",visible.manifestation_id AS \"manifestation_id!\",visible.primary_title AS \"primary_title!\",visible.authors AS \"authors!\",visible.languages AS \"languages!\",visible.identifiers AS \"identifiers!\",visible.media_type AS \"media_type!\" FROM folioharbor.catalog_item_projection_visible($1,$2,$3,$4) visible",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "holding_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "item_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "package_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "manifestation_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "primary_title!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "authors!",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 6,
+        "name": "languages!",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 7,
+        "name": "identifiers!",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 8,
+        "name": "media_type!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "9b1234fa61ef3f3f325e8546caac00a9f4b56eeadd8b1b61c82f233a93913828"
+}

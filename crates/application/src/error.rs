@@ -20,6 +20,10 @@ pub enum AppError {
     Conflict {
         code: &'static str,
     },
+    BadRequest {
+        code: &'static str,
+        fields: Vec<FieldViolation>,
+    },
     Invalid {
         code: &'static str,
         fields: Vec<FieldViolation>,

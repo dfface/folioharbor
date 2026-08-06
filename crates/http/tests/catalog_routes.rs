@@ -312,6 +312,40 @@ async fn routes_return_safe_catalog_projections_etag_and_anti_enumerating_proble
     assert_eq!(hidden_json["code"], "library_not_found");
     assert!(hidden_json.get("total").is_none());
 
+    let malformed_identifier = app
+        .clone()
+        .oneshot(request(
+            &format!("/api/v1/libraries/{}/items/not-a-uuid", library.as_uuid()),
+            "allowed",
+        ))
+        .await
+        .expect("response");
+    assert_eq!(malformed_identifier.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        malformed_identifier
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/problem+json")
+    );
+    let identifier_problem: serde_json::Value = serde_json::from_slice(
+        &malformed_identifier
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes(),
+    )
+    .expect("problem JSON");
+    assert_eq!(identifier_problem["code"], "invalid_identifier");
+    let request_id = identifier_problem["request_id"]
+        .as_str()
+        .expect("request ID");
+    assert_eq!(
+        identifier_problem["instance"],
+        format!("/problems/{request_id}")
+    );
+
     let malformed = app
         .oneshot(request(
             &format!("/api/v1/libraries/{}/books?limit=abc", library.as_uuid()),
@@ -378,6 +412,65 @@ fn openapi_documents_opaque_pagination_capabilities_etag_and_problems() {
     }
 }
 
+#[test]
+fn openapi_item_detail_schema_accepts_the_actual_response_contract() {
+    let document: Value =
+        serde_yaml::from_str(include_str!("../../../openapi/folioharbor-v1.yaml"))
+            .expect("OpenAPI");
+    let actual = serde_json::json!({
+        "item_id": ItemId::new().as_uuid().to_string(),
+        "manifestation_id": ManifestationId::new().as_uuid().to_string(),
+        "primary_title": "The Book",
+        "authors": ["Writer"],
+        "languages": ["en"],
+        "identifiers": ["isbn:test"],
+        "media_type": "application/epub+zip",
+        "can_read": true,
+        "can_download": false
+    });
+    assert_schema_accepts(
+        &document["components"]["schemas"]["ItemDetail"],
+        &actual,
+        &document,
+    );
+}
+
+fn assert_schema_accepts(schema: &Value, actual: &serde_json::Value, document: &Value) {
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let name = reference
+            .strip_prefix("#/components/schemas/")
+            .expect("local schema reference");
+        assert_schema_accepts(&document["components"]["schemas"][name], actual, document);
+        return;
+    }
+    if let Some(parts) = schema.get("allOf").and_then(Value::as_sequence) {
+        for part in parts {
+            assert_schema_accepts(part, actual, document);
+        }
+        return;
+    }
+    if schema.get("type").and_then(Value::as_str) != Some("object") {
+        return;
+    }
+    let object = actual.as_object().expect("object response");
+    let properties = schema["properties"].as_mapping().expect("properties");
+    for required in schema["required"].as_sequence().into_iter().flatten() {
+        let name = required.as_str().expect("required property name");
+        assert!(
+            object.contains_key(name),
+            "missing required property {name}"
+        );
+    }
+    if schema["additionalProperties"].as_bool() == Some(false) {
+        for name in object.keys() {
+            assert!(
+                properties.contains_key(Value::String(name.clone())),
+                "schema rejects actual property {name}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn real_routes_apply_role_and_reader_download_setting_without_enumerating_outsiders()
 -> anyhow::Result<()> {
@@ -407,7 +500,7 @@ async fn real_routes_apply_role_and_reader_download_setting_without_enumerating_
     for (user, role) in [(owner, "owner"), (editor, "editor"), (reader, "reader")] {
         sqlx::query("INSERT INTO folioharbor.library_memberships(library_id,user_id,role_code,status,joined_at) VALUES($1,$2,$3,'active',$4)").bind(library.as_uuid()).bind(user.as_uuid()).bind(role).bind(now).execute(&pools.owner).await?;
     }
-    seed_catalog_item(&pools.owner, library, owner, now).await?;
+    let item = seed_catalog_item(&pools.owner, library, owner, now).await?;
     let identity = Arc::new(Identity(HashMap::from([
         ("owner".to_owned(), owner),
         ("editor".to_owned(), editor),
@@ -430,7 +523,23 @@ async fn real_routes_apply_role_and_reader_download_setting_without_enumerating_
             serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
         assert_eq!(json["items"][0]["can_read"], true);
         assert_eq!(json["items"][0]["can_download"], expected_download);
+        assert_eq!(json["items"][0]["authors"], serde_json::json!(["Writer"]));
+        assert_eq!(json["items"][0]["languages"], serde_json::json!(["en"]));
+        assert_eq!(json["items"][0]["media_type"], "application/octet-stream");
     }
+    let detail_uri = format!(
+        "/api/v1/libraries/{}/items/{}",
+        library.as_uuid(),
+        item.as_uuid()
+    );
+    let detail = disabled
+        .clone()
+        .oneshot(request(&detail_uri, "reader"))
+        .await?;
+    let detail_json: serde_json::Value =
+        serde_json::from_slice(&detail.into_body().collect().await?.to_bytes())?;
+    assert_eq!(detail_json["identifiers"], serde_json::json!(["isbn:test"]));
+    assert_eq!(detail_json["media_type"], "application/octet-stream");
     let hidden = disabled.oneshot(request(&uri, "outsider")).await?;
     assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
     let enabled = router(state(
@@ -483,7 +592,7 @@ async fn seed_catalog_item(
         .execute(pool)
         .await?;
     sqlx::query("INSERT INTO folioharbor.blobs(blob_id,storage_namespace,sha256,byte_size,created_at) VALUES($1,'instance-v1',$2,1,$3)").bind(blob.as_uuid()).bind(&sha).bind(now).execute(pool).await?;
-    sqlx::query("INSERT INTO folioharbor.upload_sessions(upload_id,library_id,created_by,file_name,media_type,declared_bytes,dedup_scope,received_bytes,state,storage_key,sha256,expires_at,created_at,updated_at) VALUES($1,$2,$3,'book.epub','application/epub+zip',1,'instance',1,'ready',$4,$5,$6,$6,$6)").bind(upload.as_uuid()).bind(library.as_uuid()).bind(actor.as_uuid()).bind(format!("blob:instance-v1:{}:1","2a".repeat(32))).bind(&sha).bind(now).execute(pool).await?;
+    sqlx::query("INSERT INTO folioharbor.upload_sessions(upload_id,library_id,created_by,file_name,media_type,declared_bytes,dedup_scope,received_bytes,state,storage_key,sha256,expires_at,created_at,updated_at) VALUES($1,$2,$3,'book.epub','application/octet-stream',1,'instance',1,'ready',$4,$5,$6,$6,$6)").bind(upload.as_uuid()).bind(library.as_uuid()).bind(actor.as_uuid()).bind(format!("blob:instance-v1:{}:1","2a".repeat(32))).bind(&sha).bind(now).execute(pool).await?;
     sqlx::query("INSERT INTO folioharbor.publication_packages VALUES($1,$2,$3,'epub-v1',$4)")
         .bind(package.as_uuid())
         .bind(manifestation.as_uuid())

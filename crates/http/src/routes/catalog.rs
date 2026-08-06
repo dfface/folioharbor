@@ -178,7 +178,7 @@ fn parse_ids(library: &str, item: &str) -> Result<(LibraryId, ItemId), AppError>
 }
 
 fn invalid_id(field: &'static str) -> AppError {
-    AppError::Invalid {
+    AppError::BadRequest {
         code: "invalid_identifier",
         fields: vec![FieldViolation {
             field,

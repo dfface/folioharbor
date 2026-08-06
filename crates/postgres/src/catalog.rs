@@ -21,6 +21,34 @@ pub struct PgCatalogRepository {
     pool: PgPool,
 }
 
+struct CatalogProjectionRow {
+    holding_id: Uuid,
+    item_id: Uuid,
+    package_id: Uuid,
+    manifestation_id: Uuid,
+    primary_title: String,
+    authors: Vec<String>,
+    languages: Vec<String>,
+    identifiers: Vec<String>,
+    media_type: String,
+}
+
+impl From<CatalogProjectionRow> for VisibleCatalogItem {
+    fn from(row: CatalogProjectionRow) -> Self {
+        Self {
+            holding_id: HoldingId::from_uuid(row.holding_id),
+            item_id: ItemId::from_uuid(row.item_id),
+            manifestation_id: ManifestationId::from_uuid(row.manifestation_id),
+            package_id: PublicationPackageId::from_uuid(row.package_id),
+            primary_title: row.primary_title,
+            authors: row.authors,
+            languages: row.languages,
+            identifiers: row.identifiers,
+            media_type: row.media_type,
+        }
+    }
+}
+
 impl PgCatalogRepository {
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
@@ -98,32 +126,34 @@ impl CatalogQueryRepository for PgCatalogRepository {
         )
         .await
         .map_err(persistence)?;
-        let rows = sqlx::query!(
-            r#"SELECT holding.holding_id AS "holding_id!",visible.item_id AS "item_id!",visible.package_id AS "package_id!",visible.manifestation_id AS "manifestation_id!",visible.primary_title AS "primary_title!" FROM folioharbor.holdings holding CROSS JOIN LATERAL (SELECT candidate.item_id FROM folioharbor.items candidate WHERE candidate.holding_id=holding.holding_id AND candidate.state='active' ORDER BY candidate.item_id DESC LIMIT 1) selected CROSS JOIN LATERAL folioharbor.catalog_item_visible($1,$2,selected.item_id,$3) visible WHERE holding.library_id=$2 AND holding.state='active' AND ($4::uuid IS NULL OR holding.holding_id<$4) ORDER BY holding.holding_id DESC LIMIT $5"#,
-            grant.actor().as_uuid(),
-            library_id.as_uuid(),
-            grant.membership_version(),
-            after.map(HoldingId::as_uuid),
-            i64::from(limit),
-        )
-        .fetch_all(&mut *transaction)
-        .await
-        .map_err(persistence)?;
+        let rows = if let Some(after) = after {
+            sqlx::query_as!(
+                CatalogProjectionRow,
+                r#"SELECT visible.holding_id AS "holding_id!",visible.item_id AS "item_id!",visible.package_id AS "package_id!",visible.manifestation_id AS "manifestation_id!",visible.primary_title AS "primary_title!",visible.authors AS "authors!",visible.languages AS "languages!",visible.identifiers AS "identifiers!",visible.media_type AS "media_type!" FROM folioharbor.holdings holding CROSS JOIN LATERAL (SELECT candidate.item_id FROM folioharbor.items candidate WHERE candidate.holding_id=holding.holding_id AND candidate.state='active' ORDER BY candidate.created_at DESC,candidate.item_id DESC LIMIT 1) selected CROSS JOIN LATERAL folioharbor.catalog_item_projection_visible($1,$2,selected.item_id,$3) visible WHERE holding.library_id=$2 AND holding.state='active' AND holding.holding_id<$4 ORDER BY holding.holding_id DESC LIMIT $5"#,
+                grant.actor().as_uuid(),
+                library_id.as_uuid(),
+                grant.membership_version(),
+                after.as_uuid(),
+                i64::from(limit),
+            )
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(persistence)?
+        } else {
+            sqlx::query_as!(
+                CatalogProjectionRow,
+                r#"SELECT visible.holding_id AS "holding_id!",visible.item_id AS "item_id!",visible.package_id AS "package_id!",visible.manifestation_id AS "manifestation_id!",visible.primary_title AS "primary_title!",visible.authors AS "authors!",visible.languages AS "languages!",visible.identifiers AS "identifiers!",visible.media_type AS "media_type!" FROM folioharbor.holdings holding CROSS JOIN LATERAL (SELECT candidate.item_id FROM folioharbor.items candidate WHERE candidate.holding_id=holding.holding_id AND candidate.state='active' ORDER BY candidate.created_at DESC,candidate.item_id DESC LIMIT 1) selected CROSS JOIN LATERAL folioharbor.catalog_item_projection_visible($1,$2,selected.item_id,$3) visible WHERE holding.library_id=$2 AND holding.state='active' ORDER BY holding.holding_id DESC LIMIT $4"#,
+                grant.actor().as_uuid(),
+                library_id.as_uuid(),
+                grant.membership_version(),
+                i64::from(limit),
+            )
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(persistence)?
+        };
         transaction.commit().await.map_err(persistence)?;
-        Ok(rows
-            .into_iter()
-            .map(|row| VisibleCatalogItem {
-                holding_id: HoldingId::from_uuid(row.holding_id),
-                item_id: ItemId::from_uuid(row.item_id),
-                manifestation_id: ManifestationId::from_uuid(row.manifestation_id),
-                package_id: PublicationPackageId::from_uuid(row.package_id),
-                primary_title: row.primary_title,
-                authors: Vec::new(),
-                languages: Vec::new(),
-                identifiers: Vec::new(),
-                media_type: "application/epub+zip".to_owned(),
-            })
-            .collect())
+        Ok(rows.into_iter().map(VisibleCatalogItem::from).collect())
     }
 
     async fn find_visible_item(
@@ -143,8 +173,9 @@ impl CatalogQueryRepository for PgCatalogRepository {
         )
         .await
         .map_err(persistence)?;
-        let row = sqlx::query!(
-            r#"SELECT holding.holding_id AS "holding_id!",visible.item_id AS "item_id!",visible.package_id AS "package_id!",visible.manifestation_id AS "manifestation_id!",visible.primary_title AS "primary_title!" FROM folioharbor.holdings holding JOIN folioharbor.items item USING(holding_id) CROSS JOIN LATERAL folioharbor.catalog_item_visible($1,$2,item.item_id,$4) visible WHERE holding.library_id=$2 AND item.item_id=$3 AND holding.state='active' AND item.state='active'"#,
+        let row = sqlx::query_as!(
+            CatalogProjectionRow,
+            r#"SELECT visible.holding_id AS "holding_id!",visible.item_id AS "item_id!",visible.package_id AS "package_id!",visible.manifestation_id AS "manifestation_id!",visible.primary_title AS "primary_title!",visible.authors AS "authors!",visible.languages AS "languages!",visible.identifiers AS "identifiers!",visible.media_type AS "media_type!" FROM folioharbor.catalog_item_projection_visible($1,$2,$3,$4) visible"#,
             grant.actor().as_uuid(),
             library_id.as_uuid(),
             item_id.as_uuid(),
@@ -154,17 +185,7 @@ impl CatalogQueryRepository for PgCatalogRepository {
         .await
         .map_err(persistence)?;
         transaction.commit().await.map_err(persistence)?;
-        Ok(row.map(|row| VisibleCatalogItem {
-            holding_id: HoldingId::from_uuid(row.holding_id),
-            item_id: ItemId::from_uuid(row.item_id),
-            manifestation_id: ManifestationId::from_uuid(row.manifestation_id),
-            package_id: PublicationPackageId::from_uuid(row.package_id),
-            primary_title: row.primary_title,
-            authors: Vec::new(),
-            languages: Vec::new(),
-            identifiers: Vec::new(),
-            media_type: "application/epub+zip".to_owned(),
-        }))
+        Ok(row.map(VisibleCatalogItem::from))
     }
 }
 
