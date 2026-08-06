@@ -779,8 +779,10 @@ reader/resource work. Migration `0010_catalog.sql` remains unchanged; the additi
 not-yet-implemented migrations originally numbered 0011 through 0014 were initially reserved as
 0012 through 0015 below. Task 14 now also owns additive migration `0013` to correct the committed
 reader projection without rewriting migration history. The Task 14 performance hardening owns
-additive migrations `0014_reader_access_gate.sql` and `0015_reader_projection_location.sql`, so the
-remaining planned migrations are renumbered 0016 through 0019.
+additive migrations `0014_reader_access_gate.sql` and `0015_reader_projection_location.sql`. Task 15
+uses `0016_reading_state.sql` plus additive hardening migration
+`0017_reading_mutation_scope.sql`, so the remaining planned migrations are numbered 0018 through
+0020.
 
 - [ ] **Step 1: Write failing list/detail tests**
 
@@ -1013,7 +1015,7 @@ git commit -m "feat: stream authorized original EPUB downloads"
 
 **Files:**
 
-- Create: `migrations/0017_outbox.sql`
+- Create: `migrations/0018_outbox.sql`
 - Create: `crates/application/src/mail/{mod,enqueue,deliver}.rs`
 - Create: `crates/application/src/ports/mail_repository.rs`
 - Create: `crates/postgres/src/mail.rs`
@@ -1049,7 +1051,7 @@ Render one public, locale-negotiated explanation per stable problem code without
 Run against a local SMTP capture service in integration tests, inspect captured text/HTML, force retry/failure, scan logs for test token values, then run workspace gate. Commit:
 
 ```bash
-git add migrations/0017_outbox.sql crates/application crates/postgres crates/http apps/worker deploy
+git add migrations/0018_outbox.sql crates/application crates/postgres crates/http apps/worker deploy
 git commit -m "feat: deliver transactional account and invitation email"
 ```
 
@@ -1057,7 +1059,7 @@ git commit -m "feat: deliver transactional account and invitation email"
 
 **Files:**
 
-- Create: `migrations/0018_deletion_and_gc.sql`
+- Create: `migrations/0019_deletion_and_gc.sql`
 - Create: `crates/domain/src/catalog/lifecycle.rs`
 - Create: `crates/application/src/catalog/{delete_item,restore_item,garbage_collect}.rs`
 - Create: `crates/application/tests/item_lifecycle.rs`
@@ -1093,7 +1095,7 @@ Select a limited `SKIP LOCKED` batch, recheck authoritative references in the tr
 Run shared-Blob deletion, concurrent import-versus-GC, storage failure/retry, progress preservation, quota release, and audit retention tests. Run workspace gate. Commit:
 
 ```bash
-git add migrations/0018_deletion_and_gc.sql crates/domain crates/application crates/postgres crates/http apps/worker openapi
+git add migrations/0019_deletion_and_gc.sql crates/domain crates/application crates/postgres crates/http apps/worker openapi
 git commit -m "feat: add recoverable item deletion and safe blob GC"
 ```
 
@@ -1247,7 +1249,7 @@ git commit -m "feat: add secure EPUB reader and progress sync"
 
 **Files:**
 
-- Create: `migrations/0019_operations.sql`
+- Create: `migrations/0020_operations.sql`
 - Create: `crates/application/src/operations/{mod,health,bootstrap_admin,consistency_check}.rs`
 - Create: `crates/postgres/src/operations.rs`
 - Create: `crates/http/src/routes/health.rs`
@@ -1289,7 +1291,7 @@ Migration completes before API/Worker; runtime processes use distinct role secre
 Document PostgreSQL plus Blob volume as one business backup set, schema version and Blob watermark recording, restore ordering, and post-restore `storage check` for missing Blob, orphan location, and hash mismatch. Do not claim crash-consistent cross-volume snapshots unless the operator provides them. Run CLI/health/Compose config tests and workspace/Web gates. Commit:
 
 ```bash
-git add migrations/0019_operations.sql crates apps deploy docs/operations
+git add migrations/0020_operations.sql crates apps deploy docs/operations
 git commit -m "feat: add deployment operations and observability"
 ```
 
