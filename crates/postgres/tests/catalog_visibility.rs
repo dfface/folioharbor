@@ -5,8 +5,8 @@ use folioharbor_domain::id::{
     RequestId, UploadId, UserId, WorkId,
 };
 use folioharbor_postgres::{
-    DatabaseContext, PgAuthorizationRepository, PgCatalogRepository, PgPools, PgTransactionContext,
-    run_migrations,
+    DatabaseContext, PgAuthorizationRepository, PgCatalogRepository, PgPools,
+    PgReaderCatalogRepository, PgTransactionContext, run_migrations,
 };
 use folioharbor_test_support::postgres::TestPostgres;
 use sqlx::PgPool;
@@ -85,6 +85,20 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
     .fetch_one(&pools.owner)
     .await?;
     assert!(!public_can_read);
+    let (access_security_definer, access_settings): (bool, Option<Vec<String>>) = sqlx::query_as(
+        "SELECT prosecdef,proconfig FROM pg_proc JOIN pg_namespace ON pg_namespace.oid=pronamespace WHERE nspname='folioharbor' AND proname='reader_item_read_access'",
+    )
+    .fetch_one(&pools.owner)
+    .await?;
+    assert!(access_security_definer);
+    assert!(
+        access_settings
+            .is_some_and(|values| values.iter().any(|value| value == "search_path=\"\""))
+    );
+    let api_can_access: bool = sqlx::query_scalar("SELECT has_function_privilege('folioharbor_api','folioharbor.reader_item_read_access(uuid,uuid)','EXECUTE')").fetch_one(&pools.owner).await?;
+    let worker_can_access: bool = sqlx::query_scalar("SELECT has_function_privilege('folioharbor_worker','folioharbor.reader_item_read_access(uuid,uuid)','EXECUTE')").fetch_one(&pools.owner).await?;
+    assert!(api_can_access);
+    assert!(!worker_can_access);
     let now = OffsetDateTime::now_utc();
     let allowed = UserId::new();
     let outsider = UserId::new();
@@ -177,6 +191,7 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
     assert_eq!(visible, Some(item.as_uuid()));
     tx.rollback().await?;
     let catalog = PgCatalogRepository::new(pools.api.clone());
+    let reader_catalog = PgReaderCatalogRepository::new(pools.api.clone());
     let grant = Authorization::new(&PgAuthorizationRepository::new(pools.api.clone()))
         .require(allowed, Action::ViewLibrary, ResourceRef::Library(library))
         .await?;
@@ -199,7 +214,14 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
     assert_eq!(visible.languages, ["fr"]);
     assert_eq!(visible.identifiers, ["isbn:978-test"]);
     assert_eq!(visible.media_type, "application/octet-stream");
-    let readable = catalog
+    sqlx::query(
+        "INSERT INTO folioharbor.publication_resources(package_id,resource_order,normalized_href,media_type,source_blob_id) SELECT $1,number,format('OPS/resource-%s.css',number),'text/css',$2 FROM generate_series(1,4095) number",
+    )
+    .bind(intended_package.as_uuid())
+    .bind(blob.as_uuid())
+    .execute(&pools.owner)
+    .await?;
+    let readable = reader_catalog
         .find_readable_publication(allowed, item, RequestId::new())
         .await?
         .expect("active member can read the package projection");
@@ -212,6 +234,18 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
     );
     assert_eq!(readable.toc[0].label, "Chapter");
     assert!(!readable.storage_key.as_str().is_empty());
+    assert_eq!(readable.resources.len(), 4096);
+    assert!(
+        reader_catalog
+            .find_readable_publication(allowed, item, RequestId::new())
+            .await?
+            .is_some()
+    );
+    let cache_metrics = reader_catalog.cache_metrics();
+    assert_eq!(cache_metrics.entries, 1);
+    assert!(cache_metrics.bytes > 0);
+    assert_eq!(cache_metrics.access_checks, 2);
+    assert_eq!(cache_metrics.projection_loads, 1);
 
     sqlx::query(
         "INSERT INTO folioharbor.roles(role_code,display_name) VALUES('reader-test','Reader test')",
@@ -226,7 +260,7 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
     sqlx::query("UPDATE folioharbor.library_memberships SET role_code='reader-test',version=version+1 WHERE library_id=$1 AND user_id=$2")
         .bind(library.as_uuid()).bind(allowed.as_uuid()).execute(&pools.owner).await?;
     assert!(
-        catalog
+        reader_catalog
             .find_readable_publication(allowed, item, RequestId::new())
             .await?
             .is_none(),
@@ -241,7 +275,7 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
     .execute(&pools.owner)
     .await?;
     assert!(
-        catalog
+        reader_catalog
             .find_readable_publication(allowed, item, RequestId::new())
             .await?
             .is_some(),
@@ -251,7 +285,7 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
         .execute(&pools.owner)
         .await?;
     assert!(
-        catalog
+        reader_catalog
             .find_readable_publication(allowed, item, RequestId::new())
             .await?
             .is_none(),
@@ -260,7 +294,7 @@ async fn api_catalog_access_starts_from_visible_items_and_global_tables_are_not_
     sqlx::query("UPDATE folioharbor.library_memberships SET status='removed',removed_at=$3,version=version+1 WHERE library_id=$1 AND user_id=$2")
         .bind(library.as_uuid()).bind(allowed.as_uuid()).bind(now).execute(&pools.owner).await?;
     assert!(
-        catalog
+        reader_catalog
             .find_readable_publication(allowed, item, RequestId::new())
             .await?
             .is_none()

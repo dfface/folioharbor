@@ -26,7 +26,7 @@ use crate::{
     problem::{ProblemContext, response as problem_response},
 };
 
-const CONTENT_POLICY: &str = "default-src 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'none'; form-action 'none'; frame-src 'none'";
+const CONTENT_POLICY: &str = "default-src 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'self'";
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -181,7 +181,16 @@ fn matches_validator(headers: &HeaderMap, etag: &str) -> bool {
     headers
         .get(IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == etag))
+        .is_some_and(|value| {
+            value.split(',').any(|candidate| {
+                let candidate = candidate.trim();
+                candidate == "*" || weak_etag(candidate) == weak_etag(etag)
+            })
+        })
+}
+
+fn weak_etag(value: &str) -> &str {
+    value.strip_prefix("W/").unwrap_or(value)
 }
 
 fn not_modified(etag: &str) -> Response {

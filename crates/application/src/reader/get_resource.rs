@@ -85,27 +85,23 @@ impl<C: ReaderCatalogRepository + ?Sized, R: PublicationResourceReader + ?Sized>
             .ok_or(AppError::NotFound {
                 code: "item_not_found",
             })?;
-        let resource = publication
-            .resources
-            .iter()
-            .find(|resource| {
-                ResourceId::for_resource(publication.package_id, &resource.normalized_href)
-                    == resource_id
-            })
-            .cloned()
-            .ok_or(AppError::NotFound {
-                code: "resource_not_found",
-            })?;
+        let resource =
+            publication
+                .resource_by_id(&resource_id)
+                .cloned()
+                .ok_or(AppError::NotFound {
+                    code: "resource_not_found",
+                })?;
         let bytes = self
             .reader
             .read(ResourceReadRequest {
                 item_id: publication.item_id,
                 blob_id: publication.blob_id,
-                storage_key: publication.storage_key,
+                storage_key: publication.storage_key.clone(),
                 package_id: publication.package_id,
                 normalized_href: resource.normalized_href,
                 media_type: resource.media_type.clone(),
-                resources: publication.resources,
+                resource_routes: publication.resource_routes(),
             })
             .await
             .map_err(map_reader_error)?;

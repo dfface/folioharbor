@@ -263,7 +263,7 @@ paths:
       security: [{cookieAuth: []}]
       parameters:
         - {$ref: '#/components/parameters/ItemId'}
-        - {name: If-None-Match, in: header, schema: {type: string}}
+        - {name: If-None-Match, in: header, schema: {type: string}, description: Accepts strong or weak matching validators and the wildcard `*`}
       responses:
         '200':
           description: Authorized publication manifest
@@ -284,13 +284,13 @@ paths:
       parameters:
         - {$ref: '#/components/parameters/ItemId'}
         - {name: resource_id, in: path, required: true, schema: {type: string, pattern: '^[A-Za-z0-9_-]+$', maxLength: 128}, description: Opaque package-scoped resource identifier}
-        - {name: If-None-Match, in: header, schema: {type: string}}
+        - {name: If-None-Match, in: header, schema: {type: string}, description: Accepts strong or weak matching validators and the wildcard `*`}
       responses:
         '200':
           description: Sanitized document, stylesheet, image, or font with restrictive browser-isolation headers
           headers:
             ETag: {schema: {type: string}, description: Strong Item, package, resource, and sanitizer-version validator}
-            Content-Security-Policy: {schema: {type: string}, example: "default-src 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'none'; form-action 'none'; frame-src 'none'"}
+            Content-Security-Policy: {schema: {type: string}, example: "default-src 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'self'"}
             X-Content-Type-Options: {schema: {type: string}, example: nosniff}
             Referrer-Policy: {schema: {type: string}, example: no-referrer}
             Cache-Control: {schema: {type: string}, example: 'private, no-cache'}

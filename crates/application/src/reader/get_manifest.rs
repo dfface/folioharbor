@@ -3,6 +3,7 @@ use crate::{
     ports::{ReaderCatalogRepository, ReaderPublication},
 };
 use folioharbor_domain::id::{ItemId, ManifestationId, RequestId, UserId};
+use std::collections::{HashMap, HashSet};
 
 use super::ResourceId;
 
@@ -61,12 +62,22 @@ impl<R: ReaderCatalogRepository + ?Sized> GetPublicationManifest<'_, R> {
             .ok_or(AppError::NotFound {
                 code: "item_not_found",
             })?;
-        Ok(project(publication))
+        Ok(project(&publication))
     }
 }
 
-fn project(publication: ReaderPublication) -> PublicationManifest {
+fn project(publication: &ReaderPublication) -> PublicationManifest {
     let item = publication.item_id.as_uuid();
+    let resources_by_href = publication
+        .resources
+        .iter()
+        .map(|resource| (resource.normalized_href.as_str(), resource))
+        .collect::<HashMap<_, _>>();
+    let reading_hrefs = publication
+        .reading_order
+        .iter()
+        .map(|entry| entry.normalized_href.as_str())
+        .collect::<HashSet<_>>();
     let make_link = |href: &str, media_type: &str, title: Option<String>| ManifestLink {
         href: resource_url(
             item,
@@ -80,22 +91,15 @@ fn project(publication: ReaderPublication) -> PublicationManifest {
         .reading_order
         .iter()
         .filter_map(|entry| {
-            publication
-                .resources
-                .iter()
-                .find(|resource| resource.normalized_href == entry.normalized_href)
+            resources_by_href
+                .get(entry.normalized_href.as_str())
                 .map(|resource| make_link(&resource.normalized_href, &resource.media_type, None))
         })
         .collect();
     let resources = publication
         .resources
         .iter()
-        .filter(|resource| {
-            !publication
-                .reading_order
-                .iter()
-                .any(|entry| entry.normalized_href == resource.normalized_href)
-        })
+        .filter(|resource| !reading_hrefs.contains(resource.normalized_href.as_str()))
         .map(|resource| make_link(&resource.normalized_href, &resource.media_type, None))
         .collect();
     let toc = publication
@@ -106,25 +110,21 @@ fn project(publication: ReaderPublication) -> PublicationManifest {
                 (entry.normalized_href.as_str(), None),
                 |(href, fragment)| (href, Some(fragment)),
             );
-            publication
-                .resources
-                .iter()
-                .find(|resource| resource.normalized_href == href)
-                .map(|resource| {
-                    let mut link = make_link(href, &resource.media_type, Some(entry.label.clone()));
-                    if let Some(fragment) = fragment {
-                        link.href.push('#');
-                        link.href.push_str(fragment);
-                    }
-                    link
-                })
+            resources_by_href.get(href).map(|resource| {
+                let mut link = make_link(href, &resource.media_type, Some(entry.label.clone()));
+                if let Some(fragment) = fragment {
+                    link.href.push('#');
+                    link.href.push_str(&encode_fragment(fragment));
+                }
+                link
+            })
         })
         .collect();
     PublicationManifest {
         metadata: ManifestMetadata {
-            title: publication.primary_title,
-            authors: publication.authors,
-            languages: publication.languages,
+            title: publication.primary_title.clone(),
+            authors: publication.authors.to_vec(),
+            languages: publication.languages.to_vec(),
         },
         manifestation_id: publication.manifestation_id,
         reading_order,
@@ -142,6 +142,19 @@ fn project(publication: ReaderPublication) -> PublicationManifest {
             publication.parser_profile_version
         ),
     }
+}
+
+fn encode_fragment(fragment: &str) -> String {
+    let mut encoded = String::with_capacity(fragment.len());
+    for byte in fragment.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
 }
 
 fn resource_url(item: uuid::Uuid, resource: &ResourceId) -> String {

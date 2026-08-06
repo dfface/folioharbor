@@ -1,16 +1,12 @@
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{HashMap, VecDeque},
     io::Read,
     sync::{Arc, Mutex},
 };
 
 use async_trait::async_trait;
-use folioharbor_application::{
-    ports::{
-        BlobStore, PublicationResourceReader, ReaderResource, ResourceReadRequest,
-        ResourceReaderError,
-    },
-    reader::ResourceId,
+use folioharbor_application::ports::{
+    BlobStore, PublicationResourceReader, ResourceReadRequest, ResourceReaderError,
 };
 use folioharbor_domain::id::{BlobId, ItemId, PublicationPackageId};
 
@@ -18,11 +14,20 @@ use crate::{ContentSanitizer, EpubPath, ResourceResolver, SanitizerLimits};
 
 const SANITIZER_VERSION: &str = "sanitizer-v2";
 
+pub trait BlockingWorkHook: Send + Sync {
+    fn before(&self) {}
+    fn after(&self) {}
+}
+
+struct NoopBlockingWorkHook;
+impl BlockingWorkHook for NoopBlockingWorkHook {}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ResourceCacheLimits {
     pub max_entries: usize,
     pub max_bytes: usize,
     pub max_resource_bytes: usize,
+    pub max_concurrent_blocking: usize,
 }
 
 impl Default for ResourceCacheLimits {
@@ -31,6 +36,7 @@ impl Default for ResourceCacheLimits {
             max_entries: 64,
             max_bytes: 32 * 1024 * 1024,
             max_resource_bytes: 16 * 1024 * 1024,
+            max_concurrent_blocking: 4,
         }
     }
 }
@@ -51,20 +57,65 @@ struct Cache {
     bytes: usize,
 }
 
+type ResourceResult = Result<Vec<u8>, ResourceReaderError>;
+type InflightRead = Arc<tokio::sync::OnceCell<ResourceResult>>;
+
 pub struct EpubResourceReader {
     blobs: Arc<dyn BlobStore>,
     limits: ResourceCacheLimits,
     cache: Mutex<Cache>,
+    inflight: Mutex<HashMap<CacheKey, InflightRead>>,
+    blocking: Arc<tokio::sync::Semaphore>,
+    hook: Arc<dyn BlockingWorkHook>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CacheMetrics {
+    pub entries: usize,
+    pub order_records: usize,
+    pub bytes: usize,
 }
 
 impl EpubResourceReader {
     #[must_use]
     pub fn new(blobs: Arc<dyn BlobStore>, limits: ResourceCacheLimits) -> Self {
+        Self::new_with_hook(blobs, limits, Arc::new(NoopBlockingWorkHook))
+    }
+
+    #[must_use]
+    pub fn new_with_hook(
+        blobs: Arc<dyn BlobStore>,
+        limits: ResourceCacheLimits,
+        hook: Arc<dyn BlockingWorkHook>,
+    ) -> Self {
+        let blocking = Arc::new(tokio::sync::Semaphore::new(
+            limits.max_concurrent_blocking.max(1),
+        ));
         Self {
             blobs,
             limits,
             cache: Mutex::new(Cache::default()),
+            inflight: Mutex::new(HashMap::new()),
+            blocking,
+            hook,
         }
+    }
+
+    /// Returns exact transformed-cache accounting.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResourceReaderError::Unavailable`] if the cache lock is poisoned.
+    pub fn cache_metrics(&self) -> Result<CacheMetrics, ResourceReaderError> {
+        let cache = self
+            .cache
+            .lock()
+            .map_err(|_| ResourceReaderError::Unavailable)?;
+        Ok(CacheMetrics {
+            entries: cache.entries.len(),
+            order_records: cache.order.len(),
+            bytes: cache.bytes,
+        })
     }
 
     fn cached(&self, key: &CacheKey) -> Result<Option<Vec<u8>>, ResourceReaderError> {
@@ -82,6 +133,9 @@ impl EpubResourceReader {
             .cache
             .lock()
             .map_err(|_| ResourceReaderError::Unavailable)?;
+        if cache.entries.contains_key(&key) {
+            return Ok(());
+        }
         while cache.entries.len() >= self.limits.max_entries
             || cache.bytes.saturating_add(bytes.len()) > self.limits.max_bytes
         {
@@ -96,6 +150,65 @@ impl EpubResourceReader {
         cache.order.push_back(key.clone());
         cache.entries.insert(key, bytes);
         Ok(())
+    }
+
+    async fn load(
+        &self,
+        key: CacheKey,
+        request: ResourceReadRequest,
+    ) -> Result<Vec<u8>, ResourceReaderError> {
+        let cell = {
+            let mut inflight = self
+                .inflight
+                .lock()
+                .map_err(|_| ResourceReaderError::Unavailable)?;
+            inflight
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
+                .clone()
+        };
+        let result = cell
+            .get_or_init(|| async {
+                let permit = self
+                    .blocking
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| ResourceReaderError::Unavailable)?;
+                let source = self
+                    .blobs
+                    .open_publication(&request.storage_key)
+                    .await
+                    .map_err(|_| ResourceReaderError::Unavailable)?;
+                let limit = self.limits.max_resource_bytes;
+                let hook = self.hook.clone();
+                let transformed = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    hook.before();
+                    let result = read_entry(source, &request.normalized_href, limit)
+                        .and_then(|bytes| transform(bytes, &request));
+                    hook.after();
+                    result
+                })
+                .await
+                .map_err(|_| ResourceReaderError::Unavailable)??;
+                if transformed.len() > limit {
+                    return Err(ResourceReaderError::Malformed);
+                }
+                self.insert(key.clone(), transformed.clone())?;
+                Ok(transformed)
+            })
+            .await
+            .clone();
+        if let Ok(mut inflight) = self.inflight.lock() {
+            if inflight
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &cell))
+            {
+                inflight.remove(&key);
+            }
+        }
+        result
     }
 }
 
@@ -116,22 +229,7 @@ impl PublicationResourceReader for EpubResourceReader {
         if let Some(bytes) = self.cached(&key)? {
             return Ok(bytes);
         }
-        let source = self
-            .blobs
-            .open_publication(&request.storage_key)
-            .await
-            .map_err(|_| ResourceReaderError::Unavailable)?;
-        let limit = self.limits.max_resource_bytes;
-        let href = request.normalized_href.clone();
-        let bytes = tokio::task::spawn_blocking(move || read_entry(source, &href, limit))
-            .await
-            .map_err(|_| ResourceReaderError::Unavailable)??;
-        let transformed = transform(bytes, &request)?;
-        if transformed.len() > limit {
-            return Err(ResourceReaderError::Malformed);
-        }
-        self.insert(key, transformed.clone())?;
-        Ok(transformed)
+        self.load(key, request).await
     }
 }
 
@@ -195,32 +293,17 @@ fn transform(
 struct OpaqueResolver {
     base: EpubPath,
     item: ItemId,
-    resources: BTreeMap<EpubPath, String>,
+    resources: Arc<HashMap<String, String>>,
 }
 
 impl OpaqueResolver {
     fn new(request: &ResourceReadRequest) -> Result<Self, ResourceReaderError> {
         let base =
             EpubPath::new(&request.normalized_href).map_err(|_| ResourceReaderError::Malformed)?;
-        let resources = request
-            .resources
-            .iter()
-            .map(|resource: &ReaderResource| {
-                EpubPath::new(&resource.normalized_href).map(|path| {
-                    (
-                        path,
-                        ResourceId::for_resource(request.package_id, &resource.normalized_href)
-                            .as_str()
-                            .to_owned(),
-                    )
-                })
-            })
-            .collect::<Result<_, _>>()
-            .map_err(|_| ResourceReaderError::Malformed)?;
         Ok(Self {
             base,
             item: request.item_id,
-            resources,
+            resources: request.resource_routes.clone(),
         })
     }
 }
@@ -231,7 +314,7 @@ impl ResourceResolver for OpaqueResolver {
     }
     fn resolve(&self, reference: &EpubPath) -> Option<String> {
         self.resources
-            .get(reference)
+            .get(reference.as_str())
             .map(|opaque| format!("/api/v1/items/{}/resources/{opaque}", self.item.as_uuid()))
     }
 }

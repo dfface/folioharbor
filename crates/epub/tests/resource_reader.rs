@@ -3,21 +3,20 @@
 use std::{
     io::{Cursor, Write},
     sync::{
-        Arc,
+        Arc, Condvar, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
 };
 
 use async_trait::async_trait;
 use folioharbor_application::ports::{
-    BlobStore, BlobStoreError, PromotedBlob, PublicationResourceReader, ReaderResource,
-    ResourceReadRequest,
+    BlobStore, BlobStoreError, PromotedBlob, PublicationResourceReader, ResourceReadRequest,
 };
 use folioharbor_domain::{
     id::{BlobId, ItemId, PublicationPackageId},
     imports::blob::{BlobIdentity, StorageKey},
 };
-use folioharbor_epub::{EpubResourceReader, ResourceCacheLimits};
+use folioharbor_epub::{BlockingWorkHook, EpubResourceReader, ResourceCacheLimits};
 use zip::{ZipWriter, write::SimpleFileOptions};
 
 struct Blobs {
@@ -89,21 +88,66 @@ fn request(href: &str, media_type: &str) -> ResourceReadRequest {
         package_id: PublicationPackageId::from_uuid(uuid::Uuid::from_u128(4)),
         normalized_href: href.to_owned(),
         media_type: media_type.to_owned(),
-        resources: vec![
-            ReaderResource {
-                normalized_href: "OPS/chapter.xhtml".to_owned(),
-                media_type: "application/xhtml+xml".to_owned(),
-            },
-            ReaderResource {
-                normalized_href: "OPS/book.css".to_owned(),
-                media_type: "text/css".to_owned(),
-            },
-            ReaderResource {
-                normalized_href: "OPS/cover.png".to_owned(),
-                media_type: "image/png".to_owned(),
-            },
-        ],
+        resource_routes: Arc::new(
+            ["OPS/chapter.xhtml", "OPS/book.css", "OPS/cover.png"]
+                .into_iter()
+                .map(|href| {
+                    (
+                        href.to_owned(),
+                        folioharbor_application::reader::ResourceId::for_resource(
+                            PublicationPackageId::from_uuid(uuid::Uuid::from_u128(4)),
+                            href,
+                        )
+                        .as_str()
+                        .to_owned(),
+                    )
+                })
+                .collect(),
+        ),
     }
+}
+
+struct BlockingGate {
+    started: tokio::sync::mpsc::UnboundedSender<()>,
+    released: (Mutex<bool>, Condvar),
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+}
+
+impl BlockingGate {
+    fn release(&self) {
+        *self.released.0.lock().expect("release lock") = true;
+        self.released.1.notify_all();
+    }
+}
+
+impl BlockingWorkHook for BlockingGate {
+    fn before(&self) {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        self.started.send(()).expect("test receiver");
+        let mut released = self.released.0.lock().expect("release lock");
+        while !*released {
+            released = self.released.1.wait(released).expect("release wait");
+        }
+    }
+
+    fn after(&self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn blocking_gate() -> (Arc<BlockingGate>, tokio::sync::mpsc::UnboundedReceiver<()>) {
+    let (started, receiver) = tokio::sync::mpsc::unbounded_channel();
+    (
+        Arc::new(BlockingGate {
+            started,
+            released: (Mutex::new(false), Condvar::new()),
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+        }),
+        receiver,
+    )
 }
 
 #[tokio::test]
@@ -118,6 +162,7 @@ async fn sanitizes_malicious_html_and_uses_bounded_disposable_cache() {
             max_entries: 2,
             max_bytes: 1024 * 1024,
             max_resource_bytes: 1024 * 1024,
+            max_concurrent_blocking: 2,
         },
     );
     let first = reader
@@ -209,6 +254,7 @@ async fn rejects_disallowed_types_and_decompressed_resources_over_limit() {
             max_entries: 2,
             max_bytes: 1024,
             max_resource_bytes: 2,
+            max_concurrent_blocking: 2,
         },
     );
     assert!(
@@ -223,4 +269,110 @@ async fn rejects_disallowed_types_and_decompressed_resources_over_limit() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cold_work_is_offloaded_bounded_and_keeps_async_executor_responsive() {
+    let blobs = Arc::new(Blobs {
+        archive: archive(),
+        opens: AtomicUsize::new(0),
+    });
+    let (gate, mut started) = blocking_gate();
+    let reader = Arc::new(EpubResourceReader::new_with_hook(
+        blobs,
+        ResourceCacheLimits {
+            max_entries: 4,
+            max_bytes: 1024 * 1024,
+            max_resource_bytes: 1024 * 1024,
+            max_concurrent_blocking: 2,
+        },
+        gate.clone(),
+    ));
+    let tasks = [
+        ("OPS/chapter.xhtml", "application/xhtml+xml"),
+        ("OPS/book.css", "text/css"),
+        ("OPS/cover.png", "image/png"),
+    ]
+    .into_iter()
+    .map(|(href, media)| {
+        let reader = reader.clone();
+        tokio::spawn(async move { reader.read(request(href, media)).await })
+    })
+    .collect::<Vec<_>>();
+    started.recv().await.expect("first blocking task");
+    started.recv().await.expect("second blocking task");
+    let (heartbeat, heartbeat_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        heartbeat.send(()).expect("heartbeat receiver");
+    });
+    heartbeat_rx.await.expect("executor heartbeat");
+    assert_eq!(gate.max_active.load(Ordering::SeqCst), 2);
+    gate.release();
+    for task in tasks {
+        task.await.expect("reader task").expect("resource");
+    }
+    assert!(gate.max_active.load(Ordering::SeqCst) <= 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_same_key_misses_are_single_flight_with_exact_cache_accounting() {
+    let blobs = Arc::new(Blobs {
+        archive: archive(),
+        opens: AtomicUsize::new(0),
+    });
+    let (gate, mut started) = blocking_gate();
+    let reader = Arc::new(EpubResourceReader::new_with_hook(
+        blobs.clone(),
+        ResourceCacheLimits {
+            max_entries: 2,
+            max_bytes: 1024 * 1024,
+            max_resource_bytes: 1024 * 1024,
+            max_concurrent_blocking: 2,
+        },
+        gate.clone(),
+    ));
+    let barrier = Arc::new(tokio::sync::Barrier::new(9));
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let reader = reader.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            reader
+                .read(request("OPS/chapter.xhtml", "application/xhtml+xml"))
+                .await
+        }));
+    }
+    barrier.wait().await;
+    started.recv().await.expect("single blocking task");
+    gate.release();
+    let mut expected_bytes = 0;
+    for task in tasks {
+        let bytes = task.await.expect("reader task").expect("resource");
+        expected_bytes = bytes.len();
+    }
+    let metrics = reader.cache_metrics().expect("cache metrics");
+    assert_eq!(blobs.opens.load(Ordering::SeqCst), 1);
+    assert_eq!(metrics.entries, 1);
+    assert_eq!(metrics.order_records, 1);
+    assert_eq!(metrics.bytes, expected_bytes);
+
+    let css = reader
+        .read(request("OPS/book.css", "text/css"))
+        .await
+        .expect("css");
+    let image = reader
+        .read(request("OPS/cover.png", "image/png"))
+        .await
+        .expect("image");
+    let metrics = reader.cache_metrics().expect("cache metrics");
+    assert_eq!(metrics.entries, 2);
+    assert_eq!(metrics.order_records, 2);
+    assert_eq!(metrics.bytes, css.len() + image.len());
+    reader
+        .read(request("OPS/chapter.xhtml", "application/xhtml+xml"))
+        .await
+        .expect("evicted chapter reloads");
+    assert_eq!(blobs.opens.load(Ordering::SeqCst), 4);
 }

@@ -24,5 +24,6 @@ pub use jobs::PgJobRepository;
 pub use migrate::{MigrationError, MigrationReport, run_migrations};
 pub use pool::{PgPools, connect_api, connect_owner, connect_worker};
 pub use rate_limits::PgRateLimitRepository;
+pub use reader_projection::{PgReaderCatalogRepository, ReaderProjectionCacheMetrics};
 pub use storage::PgQuotaRepository;
 pub use uploads::PgUploadRepository;

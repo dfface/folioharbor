@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT library_id AS \"library_id!\",item_id AS \"item_id!\",manifestation_id AS \"manifestation_id!\",package_id AS \"package_id!\",blob_id AS \"blob_id!\",storage_key AS \"storage_key!\",parser_profile_version AS \"parser_profile_version!\",membership_version AS \"membership_version!\" FROM folioharbor.reader_item_read_access($1,$2)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "library_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "item_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "manifestation_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "package_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "blob_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "storage_key!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "parser_profile_version!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "membership_version!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "1157cf6212889484f3e59dbc1121d53c173a3f9d9fe70582704bb204ebf2a9d4"
+}

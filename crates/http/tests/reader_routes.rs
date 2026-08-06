@@ -352,7 +352,7 @@ async fn serves_readium_manifest_and_isolated_resource_without_internal_paths() 
             .get(CONTENT_SECURITY_POLICY)
             .and_then(|v| v.to_str().ok()),
         Some(
-            "default-src 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'none'; form-action 'none'; frame-src 'none'"
+            "default-src 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'self'"
         )
     );
     assert_eq!(
@@ -369,6 +369,17 @@ async fn serves_readium_manifest_and_isolated_resource_without_internal_paths() 
             .and_then(|v| v.to_str().ok()),
         Some("private, no-cache")
     );
+
+    for validator in ["W/\"resource-test-v1\"", "*"] {
+        let conditional = Request::builder()
+            .uri(format!("/api/v1/items/{}/resources/safe", item.as_uuid()))
+            .header("Cookie", "folioharbor_session=allowed")
+            .header("If-None-Match", validator)
+            .body(Body::empty())
+            .expect("conditional request");
+        let response = app.clone().oneshot(conditional).await.expect("conditional");
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    }
 
     let denied = app
         .oneshot(request(
@@ -418,7 +429,7 @@ impl BlobStore for ArchiveBlobs {
 
 struct ReadableCatalog {
     allowed: UserId,
-    publication: ReaderPublication,
+    publication: Arc<ReaderPublication>,
 }
 #[async_trait]
 impl ReaderCatalogRepository for ReadableCatalog {
@@ -427,7 +438,7 @@ impl ReaderCatalogRepository for ReadableCatalog {
         actor: UserId,
         _: ItemId,
         _: RequestId,
-    ) -> Result<Option<ReaderPublication>, ReaderCatalogError> {
+    ) -> Result<Option<Arc<ReaderPublication>>, ReaderCatalogError> {
         Ok((actor == self.allowed).then(|| self.publication.clone()))
     }
 }
@@ -453,18 +464,18 @@ fn real_reader_app() -> (axum::Router, ItemId, PublicationPackageId) {
     let allowed = UserId::new();
     let item = ItemId::new();
     let package = PublicationPackageId::new();
-    let publication = ReaderPublication {
-        library_id: LibraryId::new(),
-        item_id: item,
-        manifestation_id: ManifestationId::new(),
-        package_id: package,
-        blob_id: BlobId::new(),
-        storage_key: StorageKey::from_opaque("blob:test".to_owned()),
-        parser_profile_version: "epub3-v1".to_owned(),
-        primary_title: "Unsafe input".to_owned(),
-        authors: Vec::new(),
-        languages: Vec::new(),
-        resources: vec![
+    let publication = Arc::new(ReaderPublication::new(
+        LibraryId::new(),
+        item,
+        ManifestationId::new(),
+        package,
+        BlobId::new(),
+        StorageKey::from_opaque("blob:test".to_owned()),
+        "epub3-v1".to_owned(),
+        "Unsafe input".to_owned(),
+        Vec::new(),
+        Vec::new(),
+        vec![
             ReaderResource {
                 normalized_href: "OPS/chapter.xhtml".to_owned(),
                 media_type: "application/xhtml+xml".to_owned(),
@@ -478,12 +489,12 @@ fn real_reader_app() -> (axum::Router, ItemId, PublicationPackageId) {
                 media_type: "image/png".to_owned(),
             },
         ],
-        reading_order: vec![ReaderSpineEntry {
+        vec![ReaderSpineEntry {
             normalized_href: "OPS/chapter.xhtml".to_owned(),
             linear: true,
         }],
-        toc: Vec::new(),
-    };
+        Vec::new(),
+    ));
     let reader: Arc<dyn ReaderApi> = Arc::new(ReaderService::new(
         ReadableCatalog {
             allowed,
@@ -581,7 +592,7 @@ async fn standalone_css_is_sanitized_and_isolated_through_the_real_http_boundary
             .get(CONTENT_SECURITY_POLICY)
             .and_then(|value| value.to_str().ok()),
         Some(
-            "default-src 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'none'; form-action 'none'; frame-src 'none'"
+            "default-src 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'self'"
         )
     );
     assert_eq!(
