@@ -785,7 +785,9 @@ uses `0016_reading_state.sql` plus additive hardening migrations
 Task 15 database-boundary quota hardening owns additive migration
 `0019_reading_mutation_quota_boundary.sql`. It makes replay records immutable, keeps exact usage
 through insert/delete triggers (including cascades and older direct writers), and atomically rejects
-the 10,000-row/64 MiB limits. The remaining planned migrations are numbered 0020 through 0022.
+the 10,000-row/64 MiB limits. Task 16 adds migration 0020 for the download authorization
+projection, per-library reader-download setting, and audit boundary. The remaining planned
+migrations are therefore numbered 0021 through 0023.
 
 - [ ] **Step 1: Write failing list/detail tests**
 
@@ -816,6 +818,7 @@ git commit -m "feat: expose authorized library catalog queries"
 
 **Files:**
 
+- Create: `migrations/0020_download_authorization.sql`
 - Create: `.sqlx/query-f5227dcc927da07bef1f71f2e39ef09ef6e75b3001dcbd1d8113109a12620afc.json`
 - Create: `.sqlx/query-1157cf6212889484f3e59dbc1121d53c173a3f9d9fe70582704bb204ebf2a9d4.json`
 - Create: `migrations/0012_reader_projection.sql`
@@ -1030,7 +1033,7 @@ git commit -m "feat: stream authorized original EPUB downloads"
 
 **Files:**
 
-- Create: `migrations/0020_outbox.sql`
+- Create: `migrations/0021_outbox.sql`
 - Create: `crates/application/src/mail/{mod,enqueue,deliver}.rs`
 - Create: `crates/application/src/ports/mail_repository.rs`
 - Create: `crates/postgres/src/mail.rs`
@@ -1066,7 +1069,7 @@ Render one public, locale-negotiated explanation per stable problem code without
 Run against a local SMTP capture service in integration tests, inspect captured text/HTML, force retry/failure, scan logs for test token values, then run workspace gate. Commit:
 
 ```bash
-git add migrations/0020_outbox.sql crates/application crates/postgres crates/http apps/worker deploy
+git add migrations/0021_outbox.sql crates/application crates/postgres crates/http apps/worker deploy
 git commit -m "feat: deliver transactional account and invitation email"
 ```
 
@@ -1074,7 +1077,7 @@ git commit -m "feat: deliver transactional account and invitation email"
 
 **Files:**
 
-- Create: `migrations/0021_deletion_and_gc.sql`
+- Create: `migrations/0022_deletion_and_gc.sql`
 - Create: `crates/domain/src/catalog/lifecycle.rs`
 - Create: `crates/application/src/catalog/{delete_item,restore_item,garbage_collect}.rs`
 - Create: `crates/application/tests/item_lifecycle.rs`
@@ -1110,7 +1113,7 @@ Select a limited `SKIP LOCKED` batch, recheck authoritative references in the tr
 Run shared-Blob deletion, concurrent import-versus-GC, storage failure/retry, progress preservation, quota release, and audit retention tests. Run workspace gate. Commit:
 
 ```bash
-git add migrations/0021_deletion_and_gc.sql crates/domain crates/application crates/postgres crates/http apps/worker openapi
+git add migrations/0022_deletion_and_gc.sql crates/domain crates/application crates/postgres crates/http apps/worker openapi
 git commit -m "feat: add recoverable item deletion and safe blob GC"
 ```
 
@@ -1264,7 +1267,7 @@ git commit -m "feat: add secure EPUB reader and progress sync"
 
 **Files:**
 
-- Create: `migrations/0022_operations.sql`
+- Create: `migrations/0023_operations.sql`
 - Create: `crates/application/src/operations/{mod,health,bootstrap_admin,consistency_check}.rs`
 - Create: `crates/postgres/src/operations.rs`
 - Create: `crates/http/src/routes/health.rs`
@@ -1306,7 +1309,7 @@ Migration completes before API/Worker; runtime processes use distinct role secre
 Document PostgreSQL plus Blob volume as one business backup set, schema version and Blob watermark recording, restore ordering, and post-restore `storage check` for missing Blob, orphan location, and hash mismatch. Do not claim crash-consistent cross-volume snapshots unless the operator provides them. Run CLI/health/Compose config tests and workspace/Web gates. Commit:
 
 ```bash
-git add migrations/0022_operations.sql crates apps deploy docs/operations
+git add migrations/0023_operations.sql crates apps deploy docs/operations
 git commit -m "feat: add deployment operations and observability"
 ```
 

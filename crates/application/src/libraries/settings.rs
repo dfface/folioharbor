@@ -2,7 +2,7 @@ use crate::{
     audit::AuditEvent,
     authorization::{Action, Authorization, ResourceRef},
     error::{AppError, FieldViolation},
-    ports::{AuthorizationRepository, Clock, LibraryRepository},
+    ports::{AuthorizationRepository, Clock, LibraryRepository, LibrarySettingsUpdate},
 };
 use folioharbor_domain::id::{LibraryId, RequestId, UserId};
 
@@ -10,6 +10,7 @@ pub struct UpdateLibrarySettingsCommand {
     pub actor: UserId,
     pub library_id: LibraryId,
     pub name: String,
+    pub reader_download_enabled: Option<bool>,
     pub request_id: RequestId,
 }
 pub struct UpdateLibrarySettings<'a, R, A, C> {
@@ -53,7 +54,17 @@ impl<R: LibraryRepository, A: AuthorizationRepository, C: Clock>
             AuditEvent::allowed(c.actor, Action::ManageLibrary, resource, c.request_id, now);
         let outcome = self
             .repository
-            .update_library_settings(c.actor, c.library_id, &c.name, now, grant, audit)
+            .update_library_settings(
+                c.actor,
+                c.library_id,
+                LibrarySettingsUpdate {
+                    name: &c.name,
+                    reader_download_enabled: c.reader_download_enabled,
+                },
+                now,
+                grant,
+                audit,
+            )
             .await
             .map_err(|_| AppError::DependencyUnavailable {
                 code: "library_repository_unavailable",

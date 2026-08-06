@@ -44,6 +44,7 @@ pub struct UpdateSettingsRequest {
     pub request_id: RequestId,
     pub library_id: LibraryId,
     pub name: String,
+    pub reader_download_enabled: Option<bool>,
 }
 pub struct InviteLibraryMemberRequest {
     pub actor: UserId,
@@ -205,6 +206,7 @@ where
                 actor: r.actor,
                 library_id: r.library_id,
                 name: r.name,
+                reader_download_enabled: r.reader_download_enabled,
                 request_id: r.request_id,
             })
             .await;

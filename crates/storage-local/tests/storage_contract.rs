@@ -134,6 +134,46 @@ async fn append_is_bounded_ranges_are_exact_and_promotion_preserves_hash() {
 }
 
 #[tokio::test]
+async fn seek_reads_exact_download_chunks_from_a_blob_larger_than_the_http_buffer() {
+    let root = TempDir::new().expect("temporary root");
+    let store = LocalBlobStore::with_capacity(root.path(), FakeCapacity::new(u64::MAX));
+    let staging = create_staging(&store, '9').await;
+    let payload = (0_u8..=250)
+        .cycle()
+        .take(128 * 1024 + 17)
+        .collect::<Vec<_>>();
+    store.append(&staging, &payload).await.expect("append");
+    let installed = store
+        .promote(
+            &staging,
+            &identity(
+                StorageNamespace::for_scope(
+                    DedupScope::Instance,
+                    LibraryId::new(),
+                    UploadId::new(),
+                ),
+                &payload,
+            ),
+        )
+        .await
+        .expect("promote");
+
+    let first = store
+        .read_range(&installed.key, 0, 64 * 1024)
+        .await
+        .expect("first chunk");
+    let second = store
+        .read_range(&installed.key, 64 * 1024, 64 * 1024)
+        .await
+        .expect("second chunk");
+    let tail = store
+        .read_range(&installed.key, 128 * 1024, 64 * 1024)
+        .await
+        .expect("tail");
+    assert_eq!([first, second, tail].concat(), payload);
+}
+
+#[tokio::test]
 async fn capacity_is_checked_before_staging_append_and_promotion() {
     let root = TempDir::new().expect("temporary root");
     let low = FakeCapacity::new(MIN_FREE_BYTES - 1);

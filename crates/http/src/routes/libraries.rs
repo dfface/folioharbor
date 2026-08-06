@@ -50,6 +50,8 @@ struct MemberResponse {
 #[derive(Deserialize)]
 struct SettingsBody {
     name: String,
+    #[serde(default)]
+    reader_download_enabled: Option<bool>,
 }
 #[derive(Deserialize)]
 struct RoleBody {
@@ -191,6 +193,7 @@ async fn update_settings(
                 request_id,
                 library_id: id,
                 name: body.name,
+                reader_download_enabled: body.reader_download_enabled,
             })
             .await,
         &ctx,

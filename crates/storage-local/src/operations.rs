@@ -7,7 +7,7 @@ use folioharbor_application::ports::{BlobDisposition, BlobStoreError, PromotedBl
 use folioharbor_domain::imports::blob::{BlobIdentity, StorageKey};
 
 use super::{
-    CapacityProbe, LocalBlobStore, MAX_IO_BYTES, MIN_FREE_BYTES,
+    CapacityProbe, LocalBlobStore, MAX_RANGE_READ_BYTES, MIN_FREE_BYTES,
     file_ops::{
         append_options, open_optional, private_create_options, read_options, read_up_to,
         remove_named_file_if_present, verify_file,
@@ -45,7 +45,7 @@ impl<P: CapacityProbe> LocalBlobStore<P> {
     }
 
     pub(super) fn append_sync(&self, key: &StorageKey, bytes: &[u8]) -> Result<(), BlobStoreError> {
-        if bytes.len() > MAX_IO_BYTES {
+        if bytes.len() > MAX_RANGE_READ_BYTES {
             return Err(BlobStoreError::InvalidRange);
         }
         let root = self.secure_root()?;
@@ -67,7 +67,7 @@ impl<P: CapacityProbe> LocalBlobStore<P> {
         length: u64,
     ) -> Result<Vec<u8>, BlobStoreError> {
         let length = usize::try_from(length).map_err(|_| BlobStoreError::InvalidRange)?;
-        if length > MAX_IO_BYTES {
+        if length > MAX_RANGE_READ_BYTES {
             return Err(BlobStoreError::InvalidRange);
         }
         let root = self.secure_root()?;

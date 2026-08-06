@@ -38,6 +38,12 @@ pub enum AcceptInvitationOutcome {
     Invalid,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LibrarySettingsUpdate<'a> {
+    pub name: &'a str,
+    pub reader_download_enabled: Option<bool>,
+}
+
 #[async_trait]
 pub trait LibraryRepository: Send + Sync {
     async fn provision_personal_library(
@@ -90,7 +96,7 @@ pub trait LibraryRepository: Send + Sync {
         &self,
         _: UserId,
         _: LibraryId,
-        _: &str,
+        _: LibrarySettingsUpdate<'_>,
         _: OffsetDateTime,
         _: AuthorizationGrant,
         _: AuditEvent,

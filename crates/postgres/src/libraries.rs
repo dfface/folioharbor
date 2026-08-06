@@ -361,7 +361,7 @@ impl LibraryRepository for PgLibraryRepository {
         &self,
         actor: UserId,
         library: LibraryId,
-        name: &str,
+        settings: folioharbor_application::ports::LibrarySettingsUpdate<'_>,
         now: OffsetDateTime,
         grant: AuthorizationGrant,
         audit: AuditEvent,
@@ -383,7 +383,7 @@ impl LibraryRepository for PgLibraryRepository {
         .map_err(persistence_error)?;
         let row = sqlx::query!(
             r#"SELECT folioharbor.library_update_settings_authorized($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) AS "outcome!""#,
-            actor.as_uuid(), library.as_uuid(), name, now, grant.membership_version(),
+            actor.as_uuid(), library.as_uuid(), settings.name, now, grant.membership_version(),
             Uuid::now_v7(), audit.effective_actor.map(UserId::as_uuid), audit.action.as_str(),
             audit.resource.resource_type(), resource_id(audit.resource), audit.decision.as_str(),
             audit.reason_code, audit.request_id.as_ulid().to_string(), audit.source.as_str(),
@@ -392,6 +392,23 @@ impl LibraryRepository for PgLibraryRepository {
         .fetch_one(&mut *tx)
         .await
         .map_err(persistence_error)?;
+        if let Some(enabled) = settings.reader_download_enabled {
+            let updated: bool = sqlx::query_scalar(
+                "SELECT folioharbor.library_update_reader_download_authorized($1,$2,$3,$4,$5)",
+            )
+            .bind(actor.as_uuid())
+            .bind(library.as_uuid())
+            .bind(enabled)
+            .bind(grant.membership_version())
+            .bind(audit.request_id.as_ulid().to_string())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(persistence_error)?;
+            if !updated {
+                tx.rollback().await.map_err(persistence_error)?;
+                return Ok(LibraryMutationOutcome::Forbidden);
+            }
+        }
         tx.commit().await.map_err(persistence_error)?;
         mutation(&row.outcome)
     }

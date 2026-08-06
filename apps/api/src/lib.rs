@@ -1,17 +1,17 @@
 #![forbid(unsafe_code)]
 
 use folioharbor_application::{
-    catalog::{CatalogApi, CatalogService},
+    catalog::{CatalogApi, CatalogService, DownloadApi, DownloadService},
     config::Settings,
     imports::{UploadApi, UploadService},
-    ports::Clock,
+    ports::{BlobStore, Clock},
     reader::{ProgressApi, ProgressService, ReaderApi, ReaderService},
 };
 use folioharbor_domain::imports::blob::DedupScope as DomainDedupScope;
 use folioharbor_epub::{EpubResourceReader, ResourceCacheLimits};
 use folioharbor_postgres::{
-    PgAuthorizationRepository, PgCatalogRepository, PgReaderCatalogRepository, PgReadingRepository,
-    PgUploadRepository,
+    PgAuthorizationRepository, PgCatalogRepository, PgDownloadRepository,
+    PgReaderCatalogRepository, PgReadingRepository, PgUploadRepository,
 };
 use folioharbor_storage_local::LocalBlobStore;
 use sqlx::PgPool;
@@ -63,4 +63,16 @@ pub fn build_progress_api(pool: PgPool) -> Arc<dyn ProgressApi> {
     Arc::new(ProgressService::new(Arc::new(PgReadingRepository::new(
         pool,
     ))))
+}
+
+#[must_use]
+pub fn build_download(
+    settings: &Settings,
+    pool: PgPool,
+) -> (Arc<dyn DownloadApi>, Arc<dyn BlobStore>) {
+    let blobs: Arc<dyn BlobStore> = Arc::new(LocalBlobStore::new(settings.storage.root.clone()));
+    (
+        Arc::new(DownloadService::new(PgDownloadRepository::new(pool))),
+        blobs,
+    )
 }

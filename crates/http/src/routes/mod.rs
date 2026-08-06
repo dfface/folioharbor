@@ -1,5 +1,6 @@
 mod auth;
 mod catalog;
+mod download;
 mod libraries;
 mod progress;
 mod reader;
@@ -7,7 +8,7 @@ mod uploads;
 use crate::middleware;
 use axum::{Router, middleware as axum_middleware};
 use folioharbor_application::{
-    catalog::{CatalogApi, UnavailableCatalogApi},
+    catalog::{CatalogApi, DownloadApi, UnavailableCatalogApi, UnavailableDownloadApi},
     identity::{
         AuthenticateSessionUseCase, CompletePasswordResetUseCase, CurrentSessionUseCase,
         ListSessionsUseCase, LoginUseCase, LogoutUseCase, RegisterAccountUseCase,
@@ -15,6 +16,7 @@ use folioharbor_application::{
     },
     imports::{UnavailableUploadApi, UploadApi},
     libraries::{LibraryApi, UnavailableLibraryApi},
+    ports::BlobStore,
     rate_limit::RateLimitUseCase,
     reader::{ProgressApi, ReaderApi, UnavailableProgressApi, UnavailableReaderApi},
 };
@@ -40,6 +42,8 @@ pub struct AppState {
     pub catalog_api: Arc<dyn CatalogApi>,
     pub reader_api: Arc<dyn ReaderApi>,
     pub progress_api: Arc<dyn ProgressApi>,
+    pub download_api: Arc<dyn DownloadApi>,
+    pub download_blobs: Option<Arc<dyn BlobStore>>,
 }
 impl AppState {
     #[allow(clippy::too_many_arguments)]
@@ -76,6 +80,8 @@ impl AppState {
             catalog_api: Arc::new(UnavailableCatalogApi),
             reader_api: Arc::new(UnavailableReaderApi),
             progress_api: Arc::new(UnavailableProgressApi),
+            download_api: Arc::new(UnavailableDownloadApi),
+            download_blobs: None,
         }
     }
 
@@ -108,6 +114,17 @@ impl AppState {
         self.progress_api = progress_api;
         self
     }
+
+    #[must_use]
+    pub fn with_download(
+        mut self,
+        download_api: Arc<dyn DownloadApi>,
+        blobs: Arc<dyn BlobStore>,
+    ) -> Self {
+        self.download_api = download_api;
+        self.download_blobs = Some(blobs);
+        self
+    }
 }
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -118,7 +135,7 @@ pub fn router(state: AppState) -> Router {
                 .merge(uploads::router())
                 .merge(catalog::router()),
         )
-        .nest("/api/v1/items", reader::router())
+        .nest("/api/v1/items", reader::router().merge(download::router()))
         .nest("/api/v1/manifestations", progress::router())
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),

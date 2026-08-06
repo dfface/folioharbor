@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
 use async_trait::async_trait;
-use folioharbor_api::{build_catalog_api, build_progress_api, build_reader_api, build_upload_api};
+use folioharbor_api::{
+    build_catalog_api, build_download, build_progress_api, build_reader_api, build_upload_api,
+};
 use folioharbor_application::{
     config::{ConfigSources, Settings},
     identity::IdentityApi,
@@ -85,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
     let catalog_api = build_catalog_api(&settings, pool.clone());
     let reader_api = build_reader_api(&settings, pool.clone());
     let progress_api = build_progress_api(pool.clone());
+    let (download_api, download_blobs) = build_download(&settings, pool.clone());
     let library_repository = PgLibraryRepository::new(pool.clone());
     let identity = Arc::new(IdentityApi::new_configured(
         PgIdentityRepository::new(pool.clone()),
@@ -136,7 +139,8 @@ async fn main() -> anyhow::Result<()> {
     .with_catalog_api(catalog_api);
     let state = state
         .with_reader_api(reader_api)
-        .with_progress_api(progress_api);
+        .with_progress_api(progress_api)
+        .with_download(download_api, download_blobs);
     let listener = tokio::net::TcpListener::bind(&settings.server.bind_address).await?;
     axum::serve(
         listener,

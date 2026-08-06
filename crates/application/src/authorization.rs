@@ -15,6 +15,7 @@ pub enum Action {
     CreateUpload,
     InspectUpload,
     ImportPublication,
+    DownloadItem,
 }
 
 impl Action {
@@ -29,6 +30,7 @@ impl Action {
             Self::CreateUpload => "upload.create",
             Self::InspectUpload => "upload.inspect",
             Self::ImportPublication => "publication.import",
+            Self::DownloadItem => "item.download",
         }
     }
 
@@ -39,6 +41,7 @@ impl Action {
             Self::CreateUpload | Self::InspectUpload | Self::ImportPublication => {
                 PermissionCode::HoldingEdit
             }
+            Self::DownloadItem => PermissionCode::ItemDownload,
             Self::InviteMember => PermissionCode::MemberInvite,
             Self::ManageLibrary | Self::ChangeMemberRole | Self::RemoveMember => {
                 PermissionCode::LibraryManage

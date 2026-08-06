@@ -149,8 +149,16 @@ async fn facade_enforces_owner_editor_reader_and_unrelated_matrix_with_audit() -
             request_id: RequestId::new(),
             library_id: library,
             name: "Owner Updated".to_owned(),
+            reader_download_enabled: Some(true),
         })
         .await?;
+    let reader_download_enabled: bool = sqlx::query_scalar(
+        "SELECT reader_download_enabled FROM folioharbor.libraries WHERE library_id=$1",
+    )
+    .bind(library.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    assert!(reader_download_enabled);
     for actor in [editor, reader] {
         assert!(matches!(
             service
@@ -159,6 +167,7 @@ async fn facade_enforces_owner_editor_reader_and_unrelated_matrix_with_audit() -
                     request_id: RequestId::new(),
                     library_id: library,
                     name: "Denied".to_owned(),
+                    reader_download_enabled: Some(false),
                 })
                 .await,
             Err(AppError::Forbidden {

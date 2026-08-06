@@ -13,6 +13,10 @@ use axum::{
 };
 use folioharbor_application::{
     actor::Actor,
+    catalog::{
+        DownloadAuthorization, DownloadRange, DownloadRepository, DownloadRepositoryError,
+        DownloadService, DownloadSource,
+    },
     error::AppError,
     identity::{
         AuthenticateSessionCommand, AuthenticateSessionUseCase, AuthenticatedSession,
@@ -48,12 +52,14 @@ use folioharbor_domain::{
 };
 use folioharbor_epub::{EpubResourceReader, ResourceCacheLimits};
 use folioharbor_http::{AppState, router};
+use folioharbor_storage_local::LocalBlobStore;
 use http_body_util::BodyExt as _;
 use secrecy::{ExposeSecret as _, SecretString};
 use std::{
     collections::HashMap,
     io::{Cursor, Write},
     sync::Arc,
+    sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
 use tower::ServiceExt as _;
@@ -62,6 +68,86 @@ use uuid::Uuid;
 use zip::{ZipWriter, write::SimpleFileOptions};
 
 struct Identity(HashMap<String, UserId>);
+
+#[derive(Clone)]
+struct DownloadFixture {
+    allowed: UserId,
+    item: ItemId,
+    blob: BlobId,
+    key: StorageKey,
+    byte_size: u64,
+    blobs: LocalBlobStore,
+    _root: Arc<tempfile::TempDir>,
+    reads: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl DownloadRepository for DownloadFixture {
+    async fn authorize_download(
+        &self,
+        actor: Actor,
+        item: ItemId,
+        _: RequestId,
+    ) -> Result<DownloadAuthorization, DownloadRepositoryError> {
+        if actor.user_id != self.allowed || item != self.item {
+            return Ok(DownloadAuthorization::NotFound);
+        }
+        Ok(DownloadAuthorization::Granted(DownloadSource {
+            library_id: LibraryId::new(),
+            item_id: item,
+            blob_id: self.blob,
+            storage_identity: self.key.clone(),
+            byte_size: self.byte_size,
+            file_name: "危 险.epub".to_owned(),
+        }))
+    }
+
+    async fn record_download_start(
+        &self,
+        _: Actor,
+        _: ItemId,
+        _: RequestId,
+        _: DownloadRange,
+    ) -> Result<bool, DownloadRepositoryError> {
+        Ok(true)
+    }
+}
+
+#[async_trait]
+impl BlobStore for DownloadFixture {
+    fn candidate_key(&self, identity: &BlobIdentity) -> StorageKey {
+        self.blobs.candidate_key(identity)
+    }
+    async fn create_staging_for(&self, key: &StorageKey) -> Result<(), BlobStoreError> {
+        self.blobs.create_staging_for(key).await
+    }
+    async fn append(&self, key: &StorageKey, bytes: &[u8]) -> Result<(), BlobStoreError> {
+        self.blobs.append(key, bytes).await
+    }
+    async fn read_range(
+        &self,
+        key: &StorageKey,
+        offset: u64,
+        length: u64,
+    ) -> Result<Vec<u8>, BlobStoreError> {
+        assert_eq!(key, &self.key);
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.blobs.read_range(key, offset, length).await
+    }
+    async fn promote(
+        &self,
+        key: &StorageKey,
+        identity: &BlobIdentity,
+    ) -> Result<PromotedBlob, BlobStoreError> {
+        self.blobs.promote(key, identity).await
+    }
+    async fn delete(&self, key: &StorageKey) -> Result<(), BlobStoreError> {
+        self.blobs.delete(key).await
+    }
+    async fn free_bytes(&self) -> Result<u64, BlobStoreError> {
+        self.blobs.free_bytes().await
+    }
+}
 fn unused<T>() -> Result<T, AppError> {
     unreachable!("unused identity endpoint")
 }
@@ -342,6 +428,172 @@ fn app() -> (axum::Router, ItemId, ManifestationId) {
         manifestation,
     }));
     (router(state), item, manifestation)
+}
+
+fn download_app() -> (axum::Router, ItemId, Arc<AtomicUsize>) {
+    let allowed = UserId::new();
+    let item = ItemId::new();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let root = Arc::new(tempfile::tempdir().expect("download blob root"));
+    let payload = (0_u8..=250)
+        .cycle()
+        .take(128 * 1024 + 17)
+        .collect::<Vec<_>>();
+    let hash = "11".repeat(32);
+    let directory = root.path().join("objects/instance-v1/11/11");
+    std::fs::create_dir_all(&directory).expect("blob hierarchy");
+    std::fs::write(
+        directory.join(format!("{hash}-{}", payload.len())),
+        &payload,
+    )
+    .expect("local blob");
+    let key = StorageKey::from_opaque(format!("blob:instance-v1:{hash}:{}", payload.len()));
+    let fixture = DownloadFixture {
+        allowed,
+        item,
+        blob: BlobId::new(),
+        key,
+        byte_size: u64::try_from(payload.len()).expect("payload size"),
+        blobs: LocalBlobStore::new(root.path()),
+        _root: root,
+        reads: reads.clone(),
+    };
+    let identity = Arc::new(Identity(HashMap::from([
+        ("allowed".to_owned(), allowed),
+        ("outsider".to_owned(), UserId::new()),
+    ])));
+    let state = AppState::new(
+        Url::parse("https://library.example").expect("url"),
+        identity.clone(),
+        identity.clone(),
+        identity.clone(),
+        identity.clone(),
+        identity.clone(),
+        identity.clone(),
+        identity.clone(),
+        identity.clone(),
+        identity.clone(),
+        identity.clone(),
+        identity,
+    )
+    .with_download(
+        Arc::new(DownloadService::new(fixture.clone())),
+        Arc::new(fixture),
+    );
+    (router(state), item, reads)
+}
+
+#[tokio::test]
+async fn download_routes_stream_ranges_head_conditionals_and_cancel_on_drop() {
+    let (app, item, reads) = download_app();
+    let path = format!("/api/v1/items/{}/download", item.as_uuid());
+    let ranged = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&path)
+                .header("Cookie", "folioharbor_session=allowed")
+                .header("Range", "bytes=65530-65550")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(ranged.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(ranged.headers()["content-length"], "21");
+    assert_eq!(
+        ranged.headers()["content-range"],
+        "bytes 65530-65550/131089"
+    );
+    assert_eq!(ranged.headers()["accept-ranges"], "bytes");
+    assert_eq!(ranged.headers()["content-type"], "application/epub+zip");
+    assert_eq!(ranged.headers()["x-content-type-options"], "nosniff");
+    assert!(
+        ranged.headers()["content-disposition"]
+            .to_str()
+            .expect("header")
+            .contains("filename*=UTF-8''")
+    );
+    let etag = ranged.headers()[ETAG].clone();
+    let bytes = ranged.into_body().collect().await.expect("body").to_bytes();
+    assert_eq!(bytes.len(), 21);
+
+    let head = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(&path)
+                .header("Cookie", "folioharbor_session=allowed")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(head.headers()["content-length"], "131089");
+    assert!(
+        head.into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes()
+            .is_empty()
+    );
+
+    let unchanged = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&path)
+                .header("Cookie", "folioharbor_session=allowed")
+                .header("If-None-Match", etag)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
+
+    for range in ["bytes=999999-", "bytes=0-1,4-5"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&path)
+                    .header("Cookie", "folioharbor_session=allowed")
+                    .header("Range", range)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(response.headers()["content-range"], "bytes */131089");
+    }
+
+    assert_prompt_cancellation(app, &path, &reads).await;
+}
+
+async fn assert_prompt_cancellation(app: axum::Router, path: &str, reads: &AtomicUsize) {
+    reads.store(0, Ordering::SeqCst);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(path)
+                .header("Cookie", "folioharbor_session=allowed")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    let mut body = response.into_body();
+    let first = body.frame().await.expect("frame").expect("bytes");
+    assert_eq!(first.into_data().expect("data").len(), 64 * 1024);
+    drop(body);
+    tokio::task::yield_now().await;
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

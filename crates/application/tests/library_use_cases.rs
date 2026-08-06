@@ -180,7 +180,7 @@ impl LibraryRepository for CommandRepository {
         &self,
         _: UserId,
         _: LibraryId,
-        _: &str,
+        _: folioharbor_application::ports::LibrarySettingsUpdate<'_>,
         _: OffsetDateTime,
         _: AuthorizationGrant,
         _: AuditEvent,
@@ -439,6 +439,7 @@ async fn library_commands_preserve_owner_only_denials() {
                 actor,
                 library_id,
                 name: "Renamed".to_owned(),
+                reader_download_enabled: None,
                 request_id: RequestId::new(),
             })
             .await,

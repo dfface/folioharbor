@@ -8,6 +8,7 @@ version.workspace = true
 [dependencies]
 async-trait.workspace = true
 axum.workspace = true
+bytes.workspace = true
 folioharbor-application = { path = "../application", version = "0.1.0" }
 folioharbor-domain = { path = "../domain", version = "0.1.0" }
 futures-util.workspace = true
@@ -25,9 +26,11 @@ anyhow.workspace = true
 folioharbor-postgres = { path = "../postgres", version = "0.1.0" }
 folioharbor-epub = { path = "../epub", version = "0.1.0" }
 folioharbor-test-support = { path = "../test-support", version = "0.1.0" }
+folioharbor-storage-local = { path = "../storage-local", version = "0.1.0" }
 http-body-util.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
+tempfile = "3.20"
 tower.workspace = true
 uuid.workspace = true
 zip.workspace = true

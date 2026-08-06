@@ -1,13 +1,16 @@
 #![allow(clippy::expect_used)]
 
 use bytes::Bytes;
-use folioharbor_api::{build_catalog_api, build_progress_api, build_reader_api, build_upload_api};
+use folioharbor_api::{
+    build_catalog_api, build_download, build_progress_api, build_reader_api, build_upload_api,
+};
 use folioharbor_application::{
+    actor::Actor,
     catalog::PageRequest,
     config::{ConfigSources, Settings},
     imports::{CreateUploadRequest, ReceiveUploadRequest},
 };
-use folioharbor_domain::id::{ItemId, LibraryId, ManifestationId, RequestId, UserId};
+use folioharbor_domain::id::{ItemId, LibraryId, ManifestationId, RequestId, SessionId, UserId};
 use folioharbor_domain::time::OffsetDateTime;
 use folioharbor_postgres::{PgPools, run_migrations};
 use folioharbor_test_support::postgres::TestPostgres;
@@ -97,6 +100,7 @@ async fn production_upload_composition_uses_postgres_and_local_blob_storage() ->
             code: "item_not_found"
         })
     ));
+    assert_download_composition(&settings, pools.api.clone(), actor).await;
     let progress = build_progress_api(pools.api.clone());
     assert!(matches!(
         progress
@@ -109,4 +113,24 @@ async fn production_upload_composition_uses_postgres_and_local_blob_storage() ->
     pools.close().await;
     database.cleanup().await?;
     Ok(())
+}
+
+async fn assert_download_composition(settings: &Settings, pool: sqlx::PgPool, actor: UserId) {
+    let (download, _blobs) = build_download(settings, pool);
+    let result = download
+        .authorize(
+            Actor {
+                user_id: actor,
+                session_id: SessionId::new(),
+            },
+            ItemId::new(),
+            RequestId::new(),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(folioharbor_application::error::AppError::NotFound {
+            code: "item_not_found"
+        })
+    ));
 }

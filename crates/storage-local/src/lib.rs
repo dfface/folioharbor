@@ -15,7 +15,8 @@ use folioharbor_domain::imports::blob::{BlobIdentity, StorageKey};
 pub use capacity::{CapacityProbe, SystemCapacityProbe};
 
 pub const MIN_FREE_BYTES: u64 = 1024 * 1024 * 1024;
-const MAX_IO_BYTES: usize = 8 * 1024 * 1024;
+/// Upper bound for one seek/read or append operation. HTTP streaming uses much smaller chunks.
+pub const MAX_RANGE_READ_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct LocalBlobStore<P = SystemCapacityProbe> {
     root: PathBuf,
@@ -102,7 +103,7 @@ impl<P: CapacityProbe + 'static> BlobStore for LocalBlobStore<P> {
     }
 
     async fn append(&self, key: &StorageKey, bytes: &[u8]) -> Result<(), BlobStoreError> {
-        if bytes.len() > MAX_IO_BYTES {
+        if bytes.len() > MAX_RANGE_READ_BYTES {
             return Err(BlobStoreError::InvalidRange);
         }
         let store = self.clone();
@@ -117,7 +118,7 @@ impl<P: CapacityProbe + 'static> BlobStore for LocalBlobStore<P> {
         offset: u64,
         length: u64,
     ) -> Result<Vec<u8>, BlobStoreError> {
-        if length > MAX_IO_BYTES as u64 {
+        if length > MAX_RANGE_READ_BYTES as u64 {
             return Err(BlobStoreError::InvalidRange);
         }
         let store = self.clone();
