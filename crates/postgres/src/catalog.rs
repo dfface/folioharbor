@@ -31,7 +31,7 @@ struct CatalogProjectionRow {
     languages: Vec<String>,
     identifiers: Vec<String>,
     media_type: String,
-    reader_download_enabled: bool,
+    can_download: bool,
 }
 
 impl From<CatalogProjectionRow> for VisibleCatalogItem {
@@ -46,7 +46,7 @@ impl From<CatalogProjectionRow> for VisibleCatalogItem {
             languages: row.languages,
             identifiers: row.identifiers,
             media_type: row.media_type,
-            reader_download_enabled: row.reader_download_enabled,
+            can_download: row.can_download,
         }
     }
 }
@@ -131,7 +131,7 @@ impl CatalogQueryRepository for PgCatalogRepository {
         let rows = if let Some(after) = after {
             sqlx::query_as!(
                 CatalogProjectionRow,
-                r#"SELECT visible.holding_id AS "holding_id!",visible.item_id AS "item_id!",visible.package_id AS "package_id!",visible.manifestation_id AS "manifestation_id!",visible.primary_title AS "primary_title!",visible.authors AS "authors!",visible.languages AS "languages!",visible.identifiers AS "identifiers!",visible.media_type AS "media_type!",visible.reader_download_enabled AS "reader_download_enabled!" FROM folioharbor.holdings holding CROSS JOIN LATERAL (SELECT candidate.item_id FROM folioharbor.items candidate WHERE candidate.holding_id=holding.holding_id AND candidate.state='active' ORDER BY candidate.created_at DESC,candidate.item_id DESC LIMIT 1) selected CROSS JOIN LATERAL folioharbor.catalog_item_projection_download_visible($1,$2,selected.item_id,$3) visible WHERE holding.library_id=$2 AND holding.state='active' AND holding.holding_id<$4 ORDER BY holding.holding_id DESC LIMIT $5"#,
+                r#"SELECT visible.holding_id AS "holding_id!",visible.item_id AS "item_id!",visible.package_id AS "package_id!",visible.manifestation_id AS "manifestation_id!",visible.primary_title AS "primary_title!",visible.authors AS "authors!",visible.languages AS "languages!",visible.identifiers AS "identifiers!",visible.media_type AS "media_type!",visible.can_download AS "can_download!" FROM folioharbor.holdings holding CROSS JOIN LATERAL (SELECT candidate.item_id FROM folioharbor.items candidate WHERE candidate.holding_id=holding.holding_id AND candidate.state='active' ORDER BY candidate.created_at DESC,candidate.item_id DESC LIMIT 1) selected CROSS JOIN LATERAL folioharbor.catalog_item_projection_download_rbac_visible($1,$2,selected.item_id,$3) visible WHERE holding.library_id=$2 AND holding.state='active' AND holding.holding_id<$4 ORDER BY holding.holding_id DESC LIMIT $5"#,
                 grant.actor().as_uuid(),
                 library_id.as_uuid(),
                 grant.membership_version(),
@@ -144,7 +144,7 @@ impl CatalogQueryRepository for PgCatalogRepository {
         } else {
             sqlx::query_as!(
                 CatalogProjectionRow,
-                r#"SELECT visible.holding_id AS "holding_id!",visible.item_id AS "item_id!",visible.package_id AS "package_id!",visible.manifestation_id AS "manifestation_id!",visible.primary_title AS "primary_title!",visible.authors AS "authors!",visible.languages AS "languages!",visible.identifiers AS "identifiers!",visible.media_type AS "media_type!",visible.reader_download_enabled AS "reader_download_enabled!" FROM folioharbor.holdings holding CROSS JOIN LATERAL (SELECT candidate.item_id FROM folioharbor.items candidate WHERE candidate.holding_id=holding.holding_id AND candidate.state='active' ORDER BY candidate.created_at DESC,candidate.item_id DESC LIMIT 1) selected CROSS JOIN LATERAL folioharbor.catalog_item_projection_download_visible($1,$2,selected.item_id,$3) visible WHERE holding.library_id=$2 AND holding.state='active' ORDER BY holding.holding_id DESC LIMIT $4"#,
+                r#"SELECT visible.holding_id AS "holding_id!",visible.item_id AS "item_id!",visible.package_id AS "package_id!",visible.manifestation_id AS "manifestation_id!",visible.primary_title AS "primary_title!",visible.authors AS "authors!",visible.languages AS "languages!",visible.identifiers AS "identifiers!",visible.media_type AS "media_type!",visible.can_download AS "can_download!" FROM folioharbor.holdings holding CROSS JOIN LATERAL (SELECT candidate.item_id FROM folioharbor.items candidate WHERE candidate.holding_id=holding.holding_id AND candidate.state='active' ORDER BY candidate.created_at DESC,candidate.item_id DESC LIMIT 1) selected CROSS JOIN LATERAL folioharbor.catalog_item_projection_download_rbac_visible($1,$2,selected.item_id,$3) visible WHERE holding.library_id=$2 AND holding.state='active' ORDER BY holding.holding_id DESC LIMIT $4"#,
                 grant.actor().as_uuid(),
                 library_id.as_uuid(),
                 grant.membership_version(),
@@ -177,7 +177,7 @@ impl CatalogQueryRepository for PgCatalogRepository {
         .map_err(persistence)?;
         let row = sqlx::query_as!(
             CatalogProjectionRow,
-            r#"SELECT visible.holding_id AS "holding_id!",visible.item_id AS "item_id!",visible.package_id AS "package_id!",visible.manifestation_id AS "manifestation_id!",visible.primary_title AS "primary_title!",visible.authors AS "authors!",visible.languages AS "languages!",visible.identifiers AS "identifiers!",visible.media_type AS "media_type!",visible.reader_download_enabled AS "reader_download_enabled!" FROM folioharbor.catalog_item_projection_download_visible($1,$2,$3,$4) visible"#,
+            r#"SELECT visible.holding_id AS "holding_id!",visible.item_id AS "item_id!",visible.package_id AS "package_id!",visible.manifestation_id AS "manifestation_id!",visible.primary_title AS "primary_title!",visible.authors AS "authors!",visible.languages AS "languages!",visible.identifiers AS "identifiers!",visible.media_type AS "media_type!",visible.can_download AS "can_download!" FROM folioharbor.catalog_item_projection_download_rbac_visible($1,$2,$3,$4) visible"#,
             grant.actor().as_uuid(),
             library_id.as_uuid(),
             item_id.as_uuid(),

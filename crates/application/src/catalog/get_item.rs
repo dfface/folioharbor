@@ -6,8 +6,6 @@ use crate::{
     ports::{AuthorizationRepository, CatalogQueryRepository, VisibleCatalogItem},
 };
 
-use super::list_library_books::capabilities;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ItemDetail {
     pub item_id: ItemId,
@@ -62,13 +60,12 @@ impl<R: CatalogQueryRepository + ?Sized, A: AuthorizationRepository + ?Sized> Ge
             .ok_or(AppError::NotFound {
                 code: "item_not_found",
             })?;
-        let reader_download_enabled = row.reader_download_enabled;
+        let can_download = row.can_download;
         Ok(detail(
             row,
             grant.role(),
             grant.membership_version(),
-            capabilities(grant.role(), reader_download_enabled),
-            reader_download_enabled,
+            can_download,
         ))
     }
 }
@@ -77,16 +74,13 @@ fn detail(
     row: VisibleCatalogItem,
     role: folioharbor_domain::libraries::role::RoleCode,
     membership_version: i64,
-    (can_read, can_download): (bool, bool),
-    reader_download_enabled: bool,
+    can_download: bool,
 ) -> ItemDetail {
     let etag = format!(
-        "W/\"item-{}-r{}-m{membership_version}-c{}{}-d{}\"",
+        "W/\"item-{}-r{}-m{membership_version}-d{}\"",
         row.item_id.as_uuid(),
         role.as_str(),
-        u8::from(can_read),
         u8::from(can_download),
-        u8::from(reader_download_enabled)
     );
     ItemDetail {
         item_id: row.item_id,
@@ -96,7 +90,7 @@ fn detail(
         languages: row.languages,
         identifiers: row.identifiers,
         media_type: row.media_type,
-        can_read,
+        can_read: true,
         can_download,
         etag,
     }

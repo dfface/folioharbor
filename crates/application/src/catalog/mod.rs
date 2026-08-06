@@ -6,7 +6,7 @@ mod list_library_books;
 pub use download_item::{
     DownloadApi, DownloadAuthorization, DownloadGrant, DownloadItem, DownloadRange,
     DownloadRepository, DownloadRepositoryError, DownloadService, DownloadSource,
-    UnavailableDownloadApi,
+    UnavailableDownloadApi, sanitize_download_file_name,
 };
 pub use get_item::{GetItem, ItemDetail};
 pub use import_publication::{ImportCatalogCommand, ImportCatalogResult, ImportPublicationCatalog};

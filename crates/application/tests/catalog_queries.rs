@@ -101,7 +101,7 @@ fn item(title: &str) -> VisibleCatalogItem {
         languages: vec!["en".to_owned()],
         identifiers: vec!["urn:isbn:example".to_owned()],
         media_type: "application/epub+zip".to_owned(),
-        reader_download_enabled: false,
+        can_download: false,
     }
 }
 
@@ -141,8 +141,10 @@ async fn list_caps_the_page_and_returns_one_row_per_holding_with_opaque_cursor()
 #[tokio::test]
 async fn owner_and_editor_have_equal_view_and_download_capabilities() {
     for role in [RoleCode::Owner, RoleCode::Editor] {
+        let mut projected = item("Role view");
+        projected.can_download = true;
         let repository = CatalogRows {
-            rows: vec![item("Role view")],
+            rows: vec![projected],
             requested_limits: Arc::new(Mutex::new(Vec::new())),
         };
         let service = CatalogService::new(repository, Authorized(role));
@@ -191,9 +193,9 @@ async fn malformed_cursor_is_rejected_before_querying_catalog() {
 #[tokio::test]
 async fn detail_keeps_read_and_download_capabilities_independent_for_reader_setting() {
     let row = item("Visible title");
-    for (reader_download_enabled, expected) in [(false, false), (true, true)] {
+    for (can_download, expected) in [(false, false), (true, true)] {
         let mut projected = row.clone();
-        projected.reader_download_enabled = reader_download_enabled;
+        projected.can_download = can_download;
         let repository = CatalogRows {
             rows: vec![projected],
             requested_limits: Arc::new(Mutex::new(Vec::new())),
@@ -219,7 +221,7 @@ async fn detail_keeps_read_and_download_capabilities_independent_for_reader_sett
 async fn detail_etag_covers_role_membership_version_and_effective_capabilities() {
     let row = item("ETag inputs");
     let mut etags = std::collections::HashSet::new();
-    for (role, membership_version, reader_download_enabled) in [
+    for (role, membership_version, can_download) in [
         (RoleCode::Owner, 4, false),
         (RoleCode::Editor, 4, false),
         (RoleCode::Reader, 4, false),
@@ -227,7 +229,7 @@ async fn detail_etag_covers_role_membership_version_and_effective_capabilities()
         (RoleCode::Reader, 5, true),
     ] {
         let mut projected = row.clone();
-        projected.reader_download_enabled = reader_download_enabled;
+        projected.can_download = can_download;
         let repository = CatalogRows {
             rows: vec![projected],
             requested_limits: Arc::new(Mutex::new(Vec::new())),

@@ -611,6 +611,35 @@ async fn real_routes_apply_role_and_reader_download_setting_without_enumerating_
             "download as {actor}"
         );
     }
+    for role in ["owner", "editor"] {
+        sqlx::query(
+            "DELETE FROM folioharbor.role_permissions WHERE role_code=$1 AND permission_code='item.download'",
+        )
+        .bind(role)
+        .execute(&pools.owner)
+        .await?;
+        let response = app.clone().oneshot(request(&uri, role)).await?;
+        let json: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+        assert_eq!(json["items"][0]["can_download"], false);
+        let download = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri(&download_uri)
+                    .header("Cookie", format!("folioharbor_session={role}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(download.status(), StatusCode::FORBIDDEN);
+        sqlx::query(
+            "INSERT INTO folioharbor.role_permissions(role_code,permission_code) VALUES($1,'item.download')",
+        )
+        .bind(role)
+        .execute(&pools.owner)
+        .await?;
+    }
     let detail_uri = format!(
         "/api/v1/libraries/{}/items/{}",
         library.as_uuid(),
@@ -650,6 +679,31 @@ async fn real_routes_apply_role_and_reader_download_setting_without_enumerating_
     let json: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
     assert_eq!(json["items"][0]["can_download"], true);
+    sqlx::query(
+        "DELETE FROM folioharbor.role_permissions WHERE role_code='reader' AND permission_code='item.download'",
+    )
+    .execute(&pools.owner)
+    .await?;
+    let response = app.clone().oneshot(request(&uri, "reader")).await?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+    assert_eq!(json["items"][0]["can_download"], false);
+    let download = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(&download_uri)
+                .header("Cookie", "folioharbor_session=reader")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(download.status(), StatusCode::FORBIDDEN);
+    sqlx::query(
+        "INSERT INTO folioharbor.role_permissions(role_code,permission_code) VALUES('reader','item.download')",
+    )
+    .execute(&pools.owner)
+    .await?;
     let detail = app.clone().oneshot(request(&detail_uri, "reader")).await?;
     assert_ne!(detail.headers()[ETAG], disabled_etag);
     let detail_json: serde_json::Value =

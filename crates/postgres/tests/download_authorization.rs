@@ -45,13 +45,31 @@ async fn download_matrix_setting_and_audit_are_enforced_in_postgres() -> anyhow:
     }
     let item = seed_item(&pools.owner, library, owner, now).await?;
     let repository = PgDownloadRepository::new(pools.api.clone());
-    for user in [owner, editor] {
+    for (role, user) in [("owner", owner), ("editor", editor)] {
         assert!(matches!(
             repository
                 .authorize_download(actor(user), item, RequestId::new())
                 .await?,
             DownloadAuthorization::Granted(_)
         ));
+        sqlx::query(
+            "DELETE FROM folioharbor.role_permissions WHERE role_code=$1 AND permission_code='item.download'",
+        )
+        .bind(role)
+        .execute(&pools.owner)
+        .await?;
+        assert_eq!(
+            repository
+                .authorize_download(actor(user), item, RequestId::new())
+                .await?,
+            DownloadAuthorization::Forbidden
+        );
+        sqlx::query(
+            "INSERT INTO folioharbor.role_permissions(role_code,permission_code) VALUES($1,'item.download')",
+        )
+        .bind(role)
+        .execute(&pools.owner)
+        .await?;
     }
     assert_eq!(
         repository
@@ -99,6 +117,32 @@ async fn download_matrix_setting_and_audit_are_enforced_in_postgres() -> anyhow:
             .await?,
         DownloadAuthorization::Granted(_)
     ));
+    sqlx::query(
+        "DELETE FROM folioharbor.role_permissions WHERE role_code='reader' AND permission_code='item.download'",
+    )
+    .execute(&pools.owner)
+    .await?;
+    assert_eq!(
+        repository
+            .authorize_download(actor(reader), item, RequestId::new())
+            .await?,
+        DownloadAuthorization::Forbidden
+    );
+    assert!(
+        !repository
+            .record_download_start(
+                actor(reader),
+                item,
+                RequestId::new(),
+                DownloadRange { start: 2, end: 7 }
+            )
+            .await?
+    );
+    sqlx::query(
+        "INSERT INTO folioharbor.role_permissions(role_code,permission_code) VALUES('reader','item.download')",
+    )
+    .execute(&pools.owner)
+    .await?;
     let request_id = RequestId::new();
     assert!(
         repository

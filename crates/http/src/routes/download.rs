@@ -14,7 +14,7 @@ use axum::{
 };
 use bytes::Bytes;
 use folioharbor_application::{
-    catalog::{DownloadGrant, DownloadRange},
+    catalog::{DownloadGrant, DownloadRange, sanitize_download_file_name},
     error::{AppError, FieldViolation},
     ports::BlobStore,
 };
@@ -248,15 +248,8 @@ fn matches_validator(headers: &HeaderMap, etag: &str) -> bool {
 }
 
 fn content_disposition(file_name: &str) -> String {
-    let clean = file_name
-        .chars()
-        .filter(|character| !character.is_control() && !matches!(character, '/' | '\\'))
-        .collect::<String>();
-    let utf8 = if clean.is_empty() {
-        "publication.epub"
-    } else {
-        clean.as_str()
-    };
+    let clean = sanitize_download_file_name(file_name);
+    let utf8 = clean.as_str();
     let fallback = utf8
         .chars()
         .map(|character| {
@@ -399,5 +392,14 @@ mod tests {
         assert!(!value.contains('\r'));
         assert!(!value.contains('\n'));
         assert!(!value.contains('/'));
+
+        let bidi = content_disposition("safe\u{202e}gpj\u{2066}\u{2069}\u{200e}.epub");
+        assert_eq!(
+            bidi,
+            "attachment; filename=\"safegpj.epub\"; filename*=UTF-8''safegpj.epub"
+        );
+        for encoded_control in ["%E2%80%AE", "%E2%81%A6", "%E2%81%A9", "%E2%80%8E"] {
+            assert!(!bidi.contains(encoded_control));
+        }
     }
 }

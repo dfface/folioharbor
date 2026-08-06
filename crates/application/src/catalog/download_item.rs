@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use folioharbor_domain::{
-    id::{BlobId, ItemId, LibraryId, RequestId},
+    id::{BlobId, ItemId, RequestId},
     imports::blob::StorageKey,
 };
 use sha2::{Digest as _, Sha256};
@@ -16,25 +16,59 @@ pub struct DownloadRange {
     pub end: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct DownloadSource {
-    pub library_id: LibraryId,
-    pub item_id: ItemId,
-    pub blob_id: BlobId,
-    pub storage_identity: StorageKey,
-    pub byte_size: u64,
-    pub file_name: String,
+    blob_id: BlobId,
+    storage_identity: StorageKey,
+    byte_size: u64,
+    file_name: String,
+}
+
+impl DownloadSource {
+    #[must_use]
+    pub fn new(
+        blob_id: BlobId,
+        storage_identity: StorageKey,
+        byte_size: u64,
+        file_name: String,
+    ) -> Self {
+        Self {
+            blob_id,
+            storage_identity,
+            byte_size,
+            file_name,
+        }
+    }
+}
+
+impl fmt::Debug for DownloadSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DownloadSource")
+            .field("byte_size", &self.byte_size)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Error)]
 #[error("download repository failed")]
 pub struct DownloadRepositoryError;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum DownloadAuthorization {
     Granted(DownloadSource),
     Forbidden,
     NotFound,
+}
+
+impl fmt::Debug for DownloadAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Granted(source) => formatter.debug_tuple("Granted").field(source).finish(),
+            Self::Forbidden => formatter.write_str("Forbidden"),
+            Self::NotFound => formatter.write_str("NotFound"),
+        }
+    }
 }
 
 #[async_trait]
@@ -236,7 +270,7 @@ impl<R: DownloadRepository + ?Sized> DownloadItem<'_, R> {
         Ok(DownloadGrant {
             storage_identity: source.storage_identity,
             byte_size: source.byte_size,
-            safe_file_name: safe_file_name(&source.file_name),
+            safe_file_name: sanitize_download_file_name(&source.file_name),
             etag: opaque_etag(source.blob_id),
         })
     }
@@ -249,15 +283,28 @@ fn opaque_etag(blob: BlobId) -> String {
     format!("\"{}\"", URL_SAFE_NO_PAD.encode(digest.finalize()))
 }
 
-fn safe_file_name(value: &str) -> String {
+#[must_use]
+pub fn sanitize_download_file_name(value: &str) -> String {
     let leaf = value.rsplit(['/', '\\']).next().unwrap_or_default();
     let cleaned = leaf
         .chars()
-        .filter(|character| !character.is_control())
+        .filter(|character| !is_unsafe_filename_character(*character))
         .collect::<String>();
     if cleaned.trim().is_empty() {
         "publication.epub".to_owned()
     } else {
         cleaned
     }
+}
+
+fn is_unsafe_filename_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{061c}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{feff}'
+        )
 }

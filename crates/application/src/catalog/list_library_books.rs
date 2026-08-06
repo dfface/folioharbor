@@ -1,9 +1,6 @@
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use folioharbor_domain::{
-    id::{HoldingId, ItemId, LibraryId, RequestId, UserId},
-    libraries::role::RoleCode,
-};
+use folioharbor_domain::id::{HoldingId, ItemId, LibraryId, RequestId, UserId};
 use uuid::Uuid;
 
 use crate::{
@@ -92,10 +89,7 @@ impl<R: CatalogQueryRepository + ?Sized, A: AuthorizationRepository + ?Sized>
             None
         };
         Ok(Page {
-            items: rows
-                .into_iter()
-                .map(|row| summary(row, grant.role()))
-                .collect(),
+            items: rows.into_iter().map(summary).collect(),
             next_cursor,
         })
     }
@@ -190,20 +184,15 @@ impl<R: CatalogQueryRepository, A: AuthorizationRepository> CatalogApi for Catal
     }
 }
 
-pub(crate) fn capabilities(role: RoleCode, reader_download_enabled: bool) -> (bool, bool) {
-    (true, role != RoleCode::Reader || reader_download_enabled)
-}
-
-fn summary(row: VisibleCatalogItem, role: RoleCode) -> BookSummary {
-    let (can_read, can_download) = capabilities(role, row.reader_download_enabled);
+fn summary(row: VisibleCatalogItem) -> BookSummary {
     BookSummary {
         item_id: row.item_id,
         primary_title: row.primary_title,
         authors: row.authors,
         languages: row.languages,
         media_type: row.media_type,
-        can_read,
-        can_download,
+        can_read: true,
+        can_download: row.can_download,
     }
 }
 

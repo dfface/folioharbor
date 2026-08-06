@@ -7,7 +7,7 @@ use folioharbor_application::{
     },
 };
 use folioharbor_domain::{
-    id::{BlobId, ItemId, LibraryId, RequestId},
+    id::{BlobId, ItemId, RequestId},
     imports::blob::StorageKey,
 };
 use sqlx::{PgPool, Row as _};
@@ -59,32 +59,23 @@ impl DownloadRepository for PgDownloadRepository {
             .await
             .map_err(|_| DownloadRepositoryError)?;
         match row.try_get::<String, _>("outcome").as_deref() {
-            Ok("granted") => Ok(DownloadAuthorization::Granted(DownloadSource {
-                library_id: LibraryId::from_uuid(
-                    row.try_get("library_id")
-                        .map_err(|_| DownloadRepositoryError)?,
-                ),
-                item_id: ItemId::from_uuid(
-                    row.try_get("item_id")
-                        .map_err(|_| DownloadRepositoryError)?,
-                ),
-                blob_id: BlobId::from_uuid(
+            Ok("granted") => Ok(DownloadAuthorization::Granted(DownloadSource::new(
+                BlobId::from_uuid(
                     row.try_get("blob_id")
                         .map_err(|_| DownloadRepositoryError)?,
                 ),
-                storage_identity: StorageKey::from_opaque(
+                StorageKey::from_opaque(
                     row.try_get("storage_key")
                         .map_err(|_| DownloadRepositoryError)?,
                 ),
-                byte_size: u64::try_from(
+                u64::try_from(
                     row.try_get::<i64, _>("byte_size")
                         .map_err(|_| DownloadRepositoryError)?,
                 )
                 .map_err(|_| DownloadRepositoryError)?,
-                file_name: row
-                    .try_get("file_name")
+                row.try_get("file_name")
                     .map_err(|_| DownloadRepositoryError)?,
-            })),
+            ))),
             Ok("forbidden") => Ok(DownloadAuthorization::Forbidden),
             Ok("not_found") => Ok(DownloadAuthorization::NotFound),
             _ => Err(DownloadRepositoryError),

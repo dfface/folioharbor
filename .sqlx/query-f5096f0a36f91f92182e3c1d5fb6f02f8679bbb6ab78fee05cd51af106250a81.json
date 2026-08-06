@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT visible.holding_id AS \"holding_id!\",visible.item_id AS \"item_id!\",visible.package_id AS \"package_id!\",visible.manifestation_id AS \"manifestation_id!\",visible.primary_title AS \"primary_title!\",visible.authors AS \"authors!\",visible.languages AS \"languages!\",visible.identifiers AS \"identifiers!\",visible.media_type AS \"media_type!\",visible.reader_download_enabled AS \"reader_download_enabled!\" FROM folioharbor.holdings holding CROSS JOIN LATERAL (SELECT candidate.item_id FROM folioharbor.items candidate WHERE candidate.holding_id=holding.holding_id AND candidate.state='active' ORDER BY candidate.created_at DESC,candidate.item_id DESC LIMIT 1) selected CROSS JOIN LATERAL folioharbor.catalog_item_projection_download_visible($1,$2,selected.item_id,$3) visible WHERE holding.library_id=$2 AND holding.state='active' AND holding.holding_id<$4 ORDER BY holding.holding_id DESC LIMIT $5",
+  "query": "SELECT visible.holding_id AS \"holding_id!\",visible.item_id AS \"item_id!\",visible.package_id AS \"package_id!\",visible.manifestation_id AS \"manifestation_id!\",visible.primary_title AS \"primary_title!\",visible.authors AS \"authors!\",visible.languages AS \"languages!\",visible.identifiers AS \"identifiers!\",visible.media_type AS \"media_type!\",visible.can_download AS \"can_download!\" FROM folioharbor.holdings holding CROSS JOIN LATERAL (SELECT candidate.item_id FROM folioharbor.items candidate WHERE candidate.holding_id=holding.holding_id AND candidate.state='active' ORDER BY candidate.created_at DESC,candidate.item_id DESC LIMIT 1) selected CROSS JOIN LATERAL folioharbor.catalog_item_projection_download_rbac_visible($1,$2,selected.item_id,$3) visible WHERE holding.library_id=$2 AND holding.state='active' ORDER BY holding.holding_id DESC LIMIT $4",
   "describe": {
     "columns": [
       {
@@ -50,7 +50,7 @@
       },
       {
         "ordinal": 9,
-        "name": "reader_download_enabled!",
+        "name": "can_download!",
         "type_info": "Bool"
       }
     ],
@@ -59,7 +59,6 @@
         "Uuid",
         "Uuid",
         "Int8",
-        "Uuid",
         "Int8"
       ]
     },
@@ -76,5 +75,5 @@
       null
     ]
   },
-  "hash": "89c46bce6845fa84857b049a660774a6d43aea9d6ec5edc9cc2c7c43d1b5c5e2"
+  "hash": "f5096f0a36f91f92182e3c1d5fb6f02f8679bbb6ab78fee05cd51af106250a81"
 }

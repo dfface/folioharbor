@@ -93,14 +93,12 @@ impl DownloadRepository for DownloadFixture {
         if actor.user_id != self.allowed || item != self.item {
             return Ok(DownloadAuthorization::NotFound);
         }
-        Ok(DownloadAuthorization::Granted(DownloadSource {
-            library_id: LibraryId::new(),
-            item_id: item,
-            blob_id: self.blob,
-            storage_identity: self.key.clone(),
-            byte_size: self.byte_size,
-            file_name: "危 险.epub".to_owned(),
-        }))
+        Ok(DownloadAuthorization::Granted(DownloadSource::new(
+            self.blob,
+            self.key.clone(),
+            self.byte_size,
+            "危 险.epub".to_owned(),
+        )))
     }
 
     async fn record_download_start(
