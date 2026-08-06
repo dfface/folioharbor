@@ -1,7 +1,16 @@
-use std::time::{Duration, Instant};
+use std::{
+    borrow::Cow,
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
-use cssparser::{Delimiter, Parser, ParserInput, ToCss, Token};
-use html5ever::{ParseOpts, parse_document, tendril::TendrilSink};
+use html5ever::{
+    Attribute, ExpandedName, ParseOpts, QualName, parse_document,
+    tendril::{StrTendril, TendrilSink},
+    tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeSink},
+};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
 use crate::EpubPath;
@@ -30,6 +39,8 @@ pub struct SanitizerLimits {
     pub max_nodes: usize,
     /// Maximum serialized output size after escaping and URL rewriting.
     pub max_output_bytes: usize,
+    /// Maximum bytes retained in any CSS input or sanitized CSS intermediate.
+    pub max_css_bytes: usize,
     /// Maximum wall-clock duration for parsing and bounded traversal.
     pub deadline: Duration,
 }
@@ -41,57 +52,64 @@ impl Default for SanitizerLimits {
             max_dom_depth: 256,
             max_nodes: 100_000,
             max_output_bytes: 16 * 1024 * 1024,
+            max_css_bytes: 2 * 1024 * 1024,
             deadline: Duration::from_secs(2),
         }
     }
 }
 
-pub struct ContentSanitizer {
-    limits: SanitizerLimits,
-}
+pub struct ContentSanitizer;
 
 impl Default for ContentSanitizer {
     fn default() -> Self {
-        Self::new(SanitizerLimits::default())
+        Self
     }
 }
 
 impl ContentSanitizer {
-    #[must_use]
-    pub const fn new(limits: SanitizerLimits) -> Self {
-        Self { limits }
-    }
-
     /// Removes active content and rewrites local references to opaque resource identifiers.
     ///
     /// Limit or deadline failures are fail-closed: `html` is empty and `warnings` contains a
     /// stable reason. Partial serialized content is never returned.
     #[must_use]
-    pub fn transform(&self, html: &str, resolver: &impl ResourceResolver) -> SanitizedContent {
-        let started = Instant::now();
-        self.transform_with_expiry(html, resolver, || expired(started, self.limits.deadline))
+    pub fn transform(html: &str, resolver: &impl ResourceResolver) -> SanitizedContent {
+        Self::transform_with_limits(html, resolver, SanitizerLimits::default())
     }
 
-    fn transform_with_expiry(
-        &self,
+    #[must_use]
+    pub fn transform_with_limits(
         html: &str,
         resolver: &impl ResourceResolver,
-        mut is_expired: impl FnMut() -> bool,
+        limits: SanitizerLimits,
     ) -> SanitizedContent {
-        if html.len() > self.limits.max_input_bytes {
+        let started = Instant::now();
+        Self::transform_with_budget(html, resolver, limits, WallClockBudget { started, limits })
+    }
+
+    fn transform_with_budget(
+        html: &str,
+        resolver: &impl ResourceResolver,
+        limits: SanitizerLimits,
+        mut budget: impl DeadlineBudget,
+    ) -> SanitizedContent {
+        if html.len() > limits.max_input_bytes {
             return failed(SanitizeFailure::Input);
         }
-        if is_expired() {
-            return failed(SanitizeFailure::Deadline);
+        if let Err(reason) = budget.check(BudgetPoint::Parse) {
+            return failed(reason);
         }
-        let dom = match parse_incrementally(html, &mut is_expired) {
+        let dom = match parse_incrementally(html, limits, &mut budget) {
             Ok(dom) => dom,
             Err(reason) => return failed(reason),
         };
-        let result = validate_dom(&dom.document, self.limits, &mut is_expired).and_then(|()| {
-            serialize_bounded(&dom.document, resolver, self.limits, &mut is_expired)
+        let result = validate_dom(&dom.document, limits, &mut budget)
+            .and_then(|()| serialize_bounded(&dom.document, resolver, limits, &mut budget));
+        let dismantle_result = dismantle_dom(&dom.document, &mut budget);
+        let result = result.and_then(|content| {
+            dismantle_result?;
+            budget.check(BudgetPoint::Final)?;
+            Ok(content)
         });
-        dismantle_dom(&dom.document);
         match result {
             Ok(content) => content,
             Err(reason) => failed(reason),
@@ -99,13 +117,273 @@ impl ContentSanitizer {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BudgetPoint {
+    Parse,
+    Node,
+    Attribute,
+    Escape,
+    Css,
+    Output,
+    Dismantle,
+    Final,
+}
+
+trait DeadlineBudget {
+    fn check(&mut self, point: BudgetPoint) -> Result<(), SanitizeFailure>;
+}
+
+struct WallClockBudget {
+    started: Instant,
+    limits: SanitizerLimits,
+}
+
+impl DeadlineBudget for WallClockBudget {
+    fn check(&mut self, _point: BudgetPoint) -> Result<(), SanitizeFailure> {
+        if self.started.elapsed() >= self.limits.deadline {
+            Err(SanitizeFailure::Deadline)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct BoundedDomSink {
+    dom: RcDom,
+    limits: SanitizerLimits,
+    nodes: Cell<usize>,
+    depths: RefCell<HashMap<usize, usize>>,
+    failure: Cell<Option<SanitizeFailure>>,
+}
+
+struct ParsedDom {
+    dom: RcDom,
+    failure: Option<SanitizeFailure>,
+}
+
+impl BoundedDomSink {
+    fn new(limits: SanitizerLimits) -> Self {
+        let dom = RcDom::default();
+        let mut depths = HashMap::new();
+        depths.insert(handle_key(&dom.document), 0);
+        Self {
+            dom,
+            limits,
+            nodes: Cell::new(1),
+            depths: RefCell::new(depths),
+            failure: Cell::new(None),
+        }
+    }
+
+    fn count_node(&self) {
+        let nodes = self.nodes.get().saturating_add(1);
+        self.nodes.set(nodes);
+        if nodes > self.limits.max_nodes && self.failure.get().is_none() {
+            self.failure.set(Some(SanitizeFailure::Nodes));
+        }
+    }
+
+    fn observe_attachment(&self, parent: &Handle, child: Option<&Handle>) {
+        let depth = self
+            .depths
+            .borrow()
+            .get(&handle_key(parent))
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        if depth > self.limits.max_dom_depth && self.failure.get().is_none() {
+            self.failure.set(Some(SanitizeFailure::Depth));
+        }
+        if let Some(child) = child {
+            self.depths.borrow_mut().insert(handle_key(child), depth);
+        }
+    }
+
+    fn accepting(&self) -> bool {
+        self.failure.get().is_none()
+    }
+}
+
+fn handle_key(handle: &Handle) -> usize {
+    Rc::as_ptr(handle) as usize
+}
+
+impl TreeSink for BoundedDomSink {
+    type Handle = Handle;
+    type Output = ParsedDom;
+    type ElemName<'a>
+        = ExpandedName<'a>
+    where
+        Self: 'a;
+
+    fn finish(self) -> Self::Output {
+        ParsedDom {
+            dom: self.dom,
+            failure: self.failure.get(),
+        }
+    }
+
+    fn parse_error(&self, msg: Cow<'static, str>) {
+        self.dom.parse_error(msg);
+    }
+
+    fn get_document(&self) -> Handle {
+        self.dom.get_document()
+    }
+
+    fn elem_name<'a>(&'a self, target: &'a Handle) -> Self::ElemName<'a> {
+        self.dom.elem_name(target)
+    }
+
+    fn create_element(&self, name: QualName, attrs: Vec<Attribute>, flags: ElementFlags) -> Handle {
+        self.count_node();
+        if flags.template {
+            self.count_node();
+        }
+        self.dom.create_element(name, attrs, flags)
+    }
+
+    fn create_comment(&self, text: StrTendril) -> Handle {
+        self.count_node();
+        self.dom.create_comment(text)
+    }
+
+    fn create_pi(&self, target: StrTendril, data: StrTendril) -> Handle {
+        self.count_node();
+        self.dom.create_pi(target, data)
+    }
+
+    fn append(&self, parent: &Handle, child: NodeOrText<Handle>) {
+        if matches!(&child, NodeOrText::AppendText(_)) {
+            self.count_node();
+        }
+        let child_handle = match &child {
+            NodeOrText::AppendNode(handle) => Some(handle),
+            NodeOrText::AppendText(_) => None,
+        };
+        self.observe_attachment(parent, child_handle);
+        if self.accepting() {
+            self.dom.append(parent, child);
+        }
+    }
+
+    fn append_based_on_parent_node(
+        &self,
+        element: &Handle,
+        prev_element: &Handle,
+        child: NodeOrText<Handle>,
+    ) {
+        if matches!(&child, NodeOrText::AppendText(_)) {
+            self.count_node();
+        }
+        let parent = element.parent.take();
+        let actual_parent = parent
+            .as_ref()
+            .and_then(std::rc::Weak::upgrade)
+            .unwrap_or_else(|| prev_element.clone());
+        element.parent.set(parent);
+        let child_handle = match &child {
+            NodeOrText::AppendNode(handle) => Some(handle),
+            NodeOrText::AppendText(_) => None,
+        };
+        self.observe_attachment(&actual_parent, child_handle);
+        if self.accepting() {
+            self.dom
+                .append_based_on_parent_node(element, prev_element, child);
+        }
+    }
+
+    fn append_doctype_to_document(
+        &self,
+        name: StrTendril,
+        public_id: StrTendril,
+        system_id: StrTendril,
+    ) {
+        self.count_node();
+        if self.accepting() {
+            self.dom
+                .append_doctype_to_document(name, public_id, system_id);
+        }
+    }
+
+    fn get_template_contents(&self, target: &Handle) -> Handle {
+        self.dom.get_template_contents(target)
+    }
+
+    fn same_node(&self, x: &Handle, y: &Handle) -> bool {
+        self.dom.same_node(x, y)
+    }
+
+    fn set_quirks_mode(&self, mode: QuirksMode) {
+        self.dom.set_quirks_mode(mode);
+    }
+
+    fn append_before_sibling(&self, sibling: &Handle, child: NodeOrText<Handle>) {
+        if matches!(&child, NodeOrText::AppendText(_)) {
+            self.count_node();
+        }
+        if let Some(parent) = sibling.parent.take() {
+            if let Some(parent_handle) = parent.upgrade() {
+                let child_handle = match &child {
+                    NodeOrText::AppendNode(handle) => Some(handle),
+                    NodeOrText::AppendText(_) => None,
+                };
+                self.observe_attachment(&parent_handle, child_handle);
+            }
+            sibling.parent.set(Some(parent));
+        }
+        if self.accepting() {
+            self.dom.append_before_sibling(sibling, child);
+        }
+    }
+
+    fn add_attrs_if_missing(&self, target: &Handle, attrs: Vec<Attribute>) {
+        if self.accepting() {
+            self.dom.add_attrs_if_missing(target, attrs);
+        }
+    }
+
+    fn remove_from_parent(&self, target: &Handle) {
+        if self.accepting() {
+            self.dom.remove_from_parent(target);
+        }
+    }
+
+    fn reparent_children(&self, node: &Handle, new_parent: &Handle) {
+        if self.accepting() {
+            self.dom.reparent_children(node, new_parent);
+        }
+    }
+
+    fn is_mathml_annotation_xml_integration_point(&self, target: &Handle) -> bool {
+        self.dom.is_mathml_annotation_xml_integration_point(target)
+    }
+
+    fn allow_declarative_shadow_roots(&self, intended_parent: &Handle) -> bool {
+        self.dom.allow_declarative_shadow_roots(intended_parent)
+    }
+
+    fn attach_declarative_shadow(
+        &self,
+        location: &Handle,
+        template: &Handle,
+        attrs: &[Attribute],
+    ) -> bool {
+        self.accepting()
+            && self
+                .dom
+                .attach_declarative_shadow(location, template, attrs)
+    }
+}
+
 fn parse_incrementally(
     html: &str,
-    is_expired: &mut impl FnMut() -> bool,
+    limits: SanitizerLimits,
+    budget: &mut impl DeadlineBudget,
 ) -> Result<RcDom, SanitizeFailure> {
-    const PARSER_CHUNK_BYTES: usize = 4 * 1024;
+    const PARSER_CHUNK_BYTES: usize = 1024;
 
-    let mut parser = parse_document(RcDom::default(), ParseOpts::default());
+    let mut parser = parse_document(BoundedDomSink::new(limits), ParseOpts::default());
     let mut offset = 0_usize;
     while offset < html.len() {
         let mut end = offset.saturating_add(PARSER_CHUNK_BYTES).min(html.len());
@@ -114,19 +392,28 @@ fn parse_incrementally(
         }
         parser.process(html[offset..end].into());
         offset = end;
-        if is_expired() {
-            let dom = parser.finish();
-            dismantle_dom(&dom.document);
-            return Err(SanitizeFailure::Deadline);
+        if let Err(reason) = budget.check(BudgetPoint::Parse) {
+            let parsed = parser.finish();
+            let _ = dismantle_dom(&parsed.dom.document, budget);
+            return Err(reason);
+        }
+        if let Some(reason) = parser.tokenizer.sink.sink.failure.get() {
+            let parsed = parser.finish();
+            let _ = dismantle_dom(&parsed.dom.document, budget);
+            return Err(reason);
         }
     }
 
-    let dom = parser.finish();
-    if is_expired() {
-        dismantle_dom(&dom.document);
-        Err(SanitizeFailure::Deadline)
+    let parsed = parser.finish();
+    if let Err(reason) = budget.check(BudgetPoint::Parse) {
+        let _ = dismantle_dom(&parsed.dom.document, budget);
+        return Err(reason);
+    }
+    if let Some(reason) = parsed.failure {
+        let _ = dismantle_dom(&parsed.dom.document, budget);
+        Err(reason)
     } else {
-        Ok(dom)
+        Ok(parsed.dom)
     }
 }
 
@@ -158,6 +445,15 @@ enum Work {
     Exit(String),
 }
 
+struct Serialization<'a, R, B> {
+    resolver: &'a R,
+    work: &'a mut Vec<Work>,
+    output: &'a mut BoundedOutput,
+    warnings: &'a mut Vec<String>,
+    limits: SanitizerLimits,
+    budget: &'a mut B,
+}
+
 struct BoundedOutput {
     value: String,
     max_bytes: usize,
@@ -171,7 +467,11 @@ impl BoundedOutput {
         }
     }
 
-    fn push_str(&mut self, value: &str) -> Result<(), SanitizeFailure> {
+    fn push_str(
+        &mut self,
+        value: &str,
+        budget: &mut impl DeadlineBudget,
+    ) -> Result<(), SanitizeFailure> {
         if self
             .value
             .len()
@@ -180,27 +480,38 @@ impl BoundedOutput {
         {
             return Err(SanitizeFailure::Output);
         }
-        self.value.push_str(value);
+        let mut offset = 0_usize;
+        while offset < value.len() {
+            let mut end = offset.saturating_add(256).min(value.len());
+            while !value.is_char_boundary(end) {
+                end = end.saturating_sub(1);
+            }
+            budget.check(BudgetPoint::Output)?;
+            self.value.push_str(&value[offset..end]);
+            offset = end;
+        }
         Ok(())
     }
 
-    fn push(&mut self, value: char) -> Result<(), SanitizeFailure> {
+    fn push(
+        &mut self,
+        value: char,
+        budget: &mut impl DeadlineBudget,
+    ) -> Result<(), SanitizeFailure> {
         let mut encoded = [0_u8; 4];
-        self.push_str(value.encode_utf8(&mut encoded))
+        self.push_str(value.encode_utf8(&mut encoded), budget)
     }
 }
 
 fn validate_dom(
     document: &Handle,
     limits: SanitizerLimits,
-    is_expired: &mut impl FnMut() -> bool,
+    budget: &mut impl DeadlineBudget,
 ) -> Result<(), SanitizeFailure> {
     let mut nodes = 0_usize;
     let mut work = vec![(document.clone(), 0_usize)];
     while let Some((node, depth)) = work.pop() {
-        if is_expired() {
-            return Err(SanitizeFailure::Deadline);
-        }
+        budget.check(BudgetPoint::Node)?;
         nodes = nodes.saturating_add(1);
         if nodes > limits.max_nodes {
             return Err(SanitizeFailure::Nodes);
@@ -222,7 +533,7 @@ fn serialize_bounded(
     document: &Handle,
     resolver: &impl ResourceResolver,
     limits: SanitizerLimits,
-    is_expired: &mut impl FnMut() -> bool,
+    budget: &mut impl DeadlineBudget,
 ) -> Result<SanitizedContent, SanitizeFailure> {
     let mut work = document
         .children
@@ -235,14 +546,12 @@ fn serialize_bounded(
     let mut warnings = Vec::new();
     let mut nodes = 0_usize;
     while let Some(item) = work.pop() {
-        if is_expired() {
-            return Err(SanitizeFailure::Deadline);
-        }
+        budget.check(BudgetPoint::Node)?;
         match item {
             Work::Exit(tag) => {
-                output.push_str("</")?;
-                output.push_str(&tag)?;
-                output.push('>')?;
+                output.push_str("</", budget)?;
+                output.push_str(&tag, budget)?;
+                output.push('>', budget)?;
             }
             Work::Enter(node, depth) => {
                 nodes = nodes.saturating_add(1);
@@ -252,14 +561,15 @@ fn serialize_bounded(
                 if depth > limits.max_dom_depth {
                     return Err(SanitizeFailure::Depth);
                 }
-                serialize_node(
-                    &node,
-                    depth,
+                let mut context = Serialization {
                     resolver,
-                    &mut work,
-                    &mut output,
-                    &mut warnings,
-                )?;
+                    work: &mut work,
+                    output: &mut output,
+                    warnings: &mut warnings,
+                    limits,
+                    budget,
+                };
+                serialize_node(&node, depth, &mut context)?;
             }
         }
     }
@@ -269,25 +579,24 @@ fn serialize_bounded(
     })
 }
 
-fn serialize_node(
+fn serialize_node<R: ResourceResolver, B: DeadlineBudget>(
     node: &Handle,
     depth: usize,
-    resolver: &impl ResourceResolver,
-    work: &mut Vec<Work>,
-    output: &mut BoundedOutput,
-    warnings: &mut Vec<String>,
+    context: &mut Serialization<'_, R, B>,
 ) -> Result<(), SanitizeFailure> {
     match &node.data {
-        NodeData::Document => push_children(node, depth, work),
-        NodeData::Text { contents } => escape_text(contents.borrow().as_ref(), output)?,
+        NodeData::Document => push_children(node, depth, context.work),
+        NodeData::Text { contents } => {
+            escape_text(contents.borrow().as_ref(), context.output, context.budget)?;
+        }
         NodeData::Element { name, attrs, .. } => {
             let tag = name.local.as_ref().to_ascii_lowercase();
             if is_forbidden_element(&tag) {
-                warnings.push(format!("removed element: {tag}"));
+                context.warnings.push(format!("removed element: {tag}"));
             } else if !is_allowed_element(&tag) {
-                push_children(node, depth, work);
+                push_children(node, depth, context.work);
             } else {
-                serialize_element(node, &tag, attrs, depth, resolver, work, output)?;
+                serialize_element(node, &tag, attrs, depth, context)?;
             }
         }
         NodeData::Doctype { .. }
@@ -297,59 +606,74 @@ fn serialize_node(
     Ok(())
 }
 
-fn serialize_element(
+fn serialize_element<R: ResourceResolver, B: DeadlineBudget>(
     node: &Handle,
     tag: &str,
     attrs: &std::cell::RefCell<Vec<html5ever::Attribute>>,
     depth: usize,
-    resolver: &impl ResourceResolver,
-    work: &mut Vec<Work>,
-    output: &mut BoundedOutput,
+    context: &mut Serialization<'_, R, B>,
 ) -> Result<(), SanitizeFailure> {
-    output.push('<')?;
-    output.push_str(tag)?;
+    context.output.push('<', context.budget)?;
+    context.output.push_str(tag, context.budget)?;
     for attribute in attrs.borrow().iter() {
-        let name = attribute.name.local.as_ref().to_ascii_lowercase();
-        if name.starts_with("on") || !is_allowed_attribute(&name) {
+        context.budget.check(BudgetPoint::Attribute)?;
+        let name = attribute.name.local.as_ref();
+        if name.starts_with("on") || !is_allowed_attribute(name) {
             continue;
         }
         let raw = attribute.value.as_ref();
-        let value = if matches!(name.as_str(), "href" | "src" | "poster") {
-            sanitize_url(raw, resolver)
+        if matches!(name, "href" | "src" | "poster") {
+            let Some(value) = sanitize_url(raw, context.resolver, context.limits, context.budget)?
+            else {
+                continue;
+            };
+            write_attribute(name, &value, context.output, context.budget)?;
         } else if name == "style" {
-            let css = sanitize_declarations(raw, resolver);
-            (!css.is_empty()).then_some(css)
+            let css = sanitize_declarations(raw, context.resolver, context.limits, context.budget)?;
+            if !css.is_empty() {
+                write_attribute(name, &css, context.output, context.budget)?;
+            }
         } else {
-            Some(raw.to_owned())
-        };
-        if let Some(value) = value {
-            output.push(' ')?;
-            output.push_str(&name)?;
-            output.push_str("=\"")?;
-            escape_attribute(&value, output)?;
-            output.push('"')?;
+            write_attribute(name, raw, context.output, context.budget)?;
         }
     }
-    output.push('>')?;
+    context.output.push('>', context.budget)?;
     if tag == "style" {
-        let css = node
-            .children
-            .borrow()
-            .iter()
-            .filter_map(|child| match &child.data {
-                NodeData::Text { contents } => Some(contents.borrow().to_string()),
-                _ => None,
-            })
-            .collect::<String>();
-        output.push_str(&sanitize_stylesheet(&css, resolver))?;
-        work.push(Work::Exit(tag.to_owned()));
+        let mut css_source = BoundedOutput::new(context.limits.max_css_bytes);
+        for child in node.children.borrow().iter() {
+            context.budget.check(BudgetPoint::Css)?;
+            if let NodeData::Text { contents } = &child.data {
+                css_source.push_str(contents.borrow().as_ref(), context.budget)?;
+            }
+        }
+        let css = sanitize_stylesheet(
+            &css_source.value,
+            context.resolver,
+            context.limits,
+            context.budget,
+        )?;
+        context.output.push_str(&css, context.budget)?;
+        context.work.push(Work::Exit(tag.to_owned()));
     } else {
         if !is_void_element(tag) {
-            work.push(Work::Exit(tag.to_owned()));
+            context.work.push(Work::Exit(tag.to_owned()));
         }
-        push_children(node, depth, work);
+        push_children(node, depth, context.work);
     }
     Ok(())
+}
+
+fn write_attribute(
+    name: &str,
+    value: &str,
+    output: &mut BoundedOutput,
+    budget: &mut impl DeadlineBudget,
+) -> Result<(), SanitizeFailure> {
+    output.push(' ', budget)?;
+    output.push_str(name, budget)?;
+    output.push_str("=\"", budget)?;
+    escape_attribute(value, output, budget)?;
+    output.push('"', budget)
 }
 
 fn push_children(node: &Handle, depth: usize, work: &mut Vec<Work>) {
@@ -362,73 +686,112 @@ fn push_children(node: &Handle, depth: usize, work: &mut Vec<Work>) {
     );
 }
 
-fn dismantle_dom(document: &Handle) {
+fn dismantle_dom(
+    document: &Handle,
+    budget: &mut impl DeadlineBudget,
+) -> Result<(), SanitizeFailure> {
     let mut nodes = vec![document.clone()];
+    let mut failure = None;
     while let Some(node) = nodes.pop() {
+        if let Err(reason) = budget.check(BudgetPoint::Dismantle) {
+            failure.get_or_insert(reason);
+        }
         nodes.extend(std::mem::take(&mut *node.children.borrow_mut()));
     }
+    failure.map_or(Ok(()), Err)
 }
 
-fn expired(started: Instant, deadline: Duration) -> bool {
-    started.elapsed() >= deadline
-}
-
-fn sanitize_url(raw: &str, resolver: &impl ResourceResolver) -> Option<String> {
+fn sanitize_url(
+    raw: &str,
+    resolver: &impl ResourceResolver,
+    limits: SanitizerLimits,
+    budget: &mut impl DeadlineBudget,
+) -> Result<Option<String>, SanitizeFailure> {
+    check_string_budget(raw, BudgetPoint::Attribute, budget)?;
+    budget.check(BudgetPoint::Attribute)?;
     let value = raw.trim();
     if value.starts_with('#') {
-        return safe_fragment(value).then(|| value.to_owned());
+        return Ok(safe_fragment(value).then(|| value.to_owned()));
     }
     if value.starts_with("//") || value.contains('\0') || has_scheme(value) {
-        return None;
+        return Ok(None);
     }
     let (reference, fragment) = value
         .split_once('#')
         .map_or((value, None), |(reference, fragment)| {
             (reference, Some(fragment))
         });
-    if reference.is_empty()
-        || reference.starts_with('/')
-        || reference.contains(['\\', '\0'])
-        || has_encoded_or_normalized_traversal(reference)
-    {
-        return None;
-    }
-    let canonical = EpubPath::resolve_from(resolver.base().as_str(), reference).ok()?;
-    let opaque = resolver.resolve(&canonical)?;
+    let Some(decoded) = decode_safe_reference(reference, limits, budget)? else {
+        return Ok(None);
+    };
+    let Ok(canonical) = EpubPath::resolve_from(resolver.base().as_str(), &decoded) else {
+        return Ok(None);
+    };
+    let Some(opaque) = resolver.resolve(&canonical) else {
+        return Ok(None);
+    };
+    check_string_budget(&opaque, BudgetPoint::Attribute, budget)?;
     if opaque.is_empty()
+        || opaque.len() > limits.max_output_bytes
         || !opaque
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
     {
-        return None;
+        return Ok(None);
     }
-    let mut rewritten = format!("resource:{opaque}");
+    let mut rewritten = BoundedOutput::new(limits.max_output_bytes);
+    rewritten.push_str("resource:", budget)?;
+    rewritten.push_str(&opaque, budget)?;
     if let Some(fragment) = fragment.filter(|fragment| safe_fragment(fragment)) {
-        rewritten.push('#');
-        rewritten.push_str(fragment);
+        rewritten.push('#', budget)?;
+        rewritten.push_str(fragment, budget)?;
     }
-    Some(rewritten)
+    Ok(Some(rewritten.value))
 }
 
-fn has_encoded_or_normalized_traversal(reference: &str) -> bool {
-    let Some(decoded) = percent_decode_for_validation(reference) else {
-        return true;
+fn decode_safe_reference(
+    reference: &str,
+    limits: SanitizerLimits,
+    budget: &mut impl DeadlineBudget,
+) -> Result<Option<String>, SanitizeFailure> {
+    if reference.is_empty() || reference.len() > limits.max_output_bytes {
+        return Ok(None);
+    }
+    let Some(decoded) = percent_decode_once(reference, budget)? else {
+        return Ok(None);
     };
-    decoded.starts_with('/')
+    if decoded.as_bytes().windows(3).any(|window| {
+        window[0] == b'%' && hex_value(window[1]).is_some() && hex_value(window[2]).is_some()
+    }) {
+        return Ok(None);
+    }
+    let unsafe_path = decoded.starts_with('/')
         || decoded.contains(['\\', '\0'])
         || decoded
             .split('/')
-            .any(|component| matches!(component, "." | ".."))
+            .any(|component| matches!(component, "." | ".."));
+    Ok((!unsafe_path).then_some(decoded))
 }
 
-fn percent_decode_for_validation(value: &str) -> Option<String> {
+fn percent_decode_once(
+    value: &str,
+    budget: &mut impl DeadlineBudget,
+) -> Result<Option<String>, SanitizeFailure> {
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            let high = hex_value(bytes[index + 1])?;
-            let low = hex_value(bytes[index + 2])?;
+        budget.check(BudgetPoint::Attribute)?;
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Ok(None);
+            }
+            let Some(high) = hex_value(bytes[index + 1]) else {
+                return Ok(None);
+            };
+            let Some(low) = hex_value(bytes[index + 2]) else {
+                return Ok(None);
+            };
             decoded.push(high << 4 | low);
             index += 3;
         } else {
@@ -436,7 +799,7 @@ fn percent_decode_for_validation(value: &str) -> Option<String> {
             index += 1;
         }
     }
-    String::from_utf8(decoded).ok()
+    Ok(String::from_utf8(decoded).ok())
 }
 
 fn hex_value(value: u8) -> Option<u8> {
@@ -466,178 +829,133 @@ fn safe_fragment(fragment: &str) -> bool {
     })
 }
 
-fn sanitize_stylesheet(css: &str, resolver: &impl ResourceResolver) -> String {
-    let mut input = ParserInput::new(css);
-    let mut parser = Parser::new(&mut input);
-    let mut output = String::new();
-    let mut selector = String::new();
-    let mut discard_rule = false;
-    while let Ok(token) = parser.next().cloned() {
-        match token {
-            Token::AtKeyword(_) => {
-                selector.clear();
-                discard_rule = true;
-            }
-            Token::Semicolon => {
-                selector.clear();
-                discard_rule = false;
-            }
-            Token::CurlyBracketBlock => {
-                let declarations = parser
-                    .parse_nested_block(|nested| {
-                        Ok::<_, cssparser::ParseError<'_, ()>>(sanitize_declarations_parser(
-                            nested, resolver,
-                        ))
-                    })
-                    .unwrap_or_default();
-                if !discard_rule && safe_selector(&selector) && !declarations.is_empty() {
-                    output.push_str(selector.trim());
-                    output.push('{');
-                    output.push_str(&declarations);
-                    output.push('}');
-                }
-                selector.clear();
-                discard_rule = false;
-            }
-            _ if !discard_rule && !token.is_parse_error() => {
-                selector.push_str(&token.to_css_string());
-            }
-            _ => {}
-        }
-    }
-    output
-}
-
-fn sanitize_declarations(css: &str, resolver: &impl ResourceResolver) -> String {
-    let mut input = ParserInput::new(css);
-    sanitize_declarations_parser(&mut Parser::new(&mut input), resolver)
-}
-
-fn sanitize_declarations_parser(
-    parser: &mut Parser<'_, '_>,
+fn sanitize_stylesheet(
+    css: &str,
     resolver: &impl ResourceResolver,
-) -> String {
-    let mut output = Vec::new();
-    while let Ok(token) = parser.next().cloned() {
-        let Token::Ident(property) = token else {
-            skip_declaration(parser);
+    limits: SanitizerLimits,
+    budget: &mut impl DeadlineBudget,
+) -> Result<String, SanitizeFailure> {
+    check_css_size(css, limits)?;
+    check_string_budget(css, BudgetPoint::Css, budget)?;
+    let mut output = BoundedOutput::new(limits.max_css_bytes);
+    let mut remaining = css;
+    while let Some(open) = remaining.find('{') {
+        budget.check(BudgetPoint::Css)?;
+        let selector = remaining[..open].rsplit(';').next().unwrap_or("").trim();
+        let body = &remaining[open + 1..];
+        let Some(close) = body.find('}') else {
+            break;
+        };
+        if safe_selector(selector) {
+            let declarations = sanitize_declarations(&body[..close], resolver, limits, budget)?;
+            if !declarations.is_empty() {
+                output.push_str(selector, budget)?;
+                output.push('{', budget)?;
+                output.push_str(&declarations, budget)?;
+                output.push('}', budget)?;
+            }
+        }
+        remaining = &body[close + 1..];
+    }
+    Ok(output.value)
+}
+
+fn sanitize_declarations(
+    css: &str,
+    resolver: &impl ResourceResolver,
+    limits: SanitizerLimits,
+    budget: &mut impl DeadlineBudget,
+) -> Result<String, SanitizeFailure> {
+    check_css_size(css, limits)?;
+    check_string_budget(css, BudgetPoint::Css, budget)?;
+    let mut output = BoundedOutput::new(limits.max_css_bytes);
+    for declaration in css.split(';') {
+        budget.check(BudgetPoint::Css)?;
+        let Some((property, value)) = declaration.split_once(':') else {
             continue;
         };
-        if parser.expect_colon().is_err() {
-            skip_declaration(parser);
+        let property = property.trim();
+        if property.len() > 64 || !is_allowed_css_property(&property.to_ascii_lowercase()) {
             continue;
         }
-        let property = property.to_ascii_lowercase();
-        if !is_allowed_css_property(&property) {
-            skip_declaration(parser);
+        let Some(value) = sanitize_css_value(value.trim(), resolver, limits, budget)? else {
             continue;
+        };
+        if !output.value.is_empty() {
+            output.push(';', budget)?;
         }
-        let value = parser
-            .parse_until_after(Delimiter::Semicolon, |declaration| {
-                Ok::<_, cssparser::ParseError<'_, ()>>(parse_css_value(declaration, resolver))
-            })
-            .ok()
-            .flatten();
-        if let Some(value) = value {
-            output.push(format!("{property}:{value}"));
-        }
+        output.push_str(&property.to_ascii_lowercase(), budget)?;
+        output.push(':', budget)?;
+        output.push_str(&value, budget)?;
     }
-    output.join(";")
+    Ok(output.value)
 }
 
-fn parse_css_value(
-    parser: &mut Parser<'_, '_>,
+fn sanitize_css_value(
+    value: &str,
     resolver: &impl ResourceResolver,
-) -> Option<String> {
-    let mut value = String::new();
-    while let Ok(token) = parser.next().cloned() {
-        match token {
-            Token::Semicolon => break,
-            Token::UnquotedUrl(url) => append_css_url(&mut value, &url, resolver)?,
-            Token::Function(name) if name.eq_ignore_ascii_case("url") => {
-                let raw = parser
-                    .parse_nested_block(|nested| {
-                        let token = nested.next()?.clone();
-                        let raw = match token {
-                            Token::QuotedString(value) | Token::Ident(value) => value.to_string(),
-                            _ => return Err(nested.new_custom_error::<(), ()>(())),
-                        };
-                        nested.expect_exhausted()?;
-                        Ok(raw)
-                    })
-                    .ok()?;
-                append_css_url(&mut value, &raw, resolver)?;
+    limits: SanitizerLimits,
+    budget: &mut impl DeadlineBudget,
+) -> Result<Option<String>, SanitizeFailure> {
+    check_string_budget(value, BudgetPoint::Css, budget)?;
+    if value.contains("/*") || value.contains(['\\', '@', '{', '}', '[', ']']) {
+        return Ok(None);
+    }
+    let mut output = BoundedOutput::new(limits.max_css_bytes);
+    let mut remaining = value;
+    while !remaining.is_empty() {
+        budget.check(BudgetPoint::Css)?;
+        if remaining.len() >= 4 && remaining[..4].eq_ignore_ascii_case("url(") {
+            let Some(close) = remaining[4..].find(')') else {
+                return Ok(None);
+            };
+            let raw = remaining[4..4 + close].trim().trim_matches(['\'', '"']);
+            let Some(rewritten) = sanitize_url(raw, resolver, limits, budget)? else {
+                return Ok(None);
+            };
+            output.push_str("url('", budget)?;
+            output.push_str(&rewritten, budget)?;
+            output.push_str("')", budget)?;
+            remaining = &remaining[5 + close..];
+        } else {
+            let character = remaining.chars().next().unwrap_or('\0');
+            if character == '(' || character == ')' {
+                return Ok(None);
             }
-            Token::Function(name) if safe_css_function(&name) => {
-                let nested = parser
-                    .parse_nested_block(|nested| {
-                        parse_css_value(nested, resolver)
-                            .ok_or_else(|| nested.new_custom_error::<(), ()>(()))
-                    })
-                    .ok()?;
-                value.push_str(&name.to_ascii_lowercase());
-                value.push('(');
-                value.push_str(&nested);
-                value.push(')');
-            }
-            Token::Function(_)
-            | Token::ParenthesisBlock
-            | Token::SquareBracketBlock
-            | Token::CurlyBracketBlock => {
-                consume_nested_block(parser);
-                return None;
-            }
-            Token::AtKeyword(_)
-            | Token::BadUrl(_)
-            | Token::BadString(_)
-            | Token::CloseParenthesis
-            | Token::CloseSquareBracket
-            | Token::CloseCurlyBracket => return None,
-            _ => {
-                if !value.is_empty() {
-                    value.push(' ');
-                }
-                value.push_str(&token.to_css_string());
-            }
+            output.push(character, budget)?;
+            remaining = &remaining[character.len_utf8()..];
         }
     }
-    (!value.is_empty()).then_some(value)
+    Ok((!output.value.trim().is_empty()).then_some(output.value))
 }
 
-fn consume_nested_block(parser: &mut Parser<'_, '_>) {
-    let _ = parser.parse_nested_block(|nested| {
-        while nested.next().is_ok() {}
-        Ok::<(), cssparser::ParseError<'_, ()>>(())
-    });
-}
-
-fn append_css_url(output: &mut String, raw: &str, resolver: &impl ResourceResolver) -> Option<()> {
-    let rewritten = sanitize_url(raw, resolver)?;
-    output.push_str("url('");
-    output.push_str(&rewritten);
-    output.push_str("')");
-    Some(())
-}
-
-fn skip_declaration(parser: &mut Parser<'_, '_>) {
-    while let Ok(token) = parser.next() {
-        if matches!(token, Token::Semicolon) {
-            break;
-        }
+fn check_css_size(css: &str, limits: SanitizerLimits) -> Result<(), SanitizeFailure> {
+    if css.len() > limits.max_css_bytes {
+        Err(SanitizeFailure::Output)
+    } else {
+        Ok(())
     }
+}
+
+fn check_string_budget(
+    value: &str,
+    point: BudgetPoint,
+    budget: &mut impl DeadlineBudget,
+) -> Result<(), SanitizeFailure> {
+    for _ in value.as_bytes().chunks(256) {
+        budget.check(point)?;
+    }
+    Ok(())
 }
 
 fn safe_selector(selector: &str) -> bool {
     let selector = selector.trim();
     !selector.is_empty()
         && !selector.contains(['@', '<', '>'])
-        && !selector.to_ascii_lowercase().contains("url(")
-}
-
-fn safe_css_function(name: &str) -> bool {
-    ["rgb", "rgba", "hsl", "hsla", "calc", "min", "max", "clamp"]
-        .iter()
-        .any(|safe| name.eq_ignore_ascii_case(safe))
+        && !selector
+            .as_bytes()
+            .windows(4)
+            .any(|window| window.eq_ignore_ascii_case(b"url("))
 }
 
 fn is_forbidden_element(tag: &str) -> bool {
@@ -810,25 +1128,35 @@ fn is_void_element(tag: &str) -> bool {
     matches!(tag, "br" | "hr" | "img" | "link" | "col")
 }
 
-fn escape_text(value: &str, output: &mut BoundedOutput) -> Result<(), SanitizeFailure> {
+fn escape_text(
+    value: &str,
+    output: &mut BoundedOutput,
+    budget: &mut impl DeadlineBudget,
+) -> Result<(), SanitizeFailure> {
     for character in value.chars() {
+        budget.check(BudgetPoint::Escape)?;
         match character {
-            '&' => output.push_str("&amp;")?,
-            '<' => output.push_str("&lt;")?,
-            '>' => output.push_str("&gt;")?,
-            _ => output.push(character)?,
+            '&' => output.push_str("&amp;", budget)?,
+            '<' => output.push_str("&lt;", budget)?,
+            '>' => output.push_str("&gt;", budget)?,
+            _ => output.push(character, budget)?,
         }
     }
     Ok(())
 }
 
-fn escape_attribute(value: &str, output: &mut BoundedOutput) -> Result<(), SanitizeFailure> {
+fn escape_attribute(
+    value: &str,
+    output: &mut BoundedOutput,
+    budget: &mut impl DeadlineBudget,
+) -> Result<(), SanitizeFailure> {
     for character in value.chars() {
+        budget.check(BudgetPoint::Escape)?;
         match character {
-            '&' => output.push_str("&amp;")?,
-            '<' => output.push_str("&lt;")?,
-            '"' => output.push_str("&quot;")?,
-            _ => output.push(character)?,
+            '&' => output.push_str("&amp;", budget)?,
+            '<' => output.push_str("&lt;", budget)?,
+            '"' => output.push_str("&quot;", budget)?,
+            _ => output.push(character, budget)?,
         }
     }
     Ok(())
@@ -852,21 +1180,108 @@ mod tests {
         }
     }
 
+    struct NeverExpires;
+
+    impl DeadlineBudget for NeverExpires {
+        fn check(&mut self, _point: BudgetPoint) -> Result<(), SanitizeFailure> {
+            Ok(())
+        }
+    }
+
+    struct ExpireAt {
+        point: BudgetPoint,
+        remaining: usize,
+    }
+
+    impl DeadlineBudget for ExpireAt {
+        fn check(&mut self, point: BudgetPoint) -> Result<(), SanitizeFailure> {
+            if point == self.point {
+                self.remaining = self.remaining.saturating_sub(1);
+                if self.remaining == 0 {
+                    return Err(SanitizeFailure::Deadline);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn empty_resolver() -> EmptyResolver {
+        EmptyResolver {
+            base: EpubPath::new("EPUB/chapter.xhtml").unwrap_or_else(|_| std::process::abort()),
+        }
+    }
+
+    #[test]
+    fn parse_sink_rejects_single_chunk_fanout_and_depth_during_construction() {
+        let fanout = format!("<body>{}</body>", "<i></i>".repeat(32));
+        let depth = format!("{}x{}", "<i>".repeat(32), "</i>".repeat(32));
+
+        let fanout_result = parse_incrementally(
+            &fanout,
+            SanitizerLimits {
+                max_nodes: 8,
+                ..SanitizerLimits::default()
+            },
+            &mut NeverExpires,
+        );
+        let depth_result = parse_incrementally(
+            &depth,
+            SanitizerLimits {
+                max_dom_depth: 8,
+                ..SanitizerLimits::default()
+            },
+            &mut NeverExpires,
+        );
+
+        assert!(matches!(fanout_result, Err(SanitizeFailure::Nodes)));
+        assert!(matches!(depth_result, Err(SanitizeFailure::Depth)));
+    }
+
     #[test]
     fn fails_closed_when_deadline_expires_between_parser_chunks() {
         let resolver = EmptyResolver {
             base: EpubPath::new("EPUB/chapter.xhtml").unwrap_or_else(|_| std::process::abort()),
         };
         let html = format!("<p>{}</p>", "text".repeat(4_096));
-        let mut checks = 0_usize;
-
-        let output = ContentSanitizer::default().transform_with_expiry(&html, &resolver, || {
-            checks = checks.saturating_add(1);
-            checks >= 2
-        });
+        let output = ContentSanitizer::transform_with_budget(
+            &html,
+            &resolver,
+            SanitizerLimits::default(),
+            ExpireAt {
+                point: BudgetPoint::Parse,
+                remaining: 2,
+            },
+        );
 
         assert!(output.html.is_empty());
         assert_eq!(output.warnings, ["sanitization failed: deadline exceeded"]);
-        assert_eq!(checks, 2, "expiry must occur after one parser chunk");
+    }
+
+    #[test]
+    fn deadline_is_enforced_inside_attributes_text_css_dismantle_and_final_check() {
+        let cases = [
+            (BudgetPoint::Attribute, "<p title=\"value\">safe</p>"),
+            (BudgetPoint::Escape, "<p>safe text</p>"),
+            (BudgetPoint::Css, "<p style=\"color:red\">safe</p>"),
+            (BudgetPoint::Dismantle, "<p>safe</p>"),
+            (BudgetPoint::Final, "<p>safe</p>"),
+        ];
+
+        for (point, html) in cases {
+            let output = ContentSanitizer::transform_with_budget(
+                html,
+                &empty_resolver(),
+                SanitizerLimits::default(),
+                ExpireAt {
+                    point,
+                    remaining: 1,
+                },
+            );
+            assert!(
+                output.html.is_empty(),
+                "partial output escaped at {point:?}"
+            );
+            assert_eq!(output.warnings, ["sanitization failed: deadline exceeded"]);
+        }
     }
 }

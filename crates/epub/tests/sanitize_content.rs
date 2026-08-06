@@ -39,7 +39,7 @@ fn trusted_path(value: &str) -> EpubPath {
 }
 
 fn sanitize(html: &str) -> folioharbor_epub::SanitizedContent {
-    ContentSanitizer::default().transform(html, &resolver())
+    ContentSanitizer::transform(html, &resolver())
 }
 
 #[test]
@@ -153,7 +153,7 @@ fn fails_closed_when_sanitization_limits_are_exceeded() {
     ];
 
     for (expected_warning, html, limits) in cases {
-        let output = ContentSanitizer::new(limits).transform(&html, &resolver());
+        let output = ContentSanitizer::transform_with_limits(&html, &resolver(), limits);
         assert!(
             output.html.is_empty(),
             "partial output escaped for {expected_warning}"
@@ -191,16 +191,53 @@ fn resolver_only_receives_canonical_non_traversing_paths() {
         base: trusted_path("EPUB/text/chapter.xhtml"),
         calls: RefCell::new(Vec::new()),
     };
-    let html = r#"<img src="../../secret"/><img src="safe/../secret"/><img src="%2e%2e/secret"/><img src="%2E%2E%2fsecret"/><img src="images/cover.png#note"/>"#;
+    let html = r#"<img src="../../secret"/><img src="safe/../secret"/><img src="%2e%2e/secret"/><img src="%2E%2E%2fsecret"/><img src="%252e%252e%252fsecret"/><img src="%25252e%25252e%25252fsecret"/><img src="%255csecret"/><img src="%2500secret"/><img src="%68%74%74%70%3a%2f%2fevil.test/x"/><img src="images/cover%20art.png#note"/>"#;
 
-    let output = ContentSanitizer::default().transform(html, &resolver);
+    let output = ContentSanitizer::transform(html, &resolver);
 
     assert_eq!(
         resolver.calls.borrow().as_slice(),
-        &[trusted_path("EPUB/text/images/cover.png")]
+        &[trusted_path("EPUB/text/images/cover art.png")]
     );
     assert!(output.html.contains("resource:asset_safe#note"));
     assert!(!output.html.contains("secret"));
+}
+
+#[test]
+fn deeply_nested_css_functions_are_rejected_without_recursion() {
+    let css = format!("color:{}red{}", "calc(".repeat(10_000), ")".repeat(10_000));
+    let output = ContentSanitizer::transform_with_limits(
+        &format!("<p style=\"{css}\">safe</p>"),
+        &resolver(),
+        SanitizerLimits {
+            deadline: Duration::from_secs(30),
+            ..SanitizerLimits::default()
+        },
+    );
+
+    assert!(output.html.contains("safe"));
+    assert!(!output.html.contains("calc("));
+}
+
+#[test]
+fn oversized_css_intermediate_fails_closed() {
+    let css = format!("color:{}", "a".repeat(8_192));
+    let output = ContentSanitizer::transform_with_limits(
+        &format!("<p style=\"{css}\">safe</p>"),
+        &resolver(),
+        SanitizerLimits {
+            max_css_bytes: 128,
+            ..SanitizerLimits::default()
+        },
+    );
+
+    assert!(output.html.is_empty());
+    assert!(
+        output
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("output"))
+    );
 }
 
 proptest! {
