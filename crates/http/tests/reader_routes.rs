@@ -58,8 +58,8 @@ use secrecy::{ExposeSecret as _, SecretString};
 use std::{
     collections::HashMap,
     io::{Cursor, Write},
-    sync::Arc,
     sync::atomic::{AtomicUsize, Ordering},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tower::ServiceExt as _;
@@ -79,6 +79,7 @@ struct DownloadFixture {
     blobs: LocalBlobStore,
     _root: Arc<tempfile::TempDir>,
     reads: Arc<AtomicUsize>,
+    starts: Arc<Mutex<Vec<DownloadRange>>>,
 }
 
 #[async_trait]
@@ -107,8 +108,12 @@ impl DownloadRepository for DownloadFixture {
         _: Actor,
         _: ItemId,
         _: RequestId,
-        _: DownloadRange,
+        range: DownloadRange,
     ) -> Result<bool, DownloadRepositoryError> {
+        self.starts
+            .lock()
+            .expect("download starts lock")
+            .push(range);
         Ok(true)
     }
 }
@@ -430,10 +435,16 @@ fn app() -> (axum::Router, ItemId, ManifestationId) {
     (router(state), item, manifestation)
 }
 
-fn download_app() -> (axum::Router, ItemId, Arc<AtomicUsize>) {
+fn download_app() -> (
+    axum::Router,
+    ItemId,
+    Arc<AtomicUsize>,
+    Arc<Mutex<Vec<DownloadRange>>>,
+) {
     let allowed = UserId::new();
     let item = ItemId::new();
     let reads = Arc::new(AtomicUsize::new(0));
+    let starts = Arc::new(Mutex::new(Vec::new()));
     let root = Arc::new(tempfile::tempdir().expect("download blob root"));
     let payload = (0_u8..=250)
         .cycle()
@@ -457,6 +468,7 @@ fn download_app() -> (axum::Router, ItemId, Arc<AtomicUsize>) {
         blobs: LocalBlobStore::new(root.path()),
         _root: root,
         reads: reads.clone(),
+        starts: starts.clone(),
     };
     let identity = Arc::new(Identity(HashMap::from([
         ("allowed".to_owned(), allowed),
@@ -480,12 +492,12 @@ fn download_app() -> (axum::Router, ItemId, Arc<AtomicUsize>) {
         Arc::new(DownloadService::new(fixture.clone())),
         Arc::new(fixture),
     );
-    (router(state), item, reads)
+    (router(state), item, reads, starts)
 }
 
 #[tokio::test]
 async fn download_routes_stream_ranges_head_conditionals_and_cancel_on_drop() {
-    let (app, item, reads) = download_app();
+    let (app, item, reads, starts) = download_app();
     let path = format!("/api/v1/items/{}/download", item.as_uuid());
     let ranged = app
         .clone()
@@ -573,6 +585,20 @@ async fn download_routes_stream_ranges_head_conditionals_and_cancel_on_drop() {
     }
 
     assert_prompt_cancellation(app, &path, &reads).await;
+    assert_eq!(
+        *starts.lock().expect("download starts lock"),
+        [
+            DownloadRange {
+                start: 65_530,
+                end: 65_550,
+            },
+            DownloadRange {
+                start: 0,
+                end: 131_088,
+            },
+        ],
+        "only successful GET responses record a download start"
+    );
 }
 
 async fn assert_prompt_cancellation(app: axum::Router, path: &str, reads: &AtomicUsize) {

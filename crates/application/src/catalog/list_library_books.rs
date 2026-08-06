@@ -43,20 +43,14 @@ pub struct BookSummary {
 pub struct ListLibraryBooks<'a, R: ?Sized, A: ?Sized> {
     repository: &'a R,
     authorization: &'a A,
-    reader_download_enabled: bool,
 }
 
 impl<'a, R: ?Sized, A: ?Sized> ListLibraryBooks<'a, R, A> {
     #[must_use]
-    pub const fn new(
-        repository: &'a R,
-        authorization: &'a A,
-        reader_download_enabled: bool,
-    ) -> Self {
+    pub const fn new(repository: &'a R, authorization: &'a A) -> Self {
         Self {
             repository,
             authorization,
-            reader_download_enabled,
         }
     }
 }
@@ -97,11 +91,10 @@ impl<R: CatalogQueryRepository + ?Sized, A: AuthorizationRepository + ?Sized>
         } else {
             None
         };
-        let capabilities = capabilities(grant.role(), self.reader_download_enabled);
         Ok(Page {
             items: rows
                 .into_iter()
-                .map(|row| summary(row, capabilities))
+                .map(|row| summary(row, grant.role()))
                 .collect(),
             next_cursor,
         })
@@ -158,16 +151,14 @@ impl CatalogApi for UnavailableCatalogApi {
 pub struct CatalogService<R, A> {
     repository: R,
     authorization: A,
-    reader_download_enabled: bool,
 }
 
 impl<R, A> CatalogService<R, A> {
     #[must_use]
-    pub const fn new(repository: R, authorization: A, reader_download_enabled: bool) -> Self {
+    pub const fn new(repository: R, authorization: A) -> Self {
         Self {
             repository,
             authorization,
-            reader_download_enabled,
         }
     }
 }
@@ -181,13 +172,9 @@ impl<R: CatalogQueryRepository, A: AuthorizationRepository> CatalogApi for Catal
         request_id: RequestId,
         page: PageRequest,
     ) -> Result<Page<BookSummary>, AppError> {
-        ListLibraryBooks::new(
-            &self.repository,
-            &self.authorization,
-            self.reader_download_enabled,
-        )
-        .execute(actor, library_id, request_id, page)
-        .await
+        ListLibraryBooks::new(&self.repository, &self.authorization)
+            .execute(actor, library_id, request_id, page)
+            .await
     }
 
     async fn get_item(
@@ -197,13 +184,9 @@ impl<R: CatalogQueryRepository, A: AuthorizationRepository> CatalogApi for Catal
         item_id: ItemId,
         request_id: RequestId,
     ) -> Result<ItemDetail, AppError> {
-        super::GetItem::new(
-            &self.repository,
-            &self.authorization,
-            self.reader_download_enabled,
-        )
-        .execute(actor, library_id, item_id, request_id)
-        .await
+        super::GetItem::new(&self.repository, &self.authorization)
+            .execute(actor, library_id, item_id, request_id)
+            .await
     }
 }
 
@@ -211,7 +194,8 @@ pub(crate) fn capabilities(role: RoleCode, reader_download_enabled: bool) -> (bo
     (true, role != RoleCode::Reader || reader_download_enabled)
 }
 
-fn summary(row: VisibleCatalogItem, (can_read, can_download): (bool, bool)) -> BookSummary {
+fn summary(row: VisibleCatalogItem, role: RoleCode) -> BookSummary {
+    let (can_read, can_download) = capabilities(role, row.reader_download_enabled);
     BookSummary {
         item_id: row.item_id,
         primary_title: row.primary_title,

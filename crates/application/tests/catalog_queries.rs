@@ -101,6 +101,7 @@ fn item(title: &str) -> VisibleCatalogItem {
         languages: vec!["en".to_owned()],
         identifiers: vec!["urn:isbn:example".to_owned()],
         media_type: "application/epub+zip".to_owned(),
+        reader_download_enabled: false,
     }
 }
 
@@ -112,7 +113,7 @@ async fn list_caps_the_page_and_returns_one_row_per_holding_with_opaque_cursor()
         rows,
         requested_limits: requested_limits.clone(),
     };
-    let service = CatalogService::new(repository, Authorized(RoleCode::Reader), false);
+    let service = CatalogService::new(repository, Authorized(RoleCode::Reader));
     let page = service
         .list_library_books(
             UserId::new(),
@@ -144,7 +145,7 @@ async fn owner_and_editor_have_equal_view_and_download_capabilities() {
             rows: vec![item("Role view")],
             requested_limits: Arc::new(Mutex::new(Vec::new())),
         };
-        let service = CatalogService::new(repository, Authorized(role), false);
+        let service = CatalogService::new(repository, Authorized(role));
         let page = service
             .list_library_books(
                 UserId::new(),
@@ -165,7 +166,7 @@ async fn malformed_cursor_is_rejected_before_querying_catalog() {
         rows: vec![item("Never queried")],
         requested_limits: Arc::new(Mutex::new(Vec::new())),
     };
-    let service = CatalogService::new(repository, Authorized(RoleCode::Reader), false);
+    let service = CatalogService::new(repository, Authorized(RoleCode::Reader));
     let error = service
         .list_library_books(
             UserId::new(),
@@ -191,15 +192,13 @@ async fn malformed_cursor_is_rejected_before_querying_catalog() {
 async fn detail_keeps_read_and_download_capabilities_independent_for_reader_setting() {
     let row = item("Visible title");
     for (reader_download_enabled, expected) in [(false, false), (true, true)] {
+        let mut projected = row.clone();
+        projected.reader_download_enabled = reader_download_enabled;
         let repository = CatalogRows {
-            rows: vec![row.clone()],
+            rows: vec![projected],
             requested_limits: Arc::new(Mutex::new(Vec::new())),
         };
-        let service = CatalogService::new(
-            repository,
-            Authorized(RoleCode::Reader),
-            reader_download_enabled,
-        );
+        let service = CatalogService::new(repository, Authorized(RoleCode::Reader));
         let detail = service
             .get_item(
                 UserId::new(),
@@ -227,8 +226,10 @@ async fn detail_etag_covers_role_membership_version_and_effective_capabilities()
         (RoleCode::Reader, 4, true),
         (RoleCode::Reader, 5, true),
     ] {
+        let mut projected = row.clone();
+        projected.reader_download_enabled = reader_download_enabled;
         let repository = CatalogRows {
-            rows: vec![row.clone()],
+            rows: vec![projected],
             requested_limits: Arc::new(Mutex::new(Vec::new())),
         };
         let service = CatalogService::new(
@@ -237,7 +238,6 @@ async fn detail_etag_covers_role_membership_version_and_effective_capabilities()
                 role,
                 membership_version,
             },
-            reader_download_enabled,
         );
         let detail = service
             .get_item(

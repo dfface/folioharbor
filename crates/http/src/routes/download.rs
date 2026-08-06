@@ -108,6 +108,17 @@ async fn download(
     let Ok(range) = resolve_range(requested, grant.byte_size()) else {
         return range_not_satisfiable(grant.byte_size(), grant.etag());
     };
+    if head {
+        return success_response(&grant, requested.is_some(), range, None);
+    }
+    let Some(blobs) = state.download_blobs else {
+        return problem_response(
+            &AppError::DependencyUnavailable {
+                code: "blob_store_unavailable",
+            },
+            &context,
+        );
+    };
     if let Err(error) = state
         .download_api
         .record_start(
@@ -123,20 +134,7 @@ async fn download(
     {
         return problem_response(&error, &context);
     }
-    let blobs = if head {
-        None
-    } else {
-        let Some(blobs) = state.download_blobs else {
-            return problem_response(
-                &AppError::DependencyUnavailable {
-                    code: "blob_store_unavailable",
-                },
-                &context,
-            );
-        };
-        Some(blobs)
-    };
-    success_response(&grant, requested.is_some(), range, blobs)
+    success_response(&grant, requested.is_some(), range, Some(blobs))
 }
 
 fn success_response(

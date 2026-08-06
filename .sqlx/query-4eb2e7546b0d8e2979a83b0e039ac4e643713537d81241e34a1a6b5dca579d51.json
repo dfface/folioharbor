@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT visible.holding_id AS \"holding_id!\",visible.item_id AS \"item_id!\",visible.package_id AS \"package_id!\",visible.manifestation_id AS \"manifestation_id!\",visible.primary_title AS \"primary_title!\",visible.authors AS \"authors!\",visible.languages AS \"languages!\",visible.identifiers AS \"identifiers!\",visible.media_type AS \"media_type!\" FROM folioharbor.holdings holding CROSS JOIN LATERAL (SELECT candidate.item_id FROM folioharbor.items candidate WHERE candidate.holding_id=holding.holding_id AND candidate.state='active' ORDER BY candidate.created_at DESC,candidate.item_id DESC LIMIT 1) selected CROSS JOIN LATERAL folioharbor.catalog_item_projection_visible($1,$2,selected.item_id,$3) visible WHERE holding.library_id=$2 AND holding.state='active' AND holding.holding_id<$4 ORDER BY holding.holding_id DESC LIMIT $5",
+  "query": "SELECT visible.holding_id AS \"holding_id!\",visible.item_id AS \"item_id!\",visible.package_id AS \"package_id!\",visible.manifestation_id AS \"manifestation_id!\",visible.primary_title AS \"primary_title!\",visible.authors AS \"authors!\",visible.languages AS \"languages!\",visible.identifiers AS \"identifiers!\",visible.media_type AS \"media_type!\",visible.reader_download_enabled AS \"reader_download_enabled!\" FROM folioharbor.catalog_item_projection_download_visible($1,$2,$3,$4) visible",
   "describe": {
     "columns": [
       {
@@ -47,13 +47,17 @@
         "ordinal": 8,
         "name": "media_type!",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "reader_download_enabled!",
+        "type_info": "Bool"
       }
     ],
     "parameters": {
       "Left": [
         "Uuid",
         "Uuid",
-        "Int8",
         "Uuid",
         "Int8"
       ]
@@ -67,8 +71,9 @@
       null,
       null,
       null,
+      null,
       null
     ]
   },
-  "hash": "9c289bfe7841aefe008d0650bc5327e1ba782fd14e24c324fa4a41fe0b48db6b"
+  "hash": "4eb2e7546b0d8e2979a83b0e039ac4e643713537d81241e34a1a6b5dca579d51"
 }

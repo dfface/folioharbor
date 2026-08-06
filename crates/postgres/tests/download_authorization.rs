@@ -65,6 +65,28 @@ async fn download_matrix_setting_and_audit_are_enforced_in_postgres() -> anyhow:
             .await?,
         DownloadAuthorization::NotFound
     );
+    assert_eq!(
+        repository
+            .authorize_download(actor(outsider), item, RequestId::new())
+            .await?,
+        DownloadAuthorization::NotFound
+    );
+    assert_eq!(
+        repository
+            .authorize_download(actor(outsider), ItemId::new(), RequestId::new())
+            .await?,
+        DownloadAuthorization::NotFound
+    );
+    let outsider_denials: Vec<(uuid::Uuid, uuid::Uuid, serde_json::Value)> = sqlx::query_as(
+        "SELECT library_id,resource_id,metadata FROM folioharbor.audit_events WHERE action_code='item.download' AND decision='denied' AND actor_id=$1",
+    )
+    .bind(outsider.as_uuid())
+    .fetch_all(&pools.owner)
+    .await?;
+    assert_eq!(
+        outsider_denials,
+        vec![(library.as_uuid(), item.as_uuid(), serde_json::json!({}))]
+    );
     sqlx::query(
         "UPDATE folioharbor.libraries SET reader_download_enabled=true WHERE library_id=$1",
     )

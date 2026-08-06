@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT visible.holding_id AS \"holding_id!\",visible.item_id AS \"item_id!\",visible.package_id AS \"package_id!\",visible.manifestation_id AS \"manifestation_id!\",visible.primary_title AS \"primary_title!\",visible.authors AS \"authors!\",visible.languages AS \"languages!\",visible.identifiers AS \"identifiers!\",visible.media_type AS \"media_type!\" FROM folioharbor.catalog_item_projection_visible($1,$2,$3,$4) visible",
+  "query": "SELECT visible.holding_id AS \"holding_id!\",visible.item_id AS \"item_id!\",visible.package_id AS \"package_id!\",visible.manifestation_id AS \"manifestation_id!\",visible.primary_title AS \"primary_title!\",visible.authors AS \"authors!\",visible.languages AS \"languages!\",visible.identifiers AS \"identifiers!\",visible.media_type AS \"media_type!\",visible.reader_download_enabled AS \"reader_download_enabled!\" FROM folioharbor.holdings holding CROSS JOIN LATERAL (SELECT candidate.item_id FROM folioharbor.items candidate WHERE candidate.holding_id=holding.holding_id AND candidate.state='active' ORDER BY candidate.created_at DESC,candidate.item_id DESC LIMIT 1) selected CROSS JOIN LATERAL folioharbor.catalog_item_projection_download_visible($1,$2,selected.item_id,$3) visible WHERE holding.library_id=$2 AND holding.state='active' ORDER BY holding.holding_id DESC LIMIT $4",
   "describe": {
     "columns": [
       {
@@ -47,13 +47,18 @@
         "ordinal": 8,
         "name": "media_type!",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "reader_download_enabled!",
+        "type_info": "Bool"
       }
     ],
     "parameters": {
       "Left": [
         "Uuid",
         "Uuid",
-        "Uuid",
+        "Int8",
         "Int8"
       ]
     },
@@ -66,8 +71,9 @@
       null,
       null,
       null,
+      null,
       null
     ]
   },
-  "hash": "9b1234fa61ef3f3f325e8546caac00a9f4b56eeadd8b1b61c82f233a93913828"
+  "hash": "15302d0fad0b1d8cf612fd1d33d761646b7fabcabcf1f45ba79dedb0d7911b4b"
 }

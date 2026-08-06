@@ -85,6 +85,7 @@ pub struct VisibleCatalogItem {
     pub languages: Vec<String>,
     pub identifiers: Vec<String>,
     pub media_type: String,
+    pub reader_download_enabled: bool,
 }
 
 #[async_trait]

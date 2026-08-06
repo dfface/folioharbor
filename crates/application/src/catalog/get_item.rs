@@ -25,20 +25,14 @@ pub struct ItemDetail {
 pub struct GetItem<'a, R: ?Sized, A: ?Sized> {
     repository: &'a R,
     authorization: &'a A,
-    reader_download_enabled: bool,
 }
 
 impl<'a, R: ?Sized, A: ?Sized> GetItem<'a, R, A> {
     #[must_use]
-    pub const fn new(
-        repository: &'a R,
-        authorization: &'a A,
-        reader_download_enabled: bool,
-    ) -> Self {
+    pub const fn new(repository: &'a R, authorization: &'a A) -> Self {
         Self {
             repository,
             authorization,
-            reader_download_enabled,
         }
     }
 }
@@ -68,12 +62,13 @@ impl<R: CatalogQueryRepository + ?Sized, A: AuthorizationRepository + ?Sized> Ge
             .ok_or(AppError::NotFound {
                 code: "item_not_found",
             })?;
+        let reader_download_enabled = row.reader_download_enabled;
         Ok(detail(
             row,
             grant.role(),
             grant.membership_version(),
-            capabilities(grant.role(), self.reader_download_enabled),
-            self.reader_download_enabled,
+            capabilities(grant.role(), reader_download_enabled),
+            reader_download_enabled,
         ))
     }
 }

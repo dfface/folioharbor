@@ -786,8 +786,9 @@ Task 15 database-boundary quota hardening owns additive migration
 `0019_reading_mutation_quota_boundary.sql`. It makes replay records immutable, keeps exact usage
 through insert/delete triggers (including cascades and older direct writers), and atomically rejects
 the 10,000-row/64 MiB limits. Task 16 adds migration 0020 for the download authorization
-projection, per-library reader-download setting, and audit boundary. The remaining planned
-migrations are therefore numbered 0021 through 0023.
+projection, per-library reader-download setting, and audit boundary. Its review hardening adds
+migration 0021 for authoritative catalog capability projection and anti-enumerating denial audit
+semantics. The remaining planned migrations are therefore numbered 0022 through 0024.
 
 - [ ] **Step 1: Write failing list/detail tests**
 
@@ -995,6 +996,8 @@ git commit -m "feat: synchronize versioned reading progress"
 - Create: `crates/application/src/catalog/download_item.rs`
 - Create: `crates/http/src/routes/download.rs`
 - Create: `crates/http/tests/download_routes.rs`
+- Create: `migrations/0020_download_authorization.sql`
+- Create: `migrations/0021_download_semantics.sql`
 - Modify: `crates/application/src/authorization.rs`
 - Modify: `crates/storage-local/src/lib.rs`
 - Modify: `openapi/folioharbor-v1.yaml`
@@ -1025,7 +1028,7 @@ Record allowed download start with actor/library/item/request and byte range; re
 Run route/range tests using a file larger than the response buffer, authorization matrix, cancellation test, and workspace gate. Commit:
 
 ```bash
-git add crates/application crates/storage-local crates/http openapi
+git add migrations/0020_download_authorization.sql migrations/0021_download_semantics.sql crates/application crates/postgres crates/storage-local crates/http apps/api openapi
 git commit -m "feat: stream authorized original EPUB downloads"
 ```
 
@@ -1033,7 +1036,7 @@ git commit -m "feat: stream authorized original EPUB downloads"
 
 **Files:**
 
-- Create: `migrations/0021_outbox.sql`
+- Create: `migrations/0022_outbox.sql`
 - Create: `crates/application/src/mail/{mod,enqueue,deliver}.rs`
 - Create: `crates/application/src/ports/mail_repository.rs`
 - Create: `crates/postgres/src/mail.rs`
@@ -1069,7 +1072,7 @@ Render one public, locale-negotiated explanation per stable problem code without
 Run against a local SMTP capture service in integration tests, inspect captured text/HTML, force retry/failure, scan logs for test token values, then run workspace gate. Commit:
 
 ```bash
-git add migrations/0021_outbox.sql crates/application crates/postgres crates/http apps/worker deploy
+git add migrations/0022_outbox.sql crates/application crates/postgres crates/http apps/worker deploy
 git commit -m "feat: deliver transactional account and invitation email"
 ```
 
@@ -1077,7 +1080,7 @@ git commit -m "feat: deliver transactional account and invitation email"
 
 **Files:**
 
-- Create: `migrations/0022_deletion_and_gc.sql`
+- Create: `migrations/0023_deletion_and_gc.sql`
 - Create: `crates/domain/src/catalog/lifecycle.rs`
 - Create: `crates/application/src/catalog/{delete_item,restore_item,garbage_collect}.rs`
 - Create: `crates/application/tests/item_lifecycle.rs`
@@ -1113,7 +1116,7 @@ Select a limited `SKIP LOCKED` batch, recheck authoritative references in the tr
 Run shared-Blob deletion, concurrent import-versus-GC, storage failure/retry, progress preservation, quota release, and audit retention tests. Run workspace gate. Commit:
 
 ```bash
-git add migrations/0022_deletion_and_gc.sql crates/domain crates/application crates/postgres crates/http apps/worker openapi
+git add migrations/0023_deletion_and_gc.sql crates/domain crates/application crates/postgres crates/http apps/worker openapi
 git commit -m "feat: add recoverable item deletion and safe blob GC"
 ```
 
@@ -1267,7 +1270,7 @@ git commit -m "feat: add secure EPUB reader and progress sync"
 
 **Files:**
 
-- Create: `migrations/0023_operations.sql`
+- Create: `migrations/0024_operations.sql`
 - Create: `crates/application/src/operations/{mod,health,bootstrap_admin,consistency_check}.rs`
 - Create: `crates/postgres/src/operations.rs`
 - Create: `crates/http/src/routes/health.rs`
@@ -1309,7 +1312,7 @@ Migration completes before API/Worker; runtime processes use distinct role secre
 Document PostgreSQL plus Blob volume as one business backup set, schema version and Blob watermark recording, restore ordering, and post-restore `storage check` for missing Blob, orphan location, and hash mismatch. Do not claim crash-consistent cross-volume snapshots unless the operator provides them. Run CLI/health/Compose config tests and workspace/Web gates. Commit:
 
 ```bash
-git add migrations/0023_operations.sql crates apps deploy docs/operations
+git add migrations/0024_operations.sql crates apps deploy docs/operations
 git commit -m "feat: add deployment operations and observability"
 ```
 
