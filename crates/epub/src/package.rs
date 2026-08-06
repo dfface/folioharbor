@@ -375,21 +375,24 @@ fn build_publication(
         .values()
         .find(|item| has_property(&item.properties, "cover-image"))
         .map(|item| item.href.clone());
-    let toc = if let Some(nav) = document
+    let mut navigation_items = document
         .manifest
         .values()
-        .find(|item| has_property(&item.properties, "nav"))
-    {
-        navigation::parse(
-            archive,
-            archive
-                .get(&strip_fragment(&nav.href)?)
-                .ok_or_else(|| error(EpubErrorCode::InvalidNavigation))?,
-            &nav.href,
-        )?
-    } else {
-        Vec::new()
-    };
+        .filter(|item| has_property(&item.properties, "nav"));
+    let nav = navigation_items
+        .next()
+        .filter(|item| item.media_type == "application/xhtml+xml")
+        .ok_or_else(|| error(EpubErrorCode::InvalidNavigation))?;
+    if navigation_items.next().is_some() {
+        return Err(error(EpubErrorCode::InvalidNavigation));
+    }
+    let toc = navigation::parse(
+        archive,
+        archive
+            .get(&strip_fragment(&nav.href)?)
+            .ok_or_else(|| error(EpubErrorCode::InvalidNavigation))?,
+        &nav.href,
+    )?;
     Ok(ParsedPublication {
         metadata: document.metadata,
         spine,

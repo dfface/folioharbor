@@ -395,6 +395,55 @@ fn requires_valid_nonempty_navigation_with_existing_internal_targets() -> anyhow
 }
 
 #[test]
+fn requires_exactly_one_readable_navigation_document() -> anyhow::Result<()> {
+    let missing = epub(&[
+        FixtureEntry {
+            path: "META-INF/container.xml",
+            bytes: standard_container(),
+            compression: Stored,
+        },
+        FixtureEntry {
+            path: "book.opf",
+            bytes: minimal_opf(),
+            compression: Stored,
+        },
+        FixtureEntry {
+            path: "chapter.xhtml",
+            bytes: b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>ok</body></html>",
+            compression: Stored,
+        },
+    ])?;
+    assert_eq!(
+        inspect(&missing, ParserLimits::default())?,
+        EpubErrorCode::InvalidNavigation
+    );
+
+    let multiple = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Two navs</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="nav-one" href="nav-one.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="nav-two" href="nav-two.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine><itemref idref="chapter"/></spine></package>"#, compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>ok</body></html>", compression: Stored },
+        FixtureEntry { path: "nav-one.xhtml", bytes: valid_nav(), compression: Stored },
+        FixtureEntry { path: "nav-two.xhtml", bytes: valid_nav(), compression: Stored },
+    ])?;
+    assert_eq!(
+        inspect(&multiple, ParserLimits::default())?,
+        EpubErrorCode::InvalidNavigation
+    );
+
+    let unreadable = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Unreadable nav</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="text/html" properties="nav"/></manifest><spine><itemref idref="chapter"/></spine></package>"#, compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>ok</body></html>", compression: Stored },
+        FixtureEntry { path: "nav.xhtml", bytes: valid_nav(), compression: Stored },
+    ])?;
+    assert_eq!(
+        inspect(&unreadable, ParserLimits::default())?,
+        EpubErrorCode::InvalidNavigation
+    );
+    Ok(())
+}
+
+#[test]
 fn spine_requires_readable_content_or_a_readable_fallback() -> anyhow::Result<()> {
     let image_only = epub(&[
         FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
@@ -408,9 +457,10 @@ fn spine_requires_readable_content_or_a_readable_fallback() -> anyhow::Result<()
 
     let fallback = epub(&[
         FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
-        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Fallback spine</dc:title></metadata><manifest><item id="image" href="cover.png" media-type="image/png" fallback="chapter"/><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="image"/></spine></package>"#, compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Fallback spine</dc:title></metadata><manifest><item id="image" href="cover.png" media-type="image/png" fallback="chapter"/><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine><itemref idref="image"/></spine></package>"#, compression: Stored },
         FixtureEntry { path: "cover.png", bytes: b"png", compression: Stored },
         FixtureEntry { path: "chapter.xhtml", bytes: b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>ok</body></html>", compression: Stored },
+        FixtureEntry { path: "nav.xhtml", bytes: valid_nav(), compression: Stored },
     ])?;
     let publication = EpubParser::inspect(&mut Cursor::new(fallback), ParserLimits::default())?;
     assert_eq!(publication.spine[0].href.as_str(), "chapter.xhtml");
@@ -476,4 +526,8 @@ fn minimal_opf() -> &'static [u8] {
 
 fn nav_opf() -> &'static [u8] {
     br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Book</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine><itemref idref="chapter"/></spine></package>"#
+}
+
+fn valid_nav() -> &'static [u8] {
+    br#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><a href="chapter.xhtml#start">Chapter</a></nav></body></html>"#
 }
