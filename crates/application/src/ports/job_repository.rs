@@ -21,10 +21,11 @@ pub struct JobRepositoryError;
 
 #[async_trait]
 pub trait JobRepository: Send + Sync {
+    async fn ensure_cleanup_jobs(&self, now: OffsetDateTime) -> Result<(), JobRepositoryError>;
     async fn enqueue(
         &self,
         id: JobId,
-        library: LibraryId,
+        library: Option<LibraryId>,
         kind: JobKind,
         input: JobInput,
         idempotency_key: &str,
@@ -54,6 +55,14 @@ pub trait JobRepository: Send + Sync {
         summary: &str,
     ) -> Result<bool, JobRepositoryError>;
     async fn fail(
+        &self,
+        id: JobId,
+        owner: &str,
+        now: OffsetDateTime,
+        code: &str,
+        summary: &str,
+    ) -> Result<bool, JobRepositoryError>;
+    async fn operator_required(
         &self,
         id: JobId,
         owner: &str,

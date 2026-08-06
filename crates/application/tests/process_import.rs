@@ -173,7 +173,7 @@ fn work(upload_id: UploadId, library_id: LibraryId) -> ImportWork {
 fn leased(upload_id: UploadId, library_id: LibraryId) -> LeasedJob {
     LeasedJob {
         job_id: JobId::new(),
-        library_id,
+        library_id: Some(library_id),
         kind: JobKind::ImportEpub,
         input: JobInput::upload_v1(upload_id.as_uuid().to_string()),
         attempt: 1,

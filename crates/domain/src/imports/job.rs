@@ -6,6 +6,9 @@ use crate::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobKind {
     ImportEpub,
+    ExpireUploadsAndReservations,
+    PurgeFailedUploads,
+    CollectBlobsLater,
 }
 
 impl JobKind {
@@ -13,11 +16,20 @@ impl JobKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ImportEpub => "import_epub",
+            Self::ExpireUploadsAndReservations => "expire_uploads_and_reservations",
+            Self::PurgeFailedUploads => "purge_failed_uploads",
+            Self::CollectBlobsLater => "collect_blobs_later",
         }
     }
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        (value == "import_epub").then_some(Self::ImportEpub)
+        match value {
+            "import_epub" => Some(Self::ImportEpub),
+            "expire_uploads_and_reservations" => Some(Self::ExpireUploadsAndReservations),
+            "purge_failed_uploads" => Some(Self::PurgeFailedUploads),
+            "collect_blobs_later" => Some(Self::CollectBlobsLater),
+            _ => None,
+        }
     }
 }
 
@@ -28,6 +40,7 @@ pub enum JobState {
     RetryWait,
     Succeeded,
     Failed,
+    OperatorRequired,
 }
 
 impl JobState {
@@ -39,30 +52,35 @@ impl JobState {
             Self::RetryWait => "retry_wait",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
+            Self::OperatorRequired => "operator_required",
         }
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JobInput {
-    pub version: u16,
-    pub upload_id: String,
+pub enum JobInput {
+    ImportEpubV1 { upload_id: String },
+    CleanupV1,
 }
 
 impl JobInput {
     #[must_use]
     pub fn upload_v1(upload_id: impl Into<String>) -> Self {
-        Self {
-            version: 1,
+        Self::ImportEpubV1 {
             upload_id: upload_id.into(),
         }
+    }
+
+    #[must_use]
+    pub fn cleanup_v1() -> Self {
+        Self::CleanupV1
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LeasedJob {
     pub job_id: JobId,
-    pub library_id: LibraryId,
+    pub library_id: Option<LibraryId>,
     pub kind: JobKind,
     pub input: JobInput,
     pub attempt: u32,

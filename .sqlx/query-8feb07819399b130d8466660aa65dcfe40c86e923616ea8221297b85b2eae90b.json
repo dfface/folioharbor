@@ -1,18 +1,18 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT folioharbor.import_schedule_failed_purge_worker($1,$2,$3) AS \"scheduled!\"",
+  "query": "SELECT folioharbor.import_release_failed_purge_worker($1,$2,$3) AS \"released!\"",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "scheduled!",
+        "name": "released!",
         "type_info": "Bool"
       }
     ],
     "parameters": {
       "Left": [
         "Uuid",
-        "Uuid",
+        "Text",
         "Timestamptz"
       ]
     },
@@ -20,5 +20,5 @@
       null
     ]
   },
-  "hash": "743daabe3d6c907321259a6fd7d1b811dc7f60d15547d482de74c6628a768868"
+  "hash": "8feb07819399b130d8466660aa65dcfe40c86e923616ea8221297b85b2eae90b"
 }

@@ -214,7 +214,7 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
         PgJobRepository::new(pools.api.clone())
             .enqueue(
                 JobId::new(),
-                library,
+                Some(library),
                 JobKind::ImportEpub,
                 JobInput::upload_v1(upload.as_uuid().to_string()),
                 "api-must-not-enqueue",

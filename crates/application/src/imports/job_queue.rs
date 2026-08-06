@@ -21,6 +21,13 @@ impl<R> JobQueue<R> {
     }
 }
 impl<R: JobRepository> JobQueue<R> {
+    /// Ensures the closed set of singleton cleanup jobs exists.
+    ///
+    /// # Errors
+    /// Returns a repository error when durable persistence is unavailable.
+    pub async fn ensure_cleanup_jobs(&self, now: OffsetDateTime) -> Result<(), JobRepositoryError> {
+        self.repository.ensure_cleanup_jobs(now).await
+    }
     /// Enqueues idempotently.
     ///
     /// # Errors
@@ -28,7 +35,7 @@ impl<R: JobRepository> JobQueue<R> {
     pub async fn enqueue(
         &self,
         id: JobId,
-        library: LibraryId,
+        library: Option<LibraryId>,
         kind: JobKind,
         input: JobInput,
         key: &str,
@@ -100,5 +107,21 @@ impl<R: JobRepository> JobQueue<R> {
         summary: &str,
     ) -> Result<bool, JobRepositoryError> {
         self.repository.fail(id, owner, now, code, summary).await
+    }
+    /// Pauses an active lease until an operator resolves the durable cause.
+    ///
+    /// # Errors
+    /// Returns a repository error when durable persistence is unavailable.
+    pub async fn operator_required(
+        &self,
+        id: JobId,
+        owner: &str,
+        now: OffsetDateTime,
+        code: &str,
+        summary: &str,
+    ) -> Result<bool, JobRepositoryError> {
+        self.repository
+            .operator_required(id, owner, now, code, summary)
+            .await
     }
 }

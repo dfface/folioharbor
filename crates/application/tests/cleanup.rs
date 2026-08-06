@@ -145,3 +145,24 @@ async fn failed_purge_deletes_only_owned_bytes_and_completes_every_durable_claim
         vec![owned, shared]
     );
 }
+
+#[tokio::test]
+async fn cleanup_job_resumes_one_persisted_cutoff_and_advances_only_after_a_stable_pass() {
+    let now = OffsetDateTime::from_unix_timestamp(1_700_000_100).expect("fixture time");
+    let repository = Arc::new(CleanupRepo {
+        claims: Mutex::new(Vec::new()),
+        completed: Mutex::new(Vec::new()),
+    });
+    let cleanup = CleanupImports::new(repository, Arc::new(Blobs::default()));
+
+    let outcome = cleanup
+        .run_kind(
+            "worker-restarted",
+            CleanupJobKind::ExpireUploadsAndReservations,
+            now,
+            10,
+        )
+        .await
+        .expect("stable cleanup pass completes");
+    assert!(outcome.stable);
+}

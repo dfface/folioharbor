@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT folioharbor.job_ensure_cleanup_worker($1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "job_ensure_cleanup_worker",
+        "type_info": "Void"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "22c0bcb85b429d4e92ff6a60a37fe2f57b4617bea12ea1d47c9d8dd83039de64"
+}

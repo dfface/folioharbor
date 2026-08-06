@@ -162,10 +162,13 @@ async fn run_leased(
             )
             .await?
         }
-        Err(
-            JobFailure::Permanent { code, summary }
-            | JobFailure::OperatorRequired { code, summary },
-        ) => jobs.fail(job.job_id, &owner, now, code, &summary).await?,
+        Err(JobFailure::Permanent { code, summary }) => {
+            jobs.fail(job.job_id, &owner, now, code, &summary).await?
+        }
+        Err(JobFailure::OperatorRequired { code, summary }) => {
+            jobs.operator_required(job.job_id, &owner, now, code, &summary)
+                .await?
+        }
     };
     if !changed {
         return Err(JobRepositoryError);

@@ -6,7 +6,7 @@ use folioharbor_application::ports::{
 };
 use folioharbor_domain::{
     id::{BlobId, LibraryId, RequestId, UploadId, UserId},
-    imports::{blob::StorageKey, quota::ByteCount, upload::UploadState},
+    imports::{blob::StorageKey, job::JobKind, quota::ByteCount, upload::UploadState},
     time::OffsetDateTime,
 };
 use sqlx::PgPool;
@@ -32,6 +32,66 @@ impl PgImportCleanupRepository {
 
 #[async_trait]
 impl ImportCleanupRepository for PgImportCleanupRepository {
+    async fn begin_pass(
+        &self,
+        kind: JobKind,
+        owner: &str,
+        now: OffsetDateTime,
+        limit: u32,
+    ) -> Result<CleanupCursor, ImportCleanupRepositoryError> {
+        let mut transaction = cleanup_transaction(&self.pool, RequestId::new()).await?;
+        let cutoff = sqlx::query_scalar!(
+            "SELECT folioharbor.import_begin_cleanup_worker($1,$2,$3)",
+            kind.as_str(),
+            owner,
+            now,
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(cleanup_error)?
+        .ok_or(ImportCleanupRepositoryError)?;
+        transaction.commit().await.map_err(cleanup_error)?;
+        CleanupCursor::new(cutoff, limit).ok_or(ImportCleanupRepositoryError)
+    }
+
+    async fn complete_pass(
+        &self,
+        kind: JobKind,
+        owner: &str,
+        cursor: CleanupCursor,
+    ) -> Result<(), ImportCleanupRepositoryError> {
+        let mut transaction = cleanup_transaction(&self.pool, RequestId::new()).await?;
+        let completed = sqlx::query_scalar!(
+            r#"SELECT folioharbor.import_complete_cleanup_worker($1,$2,$3,$4) AS "completed!""#,
+            kind.as_str(),
+            owner,
+            cursor.not_after(),
+            OffsetDateTime::now_utc(),
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(cleanup_error)?;
+        transaction.commit().await.map_err(cleanup_error)?;
+        completed.then_some(()).ok_or(ImportCleanupRepositoryError)
+    }
+
+    async fn has_pending(
+        &self,
+        kind: JobKind,
+        cursor: CleanupCursor,
+    ) -> Result<bool, ImportCleanupRepositoryError> {
+        let mut transaction = cleanup_transaction(&self.pool, RequestId::new()).await?;
+        let pending = sqlx::query_scalar!(
+            r#"SELECT folioharbor.import_cleanup_pending_worker($1,$2) AS "pending!""#,
+            kind.as_str(),
+            cursor.not_after(),
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(cleanup_error)?;
+        transaction.commit().await.map_err(cleanup_error)?;
+        Ok(pending)
+    }
     async fn expire_abandoned(
         &self,
         cursor: CleanupCursor,
@@ -94,6 +154,26 @@ impl ImportCleanupRepository for PgImportCleanupRepository {
         transaction.commit().await.map_err(cleanup_error)?;
         Ok(completed)
     }
+
+    async fn release_failed_purge(
+        &self,
+        upload_id: UploadId,
+        owner: &str,
+        now: OffsetDateTime,
+    ) -> Result<(), ImportCleanupRepositoryError> {
+        let mut transaction = cleanup_transaction(&self.pool, RequestId::new()).await?;
+        let released = sqlx::query_scalar!(
+            r#"SELECT folioharbor.import_release_failed_purge_worker($1,$2,$3) AS "released!""#,
+            upload_id.as_uuid(),
+            owner,
+            now,
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(cleanup_error)?;
+        transaction.commit().await.map_err(cleanup_error)?;
+        released.then_some(()).ok_or(ImportCleanupRepositoryError)
+    }
 }
 
 async fn cleanup_transaction(
@@ -136,7 +216,7 @@ impl ImportRepository for PgImportRepository {
         .map_err(unavailable)?;
         let request = request_id.as_ulid().to_string();
         let row = sqlx::query!(
-            r#"SELECT outcome AS "outcome!",actor_id AS "actor_id!",blob_id,logical_bytes AS "logical_bytes!",storage_key,upload_state AS "upload_state!" FROM folioharbor.import_reconcile_worker($1,$2,$3,$4,$5)"#,
+            r#"SELECT outcome AS "outcome!",actor_id AS "actor_id!",blob_id,logical_bytes AS "logical_bytes!",storage_key,upload_state AS "upload_state!",error_code FROM folioharbor.import_reconcile_worker($1,$2,$3,$4,$5)"#,
             upload_id.as_uuid(),
             library_id.as_uuid(),
             BlobId::new().as_uuid(),
@@ -152,6 +232,11 @@ impl ImportRepository for PgImportRepository {
         };
         if row.outcome == "complete" {
             return Ok(ImportReconciliation::Complete);
+        }
+        if row.outcome == "failed" {
+            return Ok(ImportReconciliation::TerminalFailure {
+                code: row.error_code.unwrap_or_else(|| "import_failed".to_owned()),
+            });
         }
         Ok(ImportReconciliation::Work(ImportWork {
             upload_id,
@@ -199,44 +284,29 @@ impl ImportRepository for PgImportRepository {
         request_id: RequestId,
         now: OffsetDateTime,
     ) -> Result<(), ImportRepositoryError> {
-        for from in [work.state, UploadState::Importing] {
-            if transition_from(&self.pool, work, from, to, Some(code), request_id, now).await? {
-                if to == UploadState::Failed {
-                    schedule_failed_purge(&self.pool, work, request_id, now).await?;
-                }
-                return Ok(());
-            }
-        }
-        Err(ImportRepositoryError::InvalidState)
+        let mut transaction = self.pool.begin().await.map_err(unavailable)?;
+        PgTransactionContext::apply(
+            &mut transaction,
+            &DatabaseContext::worker(request_id, Some(work.library_id)),
+        )
+        .await
+        .map_err(unavailable)?;
+        let changed = sqlx::query_scalar!(
+            r#"SELECT folioharbor.import_record_failure_worker($1,$2,$3,$4,$5) AS "changed!""#,
+            work.upload_id.as_uuid(),
+            work.library_id.as_uuid(),
+            to.as_str(),
+            code,
+            now,
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        transaction.commit().await.map_err(unavailable)?;
+        changed
+            .then_some(())
+            .ok_or(ImportRepositoryError::InvalidState)
     }
-}
-
-async fn schedule_failed_purge(
-    pool: &PgPool,
-    work: &ImportWork,
-    request_id: RequestId,
-    now: OffsetDateTime,
-) -> Result<(), ImportRepositoryError> {
-    let mut transaction = pool.begin().await.map_err(unavailable)?;
-    PgTransactionContext::apply(
-        &mut transaction,
-        &DatabaseContext::worker(request_id, Some(work.library_id)),
-    )
-    .await
-    .map_err(unavailable)?;
-    let scheduled = sqlx::query_scalar!(
-        r#"SELECT folioharbor.import_schedule_failed_purge_worker($1,$2,$3) AS "scheduled!""#,
-        work.upload_id.as_uuid(),
-        work.library_id.as_uuid(),
-        now,
-    )
-    .fetch_one(&mut *transaction)
-    .await
-    .map_err(|error| classify(&error))?;
-    transaction.commit().await.map_err(unavailable)?;
-    scheduled
-        .then_some(())
-        .ok_or(ImportRepositoryError::InvalidState)
 }
 
 #[allow(clippy::too_many_arguments)]

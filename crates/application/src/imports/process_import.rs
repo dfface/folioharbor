@@ -3,7 +3,7 @@ use std::sync::Arc;
 use folioharbor_domain::{
     id::{JobId, RequestId, UploadId},
     imports::{
-        job::{JobKind, LeasedJob},
+        job::{JobInput, JobKind, LeasedJob},
         upload::UploadState,
     },
     time::OffsetDateTime,
@@ -93,24 +93,36 @@ impl ProcessImportJob {
     /// # Errors
     /// Returns a closed failure classification suitable for durable queue state.
     pub async fn execute(&self, job: LeasedJob) -> Result<JobOutcome, JobFailure> {
-        if job.kind != JobKind::ImportEpub || job.input.version != 1 {
+        if job.kind != JobKind::ImportEpub {
             return Err(permanent(
                 "invalid_job_input",
                 "job payload failed validation",
             ));
         }
-        let upload_uuid = uuid::Uuid::parse_str(&job.input.upload_id)
+        let JobInput::ImportEpubV1 { upload_id } = &job.input else {
+            return Err(permanent(
+                "invalid_job_input",
+                "job payload failed validation",
+            ));
+        };
+        let library_id = job
+            .library_id
+            .ok_or_else(|| permanent("invalid_job_input", "job payload failed validation"))?;
+        let upload_uuid = uuid::Uuid::parse_str(upload_id)
             .map_err(|_| permanent("invalid_job_input", "job payload failed validation"))?;
         let upload_id = UploadId::from_uuid(upload_uuid);
         let request_id = RequestId::new();
         let now = OffsetDateTime::now_utc();
         let work = match self
             .imports
-            .reconcile(upload_id, job.library_id, request_id, now)
+            .reconcile(upload_id, library_id, request_id, now)
             .await
             .map_err(|error| self.repository_failure(error, &job, now))?
         {
             ImportReconciliation::Complete => return Ok(JobOutcome::AlreadyComplete),
+            ImportReconciliation::TerminalFailure { code } => {
+                return Err(reconciled_failure(&code));
+            }
             ImportReconciliation::Work(work) => work,
         };
         let publication = match self.parser.parse(&work.storage_key).await {
@@ -229,6 +241,29 @@ impl ProcessImportJob {
                 "database schema requires operator action",
             ),
         }
+    }
+}
+
+fn reconciled_failure(code: &str) -> JobFailure {
+    match code {
+        "parser_configuration_invalid" | "storage_capacity_exhausted" | "schema_incompatible" => {
+            JobFailure::OperatorRequired {
+                code: match code {
+                    "parser_configuration_invalid" => "parser_configuration_invalid",
+                    "storage_capacity_exhausted" => "storage_capacity_exhausted",
+                    _ => "schema_incompatible",
+                },
+                summary: "persisted import requires operator action".to_owned(),
+            }
+        }
+        _ => JobFailure::Permanent {
+            code: match code {
+                "invalid_epub" => "invalid_epub",
+                "catalog_import_invalid" => "catalog_import_invalid",
+                _ => "import_failed",
+            },
+            summary: format!("persisted import failure: {code}"),
+        },
     }
 }
 

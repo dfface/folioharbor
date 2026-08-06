@@ -315,7 +315,7 @@ CREATE FUNCTION folioharbor.import_reconcile_worker(
     p_upload uuid, p_library uuid, p_blob_candidate uuid, p_request text, p_now timestamptz
 ) RETURNS TABLE(
     outcome text, actor_id uuid, blob_id uuid, logical_bytes bigint,
-    storage_key text, upload_state text
+    storage_key text, upload_state text, error_code text
 ) LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 DECLARE upload folioharbor.upload_sessions%ROWTYPE;
 DECLARE resolved_blob uuid;
@@ -329,7 +329,19 @@ BEGIN
     IF upload.upload_id IS NULL THEN RETURN; END IF;
     IF upload.state IN ('ready','duplicate') THEN
       RETURN QUERY SELECT 'complete'::text,upload.created_by,NULL::uuid,upload.received_bytes,
-        upload.storage_key,upload.state;
+        upload.storage_key,upload.state,NULL::text;
+      RETURN;
+    END IF;
+    IF upload.state='failed' AND upload.storage_key IS NOT NULL THEN
+      INSERT INTO folioharbor.failed_upload_purges(upload_id,storage_key,delete_file,eligible_at,created_at,updated_at)
+       VALUES(p_upload,upload.storage_key,upload.dedup_scope='disabled',p_now+interval '24 hours',p_now,p_now)
+       ON CONFLICT(upload_id) DO NOTHING;
+      IF upload.dedup_scope='disabled' THEN
+       UPDATE folioharbor.blob_locations location SET state='quarantined',updated_at=p_now
+        WHERE location.storage_key=upload.storage_key;
+      END IF;
+      RETURN QUERY SELECT 'failed'::text,upload.created_by,NULL::uuid,upload.received_bytes,
+        upload.storage_key,upload.state,upload.error_code;
       RETURN;
     END IF;
     IF upload.state='retry_wait' THEN
@@ -361,7 +373,7 @@ BEGIN
       WHERE folioharbor.blob_locations.blob_id=EXCLUDED.blob_id;
     IF NOT FOUND THEN RETURN; END IF;
     RETURN QUERY SELECT 'work'::text,upload.created_by,resolved_blob,upload.received_bytes,
-      upload.storage_key,upload.state;
+      upload.storage_key,upload.state,NULL::text;
 END $$;
 ALTER FUNCTION folioharbor.import_reconcile_worker(uuid,uuid,uuid,text,timestamptz) OWNER TO folioharbor_owner;
 REVOKE ALL ON FUNCTION folioharbor.import_reconcile_worker(uuid,uuid,uuid,text,timestamptz) FROM PUBLIC;

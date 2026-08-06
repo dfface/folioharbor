@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT outcome AS \"outcome!\",actor_id AS \"actor_id!\",blob_id,logical_bytes AS \"logical_bytes!\",storage_key,upload_state AS \"upload_state!\" FROM folioharbor.import_reconcile_worker($1,$2,$3,$4,$5)",
+  "query": "SELECT outcome AS \"outcome!\",actor_id AS \"actor_id!\",blob_id,logical_bytes AS \"logical_bytes!\",storage_key,upload_state AS \"upload_state!\",error_code FROM folioharbor.import_reconcile_worker($1,$2,$3,$4,$5)",
   "describe": {
     "columns": [
       {
@@ -32,6 +32,11 @@
         "ordinal": 5,
         "name": "upload_state!",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "error_code",
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -49,8 +54,9 @@
       null,
       null,
       null,
+      null,
       null
     ]
   },
-  "hash": "4caa25f3015a242b97e8a00f65b0302157425f4362333ee92f41006d17a40477"
+  "hash": "d9e3fdf04a6b54d144f2e009bc3fc15043aa754fd7b2bd284af19867197c1cab"
 }

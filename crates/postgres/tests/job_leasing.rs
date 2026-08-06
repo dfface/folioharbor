@@ -30,7 +30,7 @@ async fn concurrent_workers_never_lease_the_same_job_and_expired_leases_recover(
     repository
         .enqueue(
             job_id,
-            library,
+            Some(library),
             JobKind::ImportEpub,
             JobInput::upload_v1("018f4cf8-1f46-7cc4-98c7-4aef77db10f3"),
             "upload:one",
@@ -95,7 +95,7 @@ async fn retry_schedule_and_heartbeat_survive_repository_restart() -> anyhow::Re
     repository
         .enqueue(
             id,
-            library,
+            Some(library),
             JobKind::ImportEpub,
             JobInput::upload_v1(UploadId::new().as_uuid().to_string()),
             "restart:one",
@@ -169,6 +169,162 @@ async fn retry_schedule_and_heartbeat_survive_repository_restart() -> anyhow::Re
 }
 
 #[tokio::test]
+async fn operator_required_is_durable_distinct_and_never_leased_after_restart() -> anyhow::Result<()>
+{
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let now = OffsetDateTime::now_utc();
+    let library = LibraryId::new();
+    let user = UserId::new();
+    sqlx::query("INSERT INTO folioharbor.user_accounts(user_id,normalized_email,display_email,status,created_at,verified_at) VALUES($1,'operator@test.invalid','operator@test.invalid','verified',$2,$2)")
+        .bind(user.as_uuid()).bind(now).execute(&pools.owner).await?;
+    sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,created_at,updated_at) VALUES($1,'Operator',$2,$2)")
+        .bind(library.as_uuid()).bind(now).execute(&pools.owner).await?;
+    let id = JobId::new();
+    let repository = PgJobRepository::new(pools.worker.clone());
+    repository
+        .enqueue(
+            id,
+            Some(library),
+            JobKind::ImportEpub,
+            JobInput::upload_v1(UploadId::new().as_uuid().to_string()),
+            "operator:one",
+            now,
+        )
+        .await?;
+    assert_eq!(
+        repository
+            .lease(LeaseJobs {
+                owner: "worker-a".into(),
+                now,
+                lease_for: Duration::minutes(1),
+                limit: 1,
+                request_id: RequestId::new()
+            })
+            .await?
+            .len(),
+        1
+    );
+    assert!(
+        repository
+            .operator_required(
+                id,
+                "worker-a",
+                now + Duration::seconds(1),
+                "schema_incompatible",
+                "operator action required"
+            )
+            .await?
+    );
+
+    let persisted: (String, Option<String>) =
+        sqlx::query_as("SELECT state,error_code FROM folioharbor.background_jobs WHERE job_id=$1")
+            .bind(id.as_uuid())
+            .fetch_one(&pools.owner)
+            .await?;
+    assert_eq!(
+        persisted,
+        (
+            "operator_required".into(),
+            Some("schema_incompatible".into())
+        )
+    );
+    let restarted = PgJobRepository::new(pools.worker.clone());
+    assert!(
+        restarted
+            .lease(LeaseJobs {
+                owner: "worker-b".into(),
+                now: now + Duration::days(1),
+                lease_for: Duration::minutes(1),
+                limit: 1,
+                request_id: RequestId::new()
+            })
+            .await?
+            .is_empty()
+    );
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cleanup_job_kinds_are_global_idempotent_leasable_and_recurring() -> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let now = OffsetDateTime::now_utc();
+    let repository = PgJobRepository::new(pools.worker.clone());
+    repository.ensure_cleanup_jobs(now).await?;
+    repository.ensure_cleanup_jobs(now).await?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM folioharbor.background_jobs WHERE kind<>'import_epub'",
+    )
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_eq!(count, 3);
+    let leased = repository
+        .lease(LeaseJobs {
+            owner: "cleanup-worker".into(),
+            now,
+            lease_for: Duration::minutes(5),
+            limit: 3,
+            request_id: RequestId::new(),
+        })
+        .await?;
+    assert_eq!(leased.len(), 3);
+    assert!(
+        leased
+            .iter()
+            .all(|job| job.library_id.is_none() && matches!(job.input, JobInput::CleanupV1))
+    );
+    assert!(
+        leased
+            .iter()
+            .any(|job| job.kind == JobKind::ExpireUploadsAndReservations)
+    );
+    assert!(
+        leased
+            .iter()
+            .any(|job| job.kind == JobKind::PurgeFailedUploads)
+    );
+    assert!(
+        leased
+            .iter()
+            .any(|job| job.kind == JobKind::CollectBlobsLater)
+    );
+    for job in leased {
+        assert!(
+            repository
+                .succeed(job.job_id, "cleanup-worker", now + Duration::seconds(1))
+                .await?
+        );
+    }
+    repository
+        .ensure_cleanup_jobs(now + Duration::minutes(1))
+        .await?;
+    let recurring: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM folioharbor.background_jobs WHERE kind<>'import_epub' AND state='pending'",
+    )
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_eq!(recurring, 3);
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn stale_leases_cannot_heartbeat_succeed_retry_or_fail() -> anyhow::Result<()> {
     let database = TestPostgres::provision().await?;
     let pools = PgPools::connect_for_tests(
@@ -190,7 +346,7 @@ async fn stale_leases_cannot_heartbeat_succeed_retry_or_fail() -> anyhow::Result
         repository
             .enqueue(
                 id,
-                library,
+                Some(library),
                 JobKind::ImportEpub,
                 JobInput::upload_v1(UploadId::new().as_uuid().to_string()),
                 &format!("stale:{index}"),
@@ -278,7 +434,7 @@ async fn malformed_job_input_rolls_back_batch_and_is_quarantined_once() -> anyho
     repository
         .enqueue(
             valid,
-            library,
+            Some(library),
             JobKind::ImportEpub,
             JobInput::upload_v1(UploadId::new().as_uuid().to_string()),
             "valid-after-poison",

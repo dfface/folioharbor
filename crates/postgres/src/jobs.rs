@@ -67,11 +67,13 @@ impl PgJobRepository {
                    error_code='invalid_job_input',
                    error_summary='job payload failed validation', updated_at=$1
                WHERE state IN ('pending','retry_wait')
-                 AND (kind <> 'import_epub'
+                 AND (kind NOT IN ('import_epub','expire_uploads_and_reservations','purge_failed_uploads','collect_blobs_later')
                    OR jsonb_typeof(input) IS DISTINCT FROM 'object'
                    OR input->'version' IS DISTINCT FROM '1'::jsonb
-                   OR jsonb_typeof(input->'upload_id') IS DISTINCT FROM 'string'
-                   OR COALESCE(input->>'upload_id','') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')",
+                   OR (kind='import_epub' AND (library_id IS NULL
+                     OR jsonb_typeof(input->'upload_id') IS DISTINCT FROM 'string'
+                     OR COALESCE(input->>'upload_id','') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'))
+                   OR (kind<>'import_epub' AND (library_id IS NOT NULL OR input ? 'upload_id'))) ",
         )
         .bind(now)
         .execute(&mut *transaction)
@@ -83,18 +85,31 @@ impl PgJobRepository {
 
 #[async_trait]
 impl JobRepository for PgJobRepository {
+    async fn ensure_cleanup_jobs(&self, now: OffsetDateTime) -> Result<(), JobRepositoryError> {
+        let mut transaction = self.transaction(RequestId::new(), None).await?;
+        sqlx::query!("SELECT folioharbor.job_ensure_cleanup_worker($1)", now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(persistence_error)?;
+        transaction.commit().await.map_err(persistence_error)
+    }
     async fn enqueue(
         &self,
         id: JobId,
-        library: LibraryId,
+        library: Option<LibraryId>,
         kind: JobKind,
         input: JobInput,
         idempotency_key: &str,
         run_at: OffsetDateTime,
     ) -> Result<JobId, JobRepositoryError> {
-        let mut transaction = self.transaction(RequestId::new(), Some(library)).await?;
-        let value = serde_json::json!({"version": input.version, "upload_id": input.upload_id});
-        let stored = sqlx::query_scalar!(r#"INSERT INTO folioharbor.background_jobs(job_id,library_id,kind,state,input,idempotency_key,next_run_at,created_at,updated_at) VALUES($1,$2,$3,'pending',$4,$5,$6,$6,$6) ON CONFLICT(idempotency_key) DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key RETURNING job_id AS "job_id!""#,id.as_uuid(),library.as_uuid(),kind.as_str(),value,idempotency_key,run_at).fetch_one(&mut *transaction).await.map_err(persistence_error)?;
+        let mut transaction = self.transaction(RequestId::new(), library).await?;
+        let value = match input {
+            JobInput::ImportEpubV1 { upload_id } => {
+                serde_json::json!({"version": 1, "upload_id": upload_id})
+            }
+            JobInput::CleanupV1 => serde_json::json!({"version": 1}),
+        };
+        let stored = sqlx::query_scalar!(r#"INSERT INTO folioharbor.background_jobs(job_id,library_id,kind,state,input,idempotency_key,next_run_at,created_at,updated_at) VALUES($1,$2,$3,'pending',$4,$5,$6,$6,$6) ON CONFLICT(idempotency_key) DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key RETURNING job_id AS "job_id!""#,id.as_uuid(),library.map(LibraryId::as_uuid),kind.as_str(),value,idempotency_key,run_at).fetch_one(&mut *transaction).await.map_err(persistence_error)?;
         transaction.commit().await.map_err(persistence_error)?;
         Ok(JobId::from_uuid(stored))
     }
@@ -102,7 +117,7 @@ impl JobRepository for PgJobRepository {
     async fn lease(&self, request: LeaseJobs) -> Result<Vec<LeasedJob>, JobRepositoryError> {
         let mut transaction = self.transaction(request.request_id, None).await?;
         let expires = request.now + request.lease_for;
-        let rows = sqlx::query!(r#"WITH candidates AS (SELECT job_id,state,attempt_count FROM folioharbor.background_jobs WHERE next_run_at <= $1 AND (state IN ('pending','retry_wait') OR (state='leased' AND lease_expires_at <= $1)) ORDER BY next_run_at,created_at FOR UPDATE SKIP LOCKED LIMIT $2), expired AS (UPDATE folioharbor.job_attempts a SET finished_at=$1,outcome='lease_expired' FROM candidates c WHERE c.state='leased' AND a.job_id=c.job_id AND a.attempt=c.attempt_count), leased AS (UPDATE folioharbor.background_jobs j SET state='leased',lease_owner=$3,lease_expires_at=$4,attempt_count=j.attempt_count+1,error_code=NULL,error_summary=NULL,updated_at=$1 FROM candidates c WHERE j.job_id=c.job_id RETURNING j.job_id,j.library_id,j.kind,j.input,j.attempt_count,j.lease_expires_at), attempts AS (INSERT INTO folioharbor.job_attempts(job_id,attempt,lease_owner,started_at) SELECT job_id,attempt_count,$3,$1 FROM leased) SELECT job_id AS "job_id!",library_id AS "library_id!",kind AS "kind!",input AS "input!",attempt_count AS "attempt_count!",lease_expires_at AS "lease_expires_at!" FROM leased"#,request.now,i64::from(request.limit),&request.owner,expires).fetch_all(&mut *transaction).await.map_err(persistence_error)?;
+        let rows = sqlx::query!(r#"WITH candidates AS (SELECT job_id,state,attempt_count FROM folioharbor.background_jobs WHERE next_run_at <= $1 AND (state IN ('pending','retry_wait') OR (state='leased' AND lease_expires_at <= $1)) ORDER BY next_run_at,created_at FOR UPDATE SKIP LOCKED LIMIT $2), expired AS (UPDATE folioharbor.job_attempts a SET finished_at=$1,outcome='lease_expired' FROM candidates c WHERE c.state='leased' AND a.job_id=c.job_id AND a.attempt=c.attempt_count), leased AS (UPDATE folioharbor.background_jobs j SET state='leased',lease_owner=$3,lease_expires_at=$4,attempt_count=j.attempt_count+1,error_code=NULL,error_summary=NULL,updated_at=$1 FROM candidates c WHERE j.job_id=c.job_id RETURNING j.job_id,j.library_id,j.kind,j.input,j.attempt_count,j.lease_expires_at), attempts AS (INSERT INTO folioharbor.job_attempts(job_id,attempt,lease_owner,started_at) SELECT job_id,attempt_count,$3,$1 FROM leased) SELECT job_id AS "job_id!",library_id,kind AS "kind!",input AS "input!",attempt_count AS "attempt_count!",lease_expires_at AS "lease_expires_at!" FROM leased"#,request.now,i64::from(request.limit),&request.owner,expires).fetch_all(&mut *transaction).await.map_err(persistence_error)?;
         let parsed: Result<Vec<_>, _> = rows
             .into_iter()
             .map(|row| {
@@ -113,19 +128,28 @@ impl JobRepository for PgJobRepository {
                     .and_then(serde_json::Value::as_u64)
                     .and_then(|value| u16::try_from(value).ok())
                     .ok_or(JobRepositoryError)?;
-                let upload_id = input
-                    .get("upload_id")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or(JobRepositoryError)?
-                    .to_owned();
-                if version != 1 || uuid::Uuid::parse_str(&upload_id).is_err() {
+                if version != 1 {
                     return Err(JobRepositoryError);
                 }
+                let kind = JobKind::parse(&kind).ok_or(JobRepositoryError)?;
+                let input = if kind == JobKind::ImportEpub {
+                    let upload_id = input
+                        .get("upload_id")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or(JobRepositoryError)?
+                        .to_owned();
+                    if uuid::Uuid::parse_str(&upload_id).is_err() {
+                        return Err(JobRepositoryError);
+                    }
+                    JobInput::ImportEpubV1 { upload_id }
+                } else {
+                    JobInput::CleanupV1
+                };
                 Ok(LeasedJob {
                     job_id: JobId::from_uuid(row.job_id),
-                    library_id: LibraryId::from_uuid(row.library_id),
-                    kind: JobKind::parse(&kind).ok_or(JobRepositoryError)?,
-                    input: JobInput { version, upload_id },
+                    library_id: row.library_id.map(LibraryId::from_uuid),
+                    kind,
+                    input,
                     attempt: u32::try_from(row.attempt_count).map_err(|_| JobRepositoryError)?,
                     lease_expires_at: row.lease_expires_at,
                 })
@@ -212,6 +236,26 @@ impl JobRepository for PgJobRepository {
             code: Some(code),
             summary: Some(summary),
             outcome: "failed",
+        })
+        .await
+    }
+    async fn operator_required(
+        &self,
+        id: JobId,
+        owner: &str,
+        now: OffsetDateTime,
+        code: &str,
+        summary: &str,
+    ) -> Result<bool, JobRepositoryError> {
+        self.finish(FinishJob {
+            id,
+            owner,
+            now,
+            state: "operator_required",
+            next: None,
+            code: Some(code),
+            summary: Some(summary),
+            outcome: "operator_required",
         })
         .await
     }

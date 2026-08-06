@@ -1,5 +1,9 @@
 use async_trait::async_trait;
-use folioharbor_domain::{id::UploadId, imports::blob::StorageKey};
+use folioharbor_domain::{
+    id::UploadId,
+    imports::{blob::StorageKey, job::JobKind},
+    time::OffsetDateTime,
+};
 use thiserror::Error;
 
 use crate::imports::CleanupCursor;
@@ -17,6 +21,33 @@ pub struct ImportCleanupRepositoryError;
 
 #[async_trait]
 pub trait ImportCleanupRepository: Send + Sync {
+    async fn begin_pass(
+        &self,
+        kind: JobKind,
+        owner: &str,
+        now: OffsetDateTime,
+        limit: u32,
+    ) -> Result<CleanupCursor, ImportCleanupRepositoryError> {
+        let _ = (kind, owner);
+        CleanupCursor::new(now, limit).ok_or(ImportCleanupRepositoryError)
+    }
+    async fn complete_pass(
+        &self,
+        kind: JobKind,
+        owner: &str,
+        cursor: CleanupCursor,
+    ) -> Result<(), ImportCleanupRepositoryError> {
+        let _ = (kind, owner, cursor);
+        Ok(())
+    }
+    async fn has_pending(
+        &self,
+        kind: JobKind,
+        cursor: CleanupCursor,
+    ) -> Result<bool, ImportCleanupRepositoryError> {
+        let _ = (kind, cursor);
+        Ok(false)
+    }
     async fn expire_abandoned(
         &self,
         cursor: CleanupCursor,
@@ -32,4 +63,13 @@ pub trait ImportCleanupRepository: Send + Sync {
         owner: &str,
         cursor: CleanupCursor,
     ) -> Result<bool, ImportCleanupRepositoryError>;
+    async fn release_failed_purge(
+        &self,
+        upload_id: UploadId,
+        owner: &str,
+        now: OffsetDateTime,
+    ) -> Result<(), ImportCleanupRepositoryError> {
+        let _ = (upload_id, owner, now);
+        Ok(())
+    }
 }

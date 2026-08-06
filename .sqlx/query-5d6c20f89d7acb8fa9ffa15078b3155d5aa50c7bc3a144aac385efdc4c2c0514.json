@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT folioharbor.import_complete_cleanup_worker($1,$2,$3,$4) AS \"completed!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "completed!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "5d6c20f89d7acb8fa9ffa15078b3155d5aa50c7bc3a144aac385efdc4c2c0514"
+}

@@ -2,9 +2,8 @@
 
 use std::{env, path::PathBuf, sync::Arc};
 
-use folioharbor_application::imports::{
-    CleanupCursor, CleanupImports, ProcessImportJob, RetrySchedule,
-};
+use folioharbor_application::imports::{CleanupImports, ProcessImportJob, RetrySchedule};
+use folioharbor_application::ports::JobRepository;
 use folioharbor_epub::{EpubPublicationParser, ParserLimits};
 use folioharbor_postgres::{
     PgCatalogRepository, PgImportCleanupRepository, PgImportRepository, PgJobRepository,
@@ -13,7 +12,6 @@ use folioharbor_postgres::{
 use folioharbor_storage_local::LocalBlobStore;
 use folioharbor_worker::{RunnerConfig, WorkerRunner, handlers::WorkerHandlers};
 use secrecy::SecretString;
-use time::OffsetDateTime;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -41,18 +39,20 @@ async fn main() -> anyhow::Result<()> {
         RetrySchedule::default(),
     ));
     let worker_id = format!("worker-{}", std::process::id());
+    let jobs = Arc::new(PgJobRepository::new(pool.clone()));
+    let cleanup = Arc::new(CleanupImports::new(
+        Arc::new(PgImportCleanupRepository::new(pool)),
+        blobs,
+    ));
     let runner = WorkerRunner::new(
-        Arc::new(PgJobRepository::new(pool.clone())),
-        Arc::new(WorkerHandlers::new(process)),
+        jobs.clone(),
+        Arc::new(WorkerHandlers::with_cleanup(process, cleanup)),
         worker_id.clone(),
         config,
     );
-    let cleanup = CleanupImports::new(Arc::new(PgImportCleanupRepository::new(pool)), blobs);
     loop {
-        let boundary = OffsetDateTime::now_utc();
-        let cursor = CleanupCursor::new(boundary, 100)
-            .ok_or_else(|| anyhow::anyhow!("cleanup batch is invalid"))?;
-        cleanup.run(&worker_id, cursor).await?;
+        jobs.ensure_cleanup_jobs(time::OffsetDateTime::now_utc())
+            .await?;
         runner.run_once().await?;
     }
 }

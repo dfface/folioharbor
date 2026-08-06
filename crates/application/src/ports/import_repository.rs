@@ -21,6 +21,7 @@ pub struct ImportWork {
 pub enum ImportReconciliation {
     Work(ImportWork),
     Complete,
+    TerminalFailure { code: String },
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
