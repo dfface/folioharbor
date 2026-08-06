@@ -95,6 +95,16 @@ struct ProgressResponse {
     updated_at: String,
 }
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConflictGlobalResponse {
+    manifestation_id: String,
+    package_id: Option<String>,
+    content_unit_id: Option<String>,
+    locator: Option<LocatorResponse>,
+    version: u64,
+    updated_at: Option<String>,
+}
+#[derive(Serialize)]
 struct DeviceResponse {
     #[serde(rename = "deviceId")]
     device_id: String,
@@ -224,9 +234,10 @@ async fn put_progress(
     match state.progress_api.update_progress(command).await {
         Ok(ReadingUpdateOutcome::Updated { global, .. }) => state_response(global),
         Ok(ReadingUpdateOutcome::Conflict { global, device }) => {
-            let version = global.version;
+            let version = global.as_ref().map_or(0, |progress| progress.version);
             let global_json =
-                serde_json::to_value(ProgressResponse::from(global)).unwrap_or(Value::Null);
+                serde_json::to_value(ConflictGlobalResponse::from_progress(manifestation, global))
+                    .unwrap_or(Value::Null);
             let device_json =
                 serde_json::to_value(DeviceResponse::from(device)).unwrap_or(Value::Null);
             with_etag(
@@ -334,6 +345,28 @@ impl From<ReadingProgress> for ProgressResponse {
             locator: LocatorResponse::from(v.locator),
             version: v.version,
             updated_at: v.updated_at.to_string(),
+        }
+    }
+}
+impl ConflictGlobalResponse {
+    fn from_progress(manifestation_id: ManifestationId, progress: Option<ReadingProgress>) -> Self {
+        match progress {
+            Some(progress) => Self {
+                manifestation_id: progress.manifestation_id.as_uuid().to_string(),
+                package_id: progress.package_id.map(|id| id.as_uuid().to_string()),
+                content_unit_id: progress.content_unit_id.map(|id| id.as_uuid().to_string()),
+                locator: Some(LocatorResponse::from(progress.locator)),
+                version: progress.version,
+                updated_at: Some(progress.updated_at.to_string()),
+            },
+            None => Self {
+                manifestation_id: manifestation_id.as_uuid().to_string(),
+                package_id: None,
+                content_unit_id: None,
+                locator: None,
+                version: 0,
+                updated_at: None,
+            },
         }
     }
 }

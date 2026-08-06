@@ -272,6 +272,11 @@ impl ProgressApi for Reader {
         &self,
         command: UpdateReadingProgressCommand,
     ) -> Result<ReadingUpdateOutcome, AppError> {
+        if command.locator.locations().progression() == Some(0.77) {
+            return Err(AppError::Conflict {
+                code: "progress_mutation_mismatch",
+            });
+        }
         let global = ReadingProgress {
             manifestation_id: command.manifestation_id,
             package_id: None,
@@ -285,7 +290,10 @@ impl ProgressApi for Reader {
             locator: command.locator,
             updated_at: OffsetDateTime::UNIX_EPOCH,
         };
-        Ok(ReadingUpdateOutcome::Conflict { global, device })
+        Ok(ReadingUpdateOutcome::Conflict {
+            global: (command.base_version != 9).then_some(global),
+            device,
+        })
     }
 }
 
@@ -420,6 +428,106 @@ async fn progress_put_requires_if_match_to_equal_json_base_version() {
     assert_eq!(body["code"], "invalid_progress_request");
     assert_eq!(body["fields"][0]["field"], "base_version");
     assert_eq!(body["fields"][0]["code"], "if_match_mismatch");
+}
+
+#[tokio::test]
+async fn progress_conflict_safely_represents_an_absent_global_position() {
+    let (app, _, manifestation) = app();
+    let body = serde_json::json!({
+        "deviceId":DeviceId::new().as_uuid().to_string(),
+        "clientMutationId":Uuid::now_v7().to_string(),
+        "baseVersion":9,
+        "locator":{"href":"OPS/chapter.xhtml","locations":{"progression":0.8},"extensions":{"version":1,"values":{}}}
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/api/v1/manifestations/{}/progress",
+                    manifestation.as_uuid()
+                ))
+                .header("Cookie", "folioharbor_session=allowed")
+                .header("X-CSRF-Token", "reader-csrf")
+                .header("If-Match", "\"progress-v9\"")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response.headers().get(ETAG).and_then(|v| v.to_str().ok()),
+        Some("\"progress-v0\"")
+    );
+    let body: serde_json::Value = serde_json::from_slice(
+        &response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes(),
+    )
+    .expect("json");
+    assert_eq!(
+        body["global"]["manifestationId"],
+        manifestation.as_uuid().to_string()
+    );
+    assert_eq!(body["global"]["version"], 0);
+    assert!(body["global"]["locator"].is_null());
+    assert!(body["global"]["updatedAt"].is_null());
+    assert_eq!(body["device"]["locator"]["locations"]["progression"], 0.8);
+}
+
+#[tokio::test]
+async fn progress_mutation_mismatch_returns_only_correlated_problem_details() {
+    let (app, _, manifestation) = app();
+    let body = serde_json::json!({
+        "deviceId":DeviceId::new().as_uuid().to_string(),
+        "clientMutationId":Uuid::now_v7().to_string(),
+        "baseVersion":2,
+        "locator":{"href":"OPS/chapter.xhtml","locations":{"progression":0.77},"extensions":{"version":1,"values":{}}}
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/api/v1/manifestations/{}/progress",
+                    manifestation.as_uuid()
+                ))
+                .header("Cookie", "folioharbor_session=allowed")
+                .header("X-CSRF-Token", "reader-csrf")
+                .header("If-Match", "\"progress-v2\"")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/problem+json")
+    );
+    let body: serde_json::Value = serde_json::from_slice(
+        &response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes(),
+    )
+    .expect("json");
+    assert_eq!(body["code"], "progress_mutation_mismatch");
+    assert!(body["instance"].as_str().is_some());
+    assert!(body.get("global").is_none());
+    assert!(body.get("device").is_none());
+    assert!(!body.to_string().contains("OPS/chapter.xhtml"));
 }
 
 fn request(uri: &str, actor: &str) -> Request<Body> {

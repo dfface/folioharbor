@@ -13,6 +13,7 @@ use folioharbor_domain::{
     time::OffsetDateTime,
 };
 use serde_json::{Map, Value, json};
+use sha2::{Digest as _, Sha256};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -85,14 +86,11 @@ impl ReadingRepository for PgReadingRepository {
         )
         .await?;
 
-        if let Some(outcome) = replay(&mut tx, command.actor, command.client_mutation_id).await? {
+        require_active_device(&mut tx, command.actor, command.device_id).await?;
+        let fingerprint = command_fingerprint(&command);
+        if let Some(outcome) = replay(&mut tx, &command, &fingerprint).await? {
             tx.commit().await.map_err(persistence)?;
             return Ok(outcome);
-        }
-        let device_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM folioharbor.user_devices WHERE user_id=$1 AND device_id=$2 AND revoked_at IS NULL)")
-            .bind(command.actor.as_uuid()).bind(command.device_id.as_uuid()).fetch_one(&mut *tx).await.map_err(persistence)?;
-        if !device_exists {
-            return Err(ReadingRepositoryError::NotFound);
         }
 
         let existing = sqlx::query("SELECT package_id,content_unit_id,locator,version,updated_at FROM folioharbor.reading_states WHERE user_id=$1 AND manifestation_id=$2 FOR UPDATE")
@@ -120,71 +118,102 @@ impl ReadingRepository for PgReadingRepository {
                 sqlx::query("UPDATE folioharbor.reading_states SET package_id=$3,content_unit_id=$4,locator=$5,version=$6,updated_at=$7 WHERE user_id=$1 AND manifestation_id=$2")
                     .bind(command.actor.as_uuid()).bind(command.manifestation_id.as_uuid()).bind(command.package_id.map(PublicationPackageId::as_uuid)).bind(command.content_unit_id.map(ContentUnitId::as_uuid)).bind(&locator_json).bind(i64::try_from(next_version).map_err(|_| ReadingRepositoryError::Persistence)?).bind(now).execute(&mut *tx).await.map_err(persistence)?;
                 (
-                    ReadingProgress {
+                    Some(ReadingProgress {
                         manifestation_id: command.manifestation_id,
                         package_id: command.package_id,
                         content_unit_id: command.content_unit_id,
                         locator: command.locator.clone(),
                         version: next_version,
                         updated_at: now,
-                    },
+                    }),
                     true,
                 )
             } else {
-                (current, false)
+                (Some(current), false)
             }
         } else if command.base_version == 0 {
             sqlx::query("INSERT INTO folioharbor.reading_states(user_id,manifestation_id,package_id,content_unit_id,locator,version,updated_at) VALUES($1,$2,$3,$4,$5,1,$6)")
                 .bind(command.actor.as_uuid()).bind(command.manifestation_id.as_uuid()).bind(command.package_id.map(PublicationPackageId::as_uuid)).bind(command.content_unit_id.map(ContentUnitId::as_uuid)).bind(&locator_json).bind(now).execute(&mut *tx).await.map_err(persistence)?;
             (
-                ReadingProgress {
+                Some(ReadingProgress {
                     manifestation_id: command.manifestation_id,
                     package_id: command.package_id,
                     content_unit_id: command.content_unit_id,
                     locator: command.locator.clone(),
                     version: 1,
                     updated_at: now,
-                },
+                }),
                 true,
             )
         } else {
-            return Err(ReadingRepositoryError::NotFound);
+            (None, false)
         };
-        let outcome = update_outcome(&global, &device, updated);
-        store_mutation(&mut tx, &command, &global, &device, updated).await?;
+        let outcome = update_outcome(global.as_ref(), &device, updated);
+        store_mutation(
+            &mut tx,
+            &command,
+            &fingerprint,
+            global.as_ref(),
+            &device,
+            updated,
+        )
+        .await?;
         tx.commit().await.map_err(persistence)?;
         Ok(outcome)
     }
 }
 
 fn update_outcome(
-    global: &ReadingProgress,
+    global: Option<&ReadingProgress>,
     device: &DeviceReadingState,
     updated: bool,
 ) -> ReadingUpdateOutcome {
     if updated {
-        ReadingUpdateOutcome::Updated {
-            global: global.clone(),
-            device: device.clone(),
+        match global {
+            Some(global) => ReadingUpdateOutcome::Updated {
+                global: global.clone(),
+                device: device.clone(),
+            },
+            None => ReadingUpdateOutcome::Conflict {
+                global: None,
+                device: device.clone(),
+            },
         }
     } else {
         ReadingUpdateOutcome::Conflict {
-            global: global.clone(),
+            global: global.cloned(),
             device: device.clone(),
         }
+    }
+}
+
+async fn require_active_device(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    actor: UserId,
+    device: DeviceId,
+) -> Result<(), ReadingRepositoryError> {
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM folioharbor.user_devices WHERE user_id=$1 AND device_id=$2 AND revoked_at IS NULL)")
+        .bind(actor.as_uuid()).bind(device.as_uuid()).fetch_one(&mut **tx).await.map_err(persistence)?;
+    if exists {
+        Ok(())
+    } else {
+        Err(ReadingRepositoryError::NotFound)
     }
 }
 
 async fn store_mutation(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     command: &UpdateProgressRecord,
-    global: &ReadingProgress,
+    fingerprint: &[u8; 32],
+    global: Option<&ReadingProgress>,
     device: &DeviceReadingState,
     updated: bool,
 ) -> Result<(), ReadingRepositoryError> {
-    let version = i64::try_from(global.version).map_err(|_| ReadingRepositoryError::Persistence)?;
-    sqlx::query("INSERT INTO folioharbor.reading_mutations(user_id,client_mutation_id,manifestation_id,device_id,outcome,global_package_id,global_content_unit_id,global_locator,global_version,global_updated_at,device_locator,device_updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
-        .bind(command.actor.as_uuid()).bind(command.client_mutation_id).bind(command.manifestation_id.as_uuid()).bind(command.device_id.as_uuid()).bind(if updated { "updated" } else { "conflict" }).bind(global.package_id.map(PublicationPackageId::as_uuid)).bind(global.content_unit_id.map(ContentUnitId::as_uuid)).bind(locator_to_json(&global.locator)).bind(version).bind(global.updated_at).bind(locator_to_json(&device.locator)).bind(device.updated_at).execute(&mut **tx).await.map_err(persistence)?;
+    let version = global.map_or(Ok(0), |state| {
+        i64::try_from(state.version).map_err(|_| ReadingRepositoryError::Persistence)
+    })?;
+    sqlx::query("INSERT INTO folioharbor.reading_mutations(user_id,client_mutation_id,manifestation_id,device_id,outcome,global_package_id,global_content_unit_id,global_locator,global_version,global_updated_at,device_locator,device_updated_at,request_fingerprint) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)")
+        .bind(command.actor.as_uuid()).bind(command.client_mutation_id).bind(command.manifestation_id.as_uuid()).bind(command.device_id.as_uuid()).bind(if updated { "updated" } else { "conflict" }).bind(global.and_then(|state|state.package_id.map(PublicationPackageId::as_uuid))).bind(global.and_then(|state|state.content_unit_id.map(ContentUnitId::as_uuid))).bind(global.map(|state|locator_to_json(&state.locator))).bind(version).bind(global.map(|state|state.updated_at)).bind(locator_to_json(&device.locator)).bind(device.updated_at).bind(fingerprint.as_slice()).execute(&mut **tx).await.map_err(persistence)?;
     Ok(())
 }
 
@@ -219,25 +248,50 @@ async fn advisory_lock(
 }
 async fn replay(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    actor: UserId,
-    mutation: Uuid,
+    command: &UpdateProgressRecord,
+    fingerprint: &[u8; 32],
 ) -> Result<Option<ReadingUpdateOutcome>, ReadingRepositoryError> {
-    let row = sqlx::query("SELECT manifestation_id,device_id,outcome,global_package_id,global_content_unit_id,global_locator,global_version,global_updated_at,device_locator,device_updated_at FROM folioharbor.reading_mutations WHERE user_id=$1 AND client_mutation_id=$2")
-        .bind(actor.as_uuid()).bind(mutation).fetch_optional(&mut **tx).await.map_err(persistence)?;
+    let row = sqlx::query("SELECT manifestation_id,device_id,request_fingerprint,outcome,global_package_id,global_content_unit_id,global_locator,global_version,global_updated_at,device_locator,device_updated_at FROM folioharbor.reading_mutations WHERE user_id=$1 AND client_mutation_id=$2")
+        .bind(command.actor.as_uuid()).bind(command.client_mutation_id).fetch_optional(&mut **tx).await.map_err(persistence)?;
     row.map(|row| {
-        let manifestation =
-            ManifestationId::from_uuid(row.try_get("manifestation_id").map_err(persistence)?);
-        let global = ReadingProgress {
-            manifestation_id: manifestation,
-            package_id: optional_id(&row, "global_package_id", PublicationPackageId::from_uuid)?,
-            content_unit_id: optional_id(&row, "global_content_unit_id", ContentUnitId::from_uuid)?,
-            locator: locator_from_json(&row.try_get("global_locator").map_err(persistence)?)?,
-            version: u64::try_from(
-                row.try_get::<i64, _>("global_version")
-                    .map_err(persistence)?,
-            )
-            .map_err(|_| ReadingRepositoryError::Persistence)?,
-            updated_at: row.try_get("global_updated_at").map_err(persistence)?,
+        let stored_manifestation: Uuid = row.try_get("manifestation_id").map_err(persistence)?;
+        let stored_device: Uuid = row.try_get("device_id").map_err(persistence)?;
+        let stored_fingerprint: Option<Vec<u8>> =
+            row.try_get("request_fingerprint").map_err(persistence)?;
+        if stored_manifestation != command.manifestation_id.as_uuid()
+            || stored_device != command.device_id.as_uuid()
+            || stored_fingerprint.as_deref() != Some(fingerprint.as_slice())
+        {
+            return Err(ReadingRepositoryError::MutationMismatch);
+        }
+        let version = row
+            .try_get::<i64, _>("global_version")
+            .map_err(persistence)?;
+        let global = if version == 0 {
+            let locator: Option<Value> = row.try_get("global_locator").map_err(persistence)?;
+            let updated_at: Option<OffsetDateTime> =
+                row.try_get("global_updated_at").map_err(persistence)?;
+            if locator.is_some() || updated_at.is_some() {
+                return Err(ReadingRepositoryError::Persistence);
+            }
+            None
+        } else {
+            Some(ReadingProgress {
+                manifestation_id: command.manifestation_id,
+                package_id: optional_id(
+                    &row,
+                    "global_package_id",
+                    PublicationPackageId::from_uuid,
+                )?,
+                content_unit_id: optional_id(
+                    &row,
+                    "global_content_unit_id",
+                    ContentUnitId::from_uuid,
+                )?,
+                locator: locator_from_json(&row.try_get("global_locator").map_err(persistence)?)?,
+                version: u64::try_from(version).map_err(|_| ReadingRepositoryError::Persistence)?,
+                updated_at: row.try_get("global_updated_at").map_err(persistence)?,
+            })
         };
         let device = DeviceReadingState {
             device_id: DeviceId::from_uuid(row.try_get("device_id").map_err(persistence)?),
@@ -246,12 +300,42 @@ async fn replay(
         };
         let kind: String = row.try_get("outcome").map_err(persistence)?;
         match kind.as_str() {
-            "updated" => Ok(ReadingUpdateOutcome::Updated { global, device }),
+            "updated" => global.map_or(Err(ReadingRepositoryError::Persistence), |global| {
+                Ok(ReadingUpdateOutcome::Updated { global, device })
+            }),
             "conflict" => Ok(ReadingUpdateOutcome::Conflict { global, device }),
             _ => Err(ReadingRepositoryError::Persistence),
         }
     })
     .transpose()
+}
+
+fn command_fingerprint(command: &UpdateProgressRecord) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"folioharbor-progress-command-v1\0");
+    hash.update(command.manifestation_id.as_uuid().as_bytes());
+    hash.update(command.device_id.as_uuid().as_bytes());
+    hash.update(command.base_version.to_be_bytes());
+    update_optional_uuid(
+        &mut hash,
+        command.package_id.map(PublicationPackageId::as_uuid),
+    );
+    update_optional_uuid(
+        &mut hash,
+        command.content_unit_id.map(ContentUnitId::as_uuid),
+    );
+    hash.update(locator_to_json(&command.locator).to_string().as_bytes());
+    hash.finalize().into()
+}
+
+fn update_optional_uuid(hash: &mut Sha256, value: Option<Uuid>) {
+    match value {
+        Some(value) => {
+            hash.update([1]);
+            hash.update(value.as_bytes());
+        }
+        None => hash.update([0]),
+    }
 }
 
 fn progress_from_row(

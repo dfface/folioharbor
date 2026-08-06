@@ -28,7 +28,7 @@ pub enum ReadingUpdateOutcome {
         device: DeviceReadingState,
     },
     Conflict {
-        global: ReadingProgress,
+        global: Option<ReadingProgress>,
         device: DeviceReadingState,
     },
 }

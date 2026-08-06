@@ -23,6 +23,8 @@ pub struct UpdateProgressRecord {
 pub enum ReadingRepositoryError {
     #[error("reading target was not found")]
     NotFound,
+    #[error("reading mutation does not match its original command")]
+    MutationMismatch,
     #[error("reading repository failed")]
     Persistence,
 }

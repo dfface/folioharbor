@@ -41,6 +41,9 @@ pub(crate) fn map_error(error: ReadingRepositoryError) -> AppError {
         ReadingRepositoryError::NotFound => AppError::NotFound {
             code: "manifestation_not_found",
         },
+        ReadingRepositoryError::MutationMismatch => AppError::Conflict {
+            code: "progress_mutation_mismatch",
+        },
         ReadingRepositoryError::Persistence => AppError::DependencyUnavailable {
             code: "reading_repository_unavailable",
         },

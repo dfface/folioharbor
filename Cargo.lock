@@ -598,6 +598,7 @@ dependencies = [
  "futures-util",
  "secrecy",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "thiserror",

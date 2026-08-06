@@ -54,8 +54,13 @@ fn command(
 fn global(outcome: &ReadingUpdateOutcome) -> &folioharbor_domain::reader::ReadingProgress {
     match outcome {
         ReadingUpdateOutcome::Updated { global, .. }
-        | ReadingUpdateOutcome::Conflict { global, .. } => global,
+        | ReadingUpdateOutcome::Conflict {
+            global: Some(global),
+            ..
+        } => Some(global),
+        ReadingUpdateOutcome::Conflict { global: None, .. } => None,
     }
+    .expect("global state")
 }
 fn device(outcome: &ReadingUpdateOutcome) -> &folioharbor_domain::reader::DeviceReadingState {
     match outcome {
@@ -106,7 +111,7 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
     }
     sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,created_at,updated_at) VALUES($1,'Progress',$2,$2)").bind(library.as_uuid()).bind(now).execute(&pools.owner).await?;
     sqlx::query("INSERT INTO folioharbor.library_memberships(library_id,user_id,role_code,status,joined_at) VALUES($1,$2,'reader','active',$3)").bind(library.as_uuid()).bind(alice.as_uuid()).bind(now).execute(&pools.owner).await?;
-    let manifestation = seed_item(&pools.owner, library, alice, now).await?;
+    let manifestation = seed_item(&pools.owner, library, alice, now, 42).await?;
     let device_a = DeviceId::new();
     let device_b = DeviceId::new();
     for (device, name) in [(device_a, "A"), (device_b, "B")] {
@@ -134,7 +139,7 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
             device_a,
             first_mutation,
             0,
-            0.99,
+            0.2,
         ))
         .await?;
     assert_eq!(
@@ -213,6 +218,133 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
     );
     assert!(results.iter().all(|result| global(result).version == 3));
 
+    let later_mutation = Uuid::now_v7();
+    let later = repository
+        .update_progress(command(
+            alice,
+            manifestation,
+            device_a,
+            later_mutation,
+            3,
+            0.6,
+        ))
+        .await?;
+    assert_eq!(global(&later).version, 4);
+    assert_eq!(
+        repository
+            .update_progress(command(
+                alice,
+                manifestation,
+                device_a,
+                first_mutation,
+                0,
+                0.2,
+            ))
+            .await?,
+        first
+    );
+    assert_eq!(
+        repository
+            .get_progress(alice, manifestation, RequestId::new())
+            .await?
+            .expect("current")
+            .version,
+        4,
+        "replaying an older accepted mutation cannot rewind current state"
+    );
+
+    let old_stale_mutation = Uuid::now_v7();
+    let old_stale = repository
+        .update_progress(command(
+            alice,
+            manifestation,
+            device_b,
+            old_stale_mutation,
+            2,
+            0.7,
+        ))
+        .await?;
+    assert_eq!(global(&old_stale).version, 4);
+    let newest = repository
+        .update_progress(command(
+            alice,
+            manifestation,
+            device_a,
+            Uuid::now_v7(),
+            4,
+            0.5,
+        ))
+        .await?;
+    assert_eq!(global(&newest).version, 5);
+    assert_eq!(
+        repository
+            .update_progress(command(
+                alice,
+                manifestation,
+                device_b,
+                old_stale_mutation,
+                2,
+                0.7,
+            ))
+            .await?,
+        old_stale
+    );
+    assert_eq!(
+        repository
+            .get_progress(alice, manifestation, RequestId::new())
+            .await?
+            .expect("current")
+            .version,
+        5,
+        "replaying an older stale mutation cannot change current state"
+    );
+    assert_eq!(
+        repository
+            .update_progress(command(
+                alice,
+                manifestation,
+                device_b,
+                first_mutation,
+                0,
+                0.2,
+            ))
+            .await,
+        Err(ReadingRepositoryError::MutationMismatch)
+    );
+    assert_eq!(
+        repository
+            .update_progress(command(
+                alice,
+                manifestation,
+                device_a,
+                first_mutation,
+                0,
+                0.21,
+            ))
+            .await,
+        Err(ReadingRepositoryError::MutationMismatch)
+    );
+
+    let library_b = LibraryId::new();
+    sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,created_at,updated_at) VALUES($1,'Progress B',$2,$2)").bind(library_b.as_uuid()).bind(now).execute(&pools.owner).await?;
+    sqlx::query("INSERT INTO folioharbor.library_memberships(library_id,user_id,role_code,status,joined_at) VALUES($1,$2,'reader','active',$3)").bind(library_b.as_uuid()).bind(alice.as_uuid()).bind(now).execute(&pools.owner).await?;
+    let manifestation_b = seed_item(&pools.owner, library_b, alice, now, 43).await?;
+    let absent = repository
+        .update_progress(command(
+            alice,
+            manifestation_b,
+            device_b,
+            Uuid::now_v7(),
+            9,
+            0.8,
+        ))
+        .await?;
+    assert!(matches!(
+        absent,
+        ReadingUpdateOutcome::Conflict { global: None, .. }
+    ));
+    assert_eq!(device(&absent).locator.locations().progression(), Some(0.8));
+
     let mut bob_tx = pools.api.begin().await?;
     PgTransactionContext::apply(
         &mut bob_tx,
@@ -229,6 +361,20 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
     bob_tx.rollback().await?;
 
     sqlx::query("UPDATE folioharbor.library_memberships SET status='removed',removed_at=$3 WHERE library_id=$1 AND user_id=$2").bind(library.as_uuid()).bind(alice.as_uuid()).bind(now).execute(&pools.owner).await?;
+    assert_eq!(
+        repository
+            .update_progress(command(
+                alice,
+                manifestation_b,
+                device_a,
+                first_mutation,
+                0,
+                0.2,
+            ))
+            .await,
+        Err(ReadingRepositoryError::MutationMismatch),
+        "authorized B must not disclose the stored A result after A access is lost"
+    );
     assert_eq!(
         repository
             .get_progress(alice, manifestation, RequestId::new())
@@ -253,6 +399,7 @@ async fn seed_item(
     library: LibraryId,
     actor: UserId,
     now: OffsetDateTime,
+    seed: u8,
 ) -> anyhow::Result<ManifestationId> {
     let work = WorkId::new();
     let expression = ExpressionId::new();
@@ -266,8 +413,8 @@ async fn seed_item(
     sqlx::query("INSERT INTO folioharbor.expressions(expression_id,work_id,languages,created_at) VALUES($1,$2,ARRAY['en'],$3)").bind(expression.as_uuid()).bind(work.as_uuid()).bind(now).execute(pool).await?;
     sqlx::query("INSERT INTO folioharbor.manifestations(manifestation_id,identifiers,created_at) VALUES($1,ARRAY[]::text[],$2)").bind(manifestation.as_uuid()).bind(now).execute(pool).await?;
     sqlx::query("INSERT INTO folioharbor.manifestation_expressions(manifestation_id,expression_id,expression_order) VALUES($1,$2,0)").bind(manifestation.as_uuid()).bind(expression.as_uuid()).execute(pool).await?;
-    sqlx::query("INSERT INTO folioharbor.blobs(blob_id,storage_namespace,sha256,byte_size,created_at) VALUES($1,'instance-v1',$2,1,$3)").bind(blob.as_uuid()).bind(vec![42_u8;32]).bind(now).execute(pool).await?;
-    sqlx::query("INSERT INTO folioharbor.upload_sessions(upload_id,library_id,created_by,file_name,media_type,declared_bytes,dedup_scope,received_bytes,state,storage_key,sha256,expires_at,created_at,updated_at) VALUES($1,$2,$3,'progress.epub','application/epub+zip',1,'instance',1,'ready',$4,$5,$6,$6,$6)").bind(upload.as_uuid()).bind(library.as_uuid()).bind(actor.as_uuid()).bind(format!("blob:instance-v1:{}:1","2a".repeat(32))).bind(vec![42_u8;32]).bind(now).execute(pool).await?;
+    sqlx::query("INSERT INTO folioharbor.blobs(blob_id,storage_namespace,sha256,byte_size,created_at) VALUES($1,'instance-v1',$2,1,$3)").bind(blob.as_uuid()).bind(vec![seed;32]).bind(now).execute(pool).await?;
+    sqlx::query("INSERT INTO folioharbor.upload_sessions(upload_id,library_id,created_by,file_name,media_type,declared_bytes,dedup_scope,received_bytes,state,storage_key,sha256,expires_at,created_at,updated_at) VALUES($1,$2,$3,'progress.epub','application/epub+zip',1,'instance',1,'ready',$4,$5,$6,$6,$6)").bind(upload.as_uuid()).bind(library.as_uuid()).bind(actor.as_uuid()).bind(format!("blob:instance-v1:{}:1",format!("{seed:02x}").repeat(32))).bind(vec![seed;32]).bind(now).execute(pool).await?;
     sqlx::query("INSERT INTO folioharbor.publication_packages(package_id,manifestation_id,blob_id,parser_profile_version,created_at) VALUES($1,$2,$3,'epub-v1',$4)").bind(package.as_uuid()).bind(manifestation.as_uuid()).bind(blob.as_uuid()).bind(now).execute(pool).await?;
     sqlx::query("INSERT INTO folioharbor.holdings(holding_id,library_id,manifestation_id,state,created_at) VALUES($1,$2,$3,'active',$4)").bind(holding.as_uuid()).bind(library.as_uuid()).bind(manifestation.as_uuid()).bind(now).execute(pool).await?;
     sqlx::query("INSERT INTO folioharbor.items(item_id,holding_id,manifestation_id,package_id,source_upload_id,state,created_at) VALUES($1,$2,$3,$4,$5,'active',$6)").bind(item.as_uuid()).bind(holding.as_uuid()).bind(manifestation.as_uuid()).bind(package.as_uuid()).bind(upload.as_uuid()).bind(now).execute(pool).await?;

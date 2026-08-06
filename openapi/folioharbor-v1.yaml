@@ -437,10 +437,13 @@ components:
           schema: {$ref: '#/components/schemas/ProblemDetails'}
           example: {type: 'https://library.example/problems/invalid-json-body', title: Invalid request body, status: 422, detail: The request body could not be accepted as JSON for this operation., instance: /problems/01JREQ00000000000000000000, code: invalid_json_body, request_id: 01JREQ00000000000000000000}
     ProgressConflict:
-      description: RFC 9457 conflict containing only the current global and reporting-device positions
+      description: RFC 9457 stale-base conflict containing the current global (version 0 with a null locator when absent) and reporting-device positions, or a safe problem without positions when a mutation id is reused for a different command
       content:
         application/problem+json:
-          schema: {$ref: '#/components/schemas/ProgressConflictProblem'}
+          schema:
+            anyOf:
+              - {$ref: '#/components/schemas/ProgressConflictProblem'}
+              - {$ref: '#/components/schemas/ProblemDetails'}
     InvalidSessionIdProblem:
       description: A malformed UUID was supplied for the session_id path parameter; the use case is not invoked
       content:
@@ -660,6 +663,20 @@ components:
         deviceId: {type: string, format: uuid}
         locator: {$ref: '#/components/schemas/Locator'}
         updatedAt: {type: string, format: date-time}
+    ConflictGlobalReadingProgress:
+      type: object
+      additionalProperties: false
+      required: [manifestationId, locator, version, updatedAt]
+      properties:
+        manifestationId: {type: string, format: uuid}
+        packageId: {type: [string, 'null'], format: uuid}
+        contentUnitId: {type: [string, 'null'], format: uuid}
+        locator:
+          oneOf:
+            - {$ref: '#/components/schemas/Locator'}
+            - {type: 'null'}
+        version: {type: integer, minimum: 0}
+        updatedAt: {type: [string, 'null'], format: date-time}
     UpdateReadingProgressRequest:
       type: object
       additionalProperties: false
@@ -677,7 +694,7 @@ components:
         - type: object
           required: [global, device]
           properties:
-            global: {$ref: '#/components/schemas/ReadingProgress'}
+            global: {$ref: '#/components/schemas/ConflictGlobalReadingProgress'}
             device: {$ref: '#/components/schemas/DeviceReadingProgress'}
     ProblemDetails:
       type: object

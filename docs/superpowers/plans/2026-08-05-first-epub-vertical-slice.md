@@ -934,6 +934,15 @@ migrations 0015 and older stay immutable. Progress access is resolved from an ac
 Item/Holding for the requested Manifestation, while the retained progress rows themselves remain
 user-scoped rather than library-scoped.
 
+**Task 15 review amendment (2026-08-06):** After Task 15's initial commit, migration 0016 is
+immutable. Additive migration `0017_reading_mutation_scope.sql` stores a command fingerprint and
+permits an absent global snapshot for a stale first mutation. Replay validates the supplied device,
+Manifestation, and full command fingerprint before decoding stored outcome data; mismatch returns a
+correlated safe conflict without exposing the original mutation scope or locator. A nonzero base
+against absent global state still persists the device state and idempotent conflict atomically; the
+conflict represents global version 0 with no locator. Offline retry permutations must prove replay
+never changes the current state.
+
 - [ ] **Step 1: Write failing state-machine tests**
 
 Assert first write creates version 1; matching base version advances global/device state; repeating one mutation ID returns the original result; stale base version updates device state but not global state and returns both positions as a conflict; client timestamps do not order writes; “largest percentage wins” is never used. Assert progress is user-private and retained but unreadable as content after access loss.

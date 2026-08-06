@@ -32,4 +32,17 @@ fn progress_openapi_contract_exposes_versioned_etag_and_rfc9457_conflict() {
             ["const"],
         1
     );
+    let conflict = &document["components"]["responses"]["ProgressConflict"]["content"]["application/problem+json"]
+        ["schema"];
+    assert_eq!(
+        conflict["anyOf"][0]["$ref"],
+        "#/components/schemas/ProgressConflictProblem"
+    );
+    assert_eq!(
+        conflict["anyOf"][1]["$ref"],
+        "#/components/schemas/ProblemDetails"
+    );
+    let global = &document["components"]["schemas"]["ConflictGlobalReadingProgress"];
+    assert_eq!(global["properties"]["version"]["minimum"], 0);
+    assert_eq!(global["properties"]["locator"]["oneOf"][1]["type"], "null");
 }
