@@ -10,6 +10,7 @@ use crate::middleware;
 use axum::{Router, middleware as axum_middleware};
 use folioharbor_application::{
     catalog::{CatalogApi, DownloadApi, UnavailableCatalogApi, UnavailableDownloadApi},
+    config::MailMode,
     identity::{
         AuthenticateSessionUseCase, CompletePasswordResetUseCase, CurrentSessionUseCase,
         ListSessionsUseCase, LoginUseCase, LogoutUseCase, RegisterAccountUseCase,
@@ -45,6 +46,7 @@ pub struct AppState {
     pub progress_api: Arc<dyn ProgressApi>,
     pub download_api: Arc<dyn DownloadApi>,
     pub download_blobs: Option<Arc<dyn BlobStore>>,
+    mail_mode: Option<MailMode>,
 }
 impl AppState {
     #[allow(clippy::too_many_arguments)]
@@ -83,7 +85,15 @@ impl AppState {
             progress_api: Arc::new(UnavailableProgressApi),
             download_api: Arc::new(UnavailableDownloadApi),
             download_blobs: None,
+            mail_mode: None,
         }
+    }
+
+    /// Applies the same validated, flag-derived mail mode used by the worker.
+    #[must_use]
+    pub fn with_mail_mode(mut self, mail_mode: MailMode) -> Self {
+        self.mail_mode = Some(mail_mode);
+        self
     }
 
     #[must_use]
@@ -128,12 +138,13 @@ impl AppState {
     }
 }
 pub fn router(state: AppState) -> Router {
+    let mail_mode = state.mail_mode;
     Router::new()
         .nest("/problems", problems::router())
-        .nest("/api/v1/auth", auth::router())
+        .nest("/api/v1/auth", auth::router(mail_mode))
         .nest(
             "/api/v1/libraries",
-            libraries::router()
+            libraries::router(mail_mode)
                 .merge(uploads::router())
                 .merge(catalog::router()),
         )
@@ -148,4 +159,8 @@ pub fn router(state: AppState) -> Router {
             middleware::request_id::attach,
         ))
         .with_state(state)
+}
+
+pub(crate) fn problem_document_router() -> Router {
+    problems::stateless_router()
 }

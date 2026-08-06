@@ -43,6 +43,19 @@ pub struct SmtpMailer {
 }
 
 impl SmtpMailer {
+    /// Builds a transport only when the shared, flag-derived mail mode is enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted configuration error for an enabled but unusable relay.
+    pub fn for_mode(settings: &MailSettings) -> Result<Option<Self>, SmtpConfigurationError> {
+        settings
+            .mode
+            .is_enabled()
+            .then(|| Self::new(settings))
+            .transpose()
+    }
+
     /// Builds an SMTP transport without contacting the relay.
     ///
     /// # Errors
@@ -126,9 +139,13 @@ impl Mailer for SmtpMailer {
             idempotency_key,
             message,
         )?;
-        let result = self.transport.send_raw(&envelope, &bytes).await;
+        let result =
+            tokio::time::timeout(SMTP_TIMEOUT, self.transport.send_raw(&envelope, &bytes)).await;
         bytes.zeroize();
-        result.map(|_: Response| ()).map_err(classify_smtp_error)
+        match result {
+            Ok(result) => result.map(|_: Response| ()).map_err(classify_smtp_error),
+            Err(_) => Err(MailError::transient("smtp_exchange_timeout")),
+        }
     }
 }
 
@@ -247,7 +264,36 @@ mod smtp_capture_tests {
         transport::smtp::{client::Tls, client::TlsParameters},
     };
 
-    use super::{SMTP_TIMEOUT, SmtpMailer, SmtpSecurity};
+    use super::{SMTP_TIMEOUT, SmtpMailer, SmtpSecurity, smtp_message};
+
+    #[test]
+    fn raw_mime_is_stable_and_contains_one_plain_and_one_html_alternative() {
+        let link = "https://library.example/verify-email?token=capture-token";
+        let rendered = RenderedMail {
+            subject: "Capture sentinel".to_owned(),
+            text: format!("Plain capture {link}\n"),
+            html: format!("<p>HTML capture <a href=\"{link}\">verify</a></p>"),
+        };
+        let key =
+            "mail:verification:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let first = smtp_message("noreply@example.com", "capture@example.com", key, &rendered)
+            .expect("message formats");
+        let second = smtp_message("noreply@example.com", "capture@example.com", key, &rendered)
+            .expect("retry formats");
+
+        assert_eq!(
+            first, second,
+            "retry must preserve the complete MIME identity"
+        );
+        let raw = String::from_utf8(first).expect("fixture MIME is UTF-8");
+        assert_eq!(raw.matches("Message-ID:").count(), 1);
+        assert_eq!(raw.matches("Content-Type: text/plain").count(), 1);
+        assert_eq!(raw.matches("Content-Type: text/html").count(), 1);
+        assert_eq!(raw.matches(link).count(), 2);
+        assert!(!raw.contains("<img"));
+        assert!(!raw.contains("src="));
+        assert!(!raw.contains("credential-sentinel"));
+    }
 
     #[tokio::test]
     #[ignore = "requires a STARTTLS Mailpit instance"]

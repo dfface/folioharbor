@@ -9,6 +9,104 @@ use url::Url;
 
 pub const PROBLEM_CONTENT_TYPE: &str = "application/problem+json";
 
+#[derive(Clone, Copy)]
+pub(crate) enum ProblemDocumentKind {
+    Authentication,
+    Forbidden,
+    NotFound,
+    Conflict,
+    Invalid,
+    TooLarge,
+    RateLimited,
+    Storage,
+    MailUnavailable,
+    Unavailable,
+    Internal,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ProblemDocumentEntry {
+    pub code: &'static str,
+    pub kind: ProblemDocumentKind,
+}
+
+macro_rules! documents {
+    ($($kind:ident => [$($code:literal),+ $(,)?]),+ $(,)?) => {
+        pub(crate) const PROBLEM_DOCUMENTS: &[ProblemDocumentEntry] = &[
+            $(
+                $(ProblemDocumentEntry {
+                    code: $code,
+                    kind: ProblemDocumentKind::$kind,
+                },)+
+            )+
+        ];
+    };
+}
+
+// This is the registry for every stable type URI emitted by the HTTP/application boundary.
+documents! {
+    Authentication => ["unauthenticated"],
+    Forbidden => [
+        "forbidden", "csrf-failed", "item-download-forbidden", "library-action-forbidden",
+        "library-owner-required",
+    ],
+    NotFound => [
+        "not-found", "invitation-invalid", "item-not-found", "library-not-found",
+        "manifestation-not-found", "membership-not-found", "resource-not-found",
+        "session-not-found", "upload-not-found",
+    ],
+    Conflict => [
+        "conflict", "email-verification-required", "library-quota-exceeded",
+        "library-requires-owner", "personal-library-provisioning-failed", "progress-conflict",
+        "progress-mutation-mismatch", "quota-exceeded", "upload-already-exists",
+        "upload-not-importable", "upload-receipt-lease-lost", "upload-state-conflict",
+    ],
+    Invalid => [
+        "epub-filename-required", "invalid", "invalid-email", "invalid-identifier",
+        "invalid-invitation", "invalid-invitation-role", "invalid-json-body",
+        "invalid-library-id", "invalid-library-settings", "invalid-role",
+        "invalid-or-expired-password-reset-token", "invalid-or-expired-verification-token",
+        "invalid-page", "invalid-parser-profile", "invalid-password", "invalid-progress-request",
+        "invalid-query", "invalid-registration", "invalid-session-id", "invalid-upload",
+        "invalid-upload-id", "invalid-user-id", "invalid-uuid", "malformed-json",
+        "owner-not-invitable", "publication-resource-malformed", "rate-limit-key-invalid",
+        "required", "unsupported-media-type", "unsupported-upload-media-type",
+    ],
+    TooLarge => ["payload-too-large"],
+    RateLimited => ["rate-limited"],
+    Storage => ["storage-exhausted"],
+    MailUnavailable => ["mail-delivery-unavailable", "mail-unavailable"],
+    Unavailable => [
+        "audit-repository-unavailable", "authorization-repository-unavailable",
+        "blob-store-unavailable", "catalog-repository-unavailable",
+        "download-repository-unavailable", "library-repository-unavailable",
+        "library-service-unavailable",
+        "publication-resource-unavailable", "rate-limit-unavailable",
+        "reader-catalog-unavailable", "reading-repository-unavailable",
+        "upload-repository-unavailable", "upload-service-unavailable",
+    ],
+    Internal => ["internal-error"],
+}
+
+pub(crate) fn problem_document(code: &str) -> Option<ProblemDocumentEntry> {
+    PROBLEM_DOCUMENTS
+        .iter()
+        .find(|entry| entry.code == code)
+        .copied()
+}
+
+fn registered_problem_slug(application_code: &str) -> Option<&'static str> {
+    let candidate = application_code.replace('_', "-");
+    problem_document(&candidate).map(|entry| entry.code)
+}
+
+fn problem_type_uri(problem_base: &str, application_code: &str) -> ProblemTypeUri {
+    // Unknown dynamic dependency codes retain their machine-readable JSON code, but may not
+    // mint an undocumented public type. Every code emitted by production is registered above.
+    let slug = registered_problem_slug(application_code).unwrap_or("internal-error");
+    ProblemTypeUri(format!("{problem_base}{slug}"))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProblemContext {
     problem_base: String,
@@ -103,11 +201,7 @@ impl ProblemDetails {
             _ => Vec::new(),
         };
         Self {
-            type_uri: ProblemTypeUri(format!(
-                "{}{}",
-                context.problem_base,
-                mapping.code.replace('_', "-")
-            )),
+            type_uri: problem_type_uri(&context.problem_base, mapping.code),
             title: mapping.title,
             status: mapping.status,
             detail: mapping.detail,
@@ -273,11 +367,7 @@ pub(crate) fn request_validation_response(
 ) -> Response {
     let request_id = context.request_id.to_public_string();
     let problem = ProblemDetails {
-        type_uri: ProblemTypeUri(format!(
-            "{}{}",
-            context.problem_base,
-            code.replace('_', "-")
-        )),
+        type_uri: problem_type_uri(&context.problem_base, code),
         title: "Invalid request body",
         status: status.as_u16(),
         detail: "The request body could not be accepted as JSON for this operation.",

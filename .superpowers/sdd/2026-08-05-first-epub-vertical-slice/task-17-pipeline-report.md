@@ -102,3 +102,55 @@ It completed with zero failures. The external Mailpit test is explicitly ignored
 ## Commit
 
 All Task 17 repair files and this report are included in `feat: deliver transactional account and invitation email`.
+
+## Final-review follow-up
+
+The four P1 findings and the standalone enqueue P2 contract are repaired in this follow-up:
+
+- A single problem registry now owns every production-emitted public type slug and its documentation category. Type-URI construction resolves through that registry, unknown public document slugs remain 404, and the route negotiates only `en`/`zh-CN`, including explicit `q=0`, wildcard, unsupported-leading, and fallback behavior. The route test requests every registered emitted slug, including JSON-rejection and upload/library validation codes.
+- The complete Lettre `send_raw` future is enclosed by the ten-second Tokio deadline. Timeout produces the static transient code `smtp_exchange_timeout`, and a paused-time TCP fixture proves a peer that accepts but never greets cannot hang delivery.
+- Retry, sent, and failed transitions validate both owner and lease/intent expiry against PostgreSQL `clock_timestamp()`. Retry delay is anchored to database completion time. Real-database coverage proves all transitions reject a lease that expired after a stale batch start, an expired intent is rejected, and a wrong owner cannot transition a fresh lease.
+- `MailMode` is derived once from the registration/verification/invitation/reset flags in shared configuration. Shared parsing rejects opaque SMTP URLs and any relay URL without a usable authority. Production API route composition removes disabled mail-producing routes while retaining reading/library routes; the worker constructs and polls mail delivery only when the same mode is enabled. Readiness is a pure validated-configuration property and never probes a transiently unavailable relay.
+- `PgMailRepository::enqueue` now returns the actual stored UUID after an idempotency conflict through a narrowly granted security-definer lookup, retaining the API role's column-level/RLS restrictions.
+- Automated content evidence now covers all three templates in both locales, exactly one identical single-use link in each text/HTML alternative, no remote content, and stable raw MIME/Message-ID across retry.
+
+### Follow-up RED/GREEN evidence
+
+1. Problem registry RED: `cargo test -p folioharbor-http --test problem_documents -- --nocapture` failed to compile because `problem_document_router` did not exist. GREEN: 2 passed, 0 failed; the existing problem contract also reports 4 passed.
+2. Complete SMTP deadline RED: the stalling-peer test reached its eleven-second caller guard with `Elapsed(())`. GREEN: `cargo test -p folioharbor-worker --test smtp_transport` reports 3 passed, including disabled mode and the stalling peer.
+3. Enqueue return RED: the duplicate-key real-PostgreSQL assertion received the second, unstored UUID. GREEN: it returns the first stored UUID and finds exactly one row.
+4. Database-time lease RED: `mark_sent` accepted a lease already expired relative to database time. GREEN: all three transitions, intent expiry, and wrong-owner cases reject invalid ownership/time.
+5. Shared mail mode RED: the configuration tests failed to compile because `MailSettings` had no mode/readiness surface; the worker test likewise failed because `SmtpMailer::for_mode` did not exist, and the API route test failed because `AppState::with_mail_mode` did not exist. GREEN: configuration reports 19 passed, auth routes 11 passed, library routes 4 passed, and worker SMTP tests 3 passed.
+
+### Fresh follow-up verification
+
+Using PostgreSQL 18 at `FOLIOHARBOR_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres`:
+
+```text
+cargo fmt --all -- --check
+# exit 0
+
+git diff --check
+# exit 0
+
+cargo check --workspace --all-targets
+# exit 0
+
+cargo test -p folioharbor-postgres --test mail_pipeline -- --nocapture
+# 6 passed; 0 failed
+
+cargo test -p folioharbor-postgres --test migration_from_zero migrations_from_zero_preserve_least_privilege_roles_and_are_idempotent -- --exact --nocapture
+# 1 passed; 0 failed
+
+cargo test -p folioharbor-application --test config_contract --test mail_delivery -- --nocapture
+# config: 19 passed; mail delivery: 7 passed; 0 failed
+
+cargo test -p folioharbor-http --test problem_documents --test problem_contract --test auth_routes --test library_routes -- --nocapture
+# problem documents: 2; problem contract: 4; auth: 11; libraries: 4 passed; 0 failed
+
+cargo test -p folioharbor-worker --test smtp_transport --lib -- --nocapture
+# SMTP transport: 3 passed; library: 2 passed, 1 ignored; 0 failed
+
+cargo test --workspace --all-targets --all-features --quiet
+# exit 0; all executed tests passed; one external STARTTLS capture test remained intentionally ignored
+```

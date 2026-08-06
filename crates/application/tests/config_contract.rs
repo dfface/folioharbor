@@ -38,6 +38,11 @@ fn approved_defaults_are_stable() {
     assert!(settings.auth.email_verification_enabled);
     assert!(settings.auth.personal_library_enabled);
     assert!(!settings.auth.reader_download_enabled);
+    assert!(settings.mail.mode.is_enabled());
+    assert!(settings.mail.mode.registration_enabled());
+    assert!(settings.mail.mode.email_verification_enabled());
+    assert!(settings.mail.mode.invitation_enabled());
+    assert!(settings.mail.mode.password_reset_enabled());
     assert_eq!(settings.storage.library_quota.as_u64(), 5 * GIB);
     assert_eq!(settings.storage.upload_limit.as_u64(), GIB);
     assert_eq!(settings.storage.free_reserve.as_u64(), GIB);
@@ -153,6 +158,64 @@ fn enabled_mail_flows_require_smtp() {
     .expect_err("enabled mail flows without SMTP must fail");
 
     assert!(error.to_string().contains("mail.smtp_url"));
+}
+
+#[test]
+fn disabled_mail_mode_accepts_an_absent_smtp_relay() {
+    let mut environment = minimum_environment();
+    environment.remove("FOLIOHARBOR_MAIL_SMTP_URL");
+    for key in [
+        "FOLIOHARBOR_AUTH_REGISTRATION_ENABLED",
+        "FOLIOHARBOR_AUTH_EMAIL_VERIFICATION_ENABLED",
+        "FOLIOHARBOR_AUTH_INVITATION_ENABLED",
+        "FOLIOHARBOR_AUTH_PASSWORD_RESET_ENABLED",
+    ] {
+        environment.insert(key.to_owned(), "false".to_owned());
+    }
+
+    let settings = Settings::load(ConfigSources {
+        environment,
+        ..ConfigSources::default()
+    })
+    .expect("mail-disabled configuration must not need an SMTP relay");
+
+    assert!(!settings.mail.mode.is_enabled());
+    assert!(settings.mail.smtp_url.is_none());
+}
+
+#[test]
+fn enabled_mail_mode_rejects_an_opaque_smtp_url_without_an_authority() {
+    let mut environment = minimum_environment();
+    environment.insert(
+        "FOLIOHARBOR_MAIL_SMTP_URL".to_owned(),
+        "smtp:opaque".to_owned(),
+    );
+
+    let error = Settings::load(ConfigSources {
+        environment,
+        ..ConfigSources::default()
+    })
+    .expect_err("SMTP configuration without a relay authority must fail");
+
+    assert!(error.to_string().contains("mail.smtp_url"));
+}
+
+#[test]
+fn mail_readiness_is_configuration_only_and_ignores_transient_relay_outages() {
+    let mut environment = minimum_environment();
+    environment.insert(
+        "FOLIOHARBOR_MAIL_SMTP_URL".to_owned(),
+        "smtp://127.0.0.1:9".to_owned(),
+    );
+
+    let settings = Settings::load(ConfigSources {
+        environment,
+        ..ConfigSources::default()
+    })
+    .expect("loading valid SMTP configuration must not contact the relay");
+
+    assert!(settings.mail.mode.is_enabled());
+    assert!(settings.mail.is_ready());
 }
 
 #[test]

@@ -101,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
         identity,
         limiter,
     )
+    .with_mail_mode(settings.mail.mode)
     .with_library_api(library_api)
     .with_upload_api(upload_api)
     .with_catalog_api(catalog_api);

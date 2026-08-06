@@ -61,6 +61,195 @@ fn account(user_id: UserId, now: OffsetDateTime) -> NewAccount {
 }
 
 #[tokio::test]
+async fn enqueue_conflict_returns_the_id_that_is_actually_stored() -> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let repository = PgMailRepository::new(pools.api.clone());
+    let now = OffsetDateTime::now_utc();
+    let idempotency_key = "mail:verification:duplicate-contract".to_owned();
+    let first = NewMailOutboxEntry {
+        idempotency_key: idempotency_key.clone(),
+        recipient_account_id: None,
+        ..mail_entry(
+            UserId::new(),
+            "duplicate@example.com",
+            "verification",
+            "en",
+            now,
+        )
+    };
+    let stored_id = first.mail_id;
+    assert_eq!(repository.enqueue(first).await?, stored_id);
+    let second = NewMailOutboxEntry {
+        idempotency_key,
+        recipient_account_id: None,
+        ..mail_entry(
+            UserId::new(),
+            "duplicate@example.com",
+            "verification",
+            "en",
+            now,
+        )
+    };
+    assert_ne!(second.mail_id, stored_id);
+
+    assert_eq!(repository.enqueue(second).await?, stored_id);
+    let stored: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT mail_id FROM folioharbor.mail_outbox WHERE idempotency_key='mail:verification:duplicate-contract'",
+    )
+    .fetch_all(&pools.owner)
+    .await?;
+    assert_eq!(stored, vec![stored_id]);
+
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn every_worker_transition_rejects_an_expired_lease_using_database_time() -> anyhow::Result<()>
+{
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let api = PgMailRepository::new(pools.api.clone());
+    let worker = PgMailRepository::new(pools.worker.clone());
+    let actual_now = OffsetDateTime::now_utc();
+    let stale_batch_start = actual_now - time::Duration::minutes(10);
+    let mut ids = Vec::new();
+    for suffix in ["sent", "retry", "failed"] {
+        ids.push(
+            api.enqueue(NewMailOutboxEntry {
+                recipient_account_id: None,
+                expires_at: actual_now + time::Duration::hours(1),
+                ..mail_entry(
+                    UserId::new(),
+                    &format!("expired-{suffix}@example.com"),
+                    "verification",
+                    "en",
+                    stale_batch_start,
+                )
+            })
+            .await?,
+        );
+    }
+    ids.push(
+        api.enqueue(NewMailOutboxEntry {
+            recipient_account_id: None,
+            expires_at: actual_now + time::Duration::hours(1),
+            ..mail_entry(
+                UserId::new(),
+                "expired-intent@example.com",
+                "verification",
+                "en",
+                stale_batch_start,
+            )
+        })
+        .await?,
+    );
+    sqlx::query("UPDATE folioharbor.mail_outbox SET created_at=$2,expires_at=$3 WHERE mail_id=$1")
+        .bind(ids[3])
+        .bind(actual_now - time::Duration::minutes(10))
+        .bind(actual_now - time::Duration::minutes(1))
+        .execute(&pools.owner)
+        .await?;
+    let leased = worker
+        .lease(LeaseMail {
+            owner: "stale-worker".to_owned(),
+            now: stale_batch_start,
+            lease_for: time::Duration::minutes(5),
+            limit: 4,
+        })
+        .await?;
+    assert_eq!(leased.len(), 4);
+
+    assert!(
+        !worker
+            .mark_sent(ids[0], "stale-worker", stale_batch_start)
+            .await?
+    );
+    assert!(
+        !worker
+            .retry(
+                ids[1],
+                "stale-worker",
+                stale_batch_start,
+                actual_now + time::Duration::minutes(1),
+                "smtp_transient",
+            )
+            .await?
+    );
+    assert!(
+        !worker
+            .mark_failed(ids[2], "stale-worker", stale_batch_start, "smtp_permanent")
+            .await?
+    );
+    assert!(
+        !worker
+            .mark_failed(ids[3], "stale-worker", stale_batch_start, "intent_expired")
+            .await?
+    );
+    let states: Vec<String> = sqlx::query_scalar(
+        "SELECT state FROM folioharbor.mail_outbox WHERE mail_id = ANY($1) ORDER BY delivery_address",
+    )
+    .bind(&ids)
+    .fetch_all(&pools.owner)
+    .await?;
+    assert_eq!(states, vec!["leased", "leased", "leased", "leased"]);
+
+    let ownership_id = api
+        .enqueue(NewMailOutboxEntry {
+            recipient_account_id: None,
+            ..mail_entry(
+                UserId::new(),
+                "owned-lease@example.com",
+                "verification",
+                "en",
+                actual_now,
+            )
+        })
+        .await?;
+    let ownership_lease = worker
+        .lease(LeaseMail {
+            owner: "right-worker".to_owned(),
+            now: OffsetDateTime::now_utc(),
+            lease_for: time::Duration::minutes(5),
+            limit: 5,
+        })
+        .await?;
+    assert!(
+        ownership_lease
+            .iter()
+            .any(|mail| mail.mail_id == ownership_id)
+    );
+    assert!(
+        !worker
+            .mark_sent(ownership_id, "wrong-worker", actual_now)
+            .await?
+    );
+    assert!(
+        worker
+            .mark_sent(ownership_id, "right-worker", actual_now)
+            .await?
+    );
+
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn registration_and_verification_intent_commit_or_roll_back_together() -> anyhow::Result<()> {
     let database = TestPostgres::provision().await?;
     let pools = PgPools::connect_for_tests(

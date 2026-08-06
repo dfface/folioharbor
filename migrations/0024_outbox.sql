@@ -42,6 +42,11 @@ REVOKE ALL ON folioharbor.mail_outbox FROM PUBLIC;
 GRANT INSERT,SELECT(idempotency_key) ON folioharbor.mail_outbox TO folioharbor_api;
 GRANT SELECT,UPDATE ON folioharbor.mail_outbox TO folioharbor_worker;
 
+CREATE FUNCTION folioharbor.mail_outbox_id_for_key(p_idempotency_key text)
+RETURNS uuid LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+    SELECT mail_id FROM folioharbor.mail_outbox WHERE idempotency_key=p_idempotency_key
+$$;
+
 CREATE FUNCTION folioharbor.mail_recipient_account_id(p_email text)
 RETURNS uuid LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     SELECT user_id FROM folioharbor.user_accounts WHERE normalized_email=p_email
@@ -62,8 +67,11 @@ BEGIN
 END $$;
 ALTER FUNCTION folioharbor.mail_recipient_account_id(text) OWNER TO folioharbor_owner;
 ALTER FUNCTION folioharbor.identity_issue_password_reset_recipient(uuid,text,bytea,timestamptz,timestamptz) OWNER TO folioharbor_owner;
+ALTER FUNCTION folioharbor.mail_outbox_id_for_key(text) OWNER TO folioharbor_owner;
 REVOKE ALL ON FUNCTION folioharbor.mail_recipient_account_id(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION folioharbor.identity_issue_password_reset_recipient(uuid,text,bytea,timestamptz,timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION folioharbor.mail_outbox_id_for_key(text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION folioharbor.mail_recipient_account_id(text) TO folioharbor_api;
 GRANT EXECUTE ON FUNCTION folioharbor.identity_issue_password_reset_recipient(uuid,text,bytea,timestamptz,timestamptz) TO folioharbor_api;
+GRANT EXECUTE ON FUNCTION folioharbor.mail_outbox_id_for_key(text) TO folioharbor_api;
 UPDATE folioharbor.schema_metadata SET schema_version=24,applied_at=clock_timestamp() WHERE singleton;

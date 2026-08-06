@@ -85,6 +85,17 @@ impl SmtpUrl {
                 "scheme must be smtp or smtps",
             ));
         }
+        if url.cannot_be_a_base()
+            || url.host_str().is_none()
+            || !matches!(url.path(), "" | "/")
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(ConfigError::invalid(
+                "mail.smtp_url",
+                "must contain a relay authority and no path, query, or fragment",
+            ));
+        }
         if !url.username().is_empty() || url.password().is_some() {
             return Err(ConfigError::invalid(
                 "mail.smtp_url",
@@ -254,12 +265,109 @@ pub struct AuthSettings {
     pub application_secrets: ApplicationSecretRing,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MailFlows {
+    registration: bool,
+    email_verification: bool,
+    invitation: bool,
+    password_reset: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MailMode {
+    Disabled,
+    Enabled(MailFlows),
+}
+
+impl MailMode {
+    pub(super) const fn from_flags(
+        registration: bool,
+        email_verification: bool,
+        invitation: bool,
+        password_reset: bool,
+    ) -> Self {
+        let flows = MailFlows {
+            registration: registration && email_verification,
+            email_verification,
+            invitation,
+            password_reset,
+        };
+        if flows.registration
+            || flows.email_verification
+            || flows.invitation
+            || flows.password_reset
+        {
+            Self::Enabled(flows)
+        } else {
+            Self::Disabled
+        }
+    }
+
+    #[must_use]
+    pub const fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled(_))
+    }
+
+    #[must_use]
+    pub const fn registration_enabled(self) -> bool {
+        matches!(
+            self,
+            Self::Enabled(MailFlows {
+                registration: true,
+                ..
+            })
+        )
+    }
+
+    #[must_use]
+    pub const fn email_verification_enabled(self) -> bool {
+        matches!(
+            self,
+            Self::Enabled(MailFlows {
+                email_verification: true,
+                ..
+            })
+        )
+    }
+
+    #[must_use]
+    pub const fn invitation_enabled(self) -> bool {
+        matches!(
+            self,
+            Self::Enabled(MailFlows {
+                invitation: true,
+                ..
+            })
+        )
+    }
+
+    #[must_use]
+    pub const fn password_reset_enabled(self) -> bool {
+        matches!(
+            self,
+            Self::Enabled(MailFlows {
+                password_reset: true,
+                ..
+            })
+        )
+    }
+}
+
 #[derive(Debug)]
 pub struct MailSettings {
+    pub mode: MailMode,
     pub smtp_url: Option<SmtpUrl>,
     pub from_address: NormalizedEmail,
     pub username: Option<SecretString>,
     pub password: Option<SecretString>,
+}
+
+impl MailSettings {
+    /// Readiness is a pure validated-configuration property; it never probes SMTP.
+    #[must_use]
+    pub const fn is_ready(&self) -> bool {
+        !self.mode.is_enabled() || self.smtp_url.is_some()
+    }
 }
 
 #[derive(Debug)]

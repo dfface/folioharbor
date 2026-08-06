@@ -21,9 +21,8 @@ impl PgMailRepository {
 #[async_trait]
 impl MailRepository for PgMailRepository {
     async fn enqueue(&self, entry: NewMailOutboxEntry) -> Result<Uuid, MailRepositoryError> {
-        let mail_id = entry.mail_id;
         let mut transaction = self.pool.begin().await.map_err(|_| MailRepositoryError)?;
-        insert_mail(&mut transaction, entry)
+        let mail_id = insert_mail(&mut transaction, entry)
             .await
             .map_err(|_| MailRepositoryError)?;
         transaction
@@ -145,7 +144,7 @@ impl MailRepository for PgMailRepository {
         .await
         .map_err(|_| MailRepositoryError)?;
         let changed = sqlx::query(
-            "UPDATE folioharbor.mail_outbox SET state='retry_wait',lease_owner=NULL,lease_expires_at=NULL,next_run_at=$4,last_error_code=$5,updated_at=$3 WHERE mail_id=$1 AND state='leased' AND lease_owner=$2 AND lease_expires_at>$3",
+            "UPDATE folioharbor.mail_outbox SET state='retry_wait',lease_owner=NULL,lease_expires_at=NULL,next_run_at=clock_timestamp()+($4-$3),last_error_code=$5,updated_at=clock_timestamp() WHERE mail_id=$1 AND state='leased' AND lease_owner=$2 AND lease_expires_at>clock_timestamp() AND expires_at>clock_timestamp()",
         )
         .bind(mail_id)
         .bind(owner)
@@ -191,7 +190,7 @@ async fn terminal_transition(
     .await
     .map_err(|_| MailRepositoryError)?;
     let changed = sqlx::query(
-        "UPDATE folioharbor.mail_outbox SET state=$4,token_ciphertext=''::bytea,lease_owner=NULL,lease_expires_at=NULL,last_error_code=$5,delivered_at=CASE WHEN $4='sent' THEN $3 ELSE NULL END,updated_at=$3 WHERE mail_id=$1 AND state='leased' AND lease_owner=$2 AND lease_expires_at>$3",
+        "UPDATE folioharbor.mail_outbox SET state=$4,token_ciphertext=''::bytea,lease_owner=NULL,lease_expires_at=NULL,last_error_code=$5,delivered_at=CASE WHEN $4='sent' THEN clock_timestamp() ELSE NULL END,updated_at=clock_timestamp() WHERE mail_id=$1 AND state='leased' AND lease_owner=$2 AND lease_expires_at>clock_timestamp() AND expires_at>clock_timestamp()",
     )
     .bind(mail_id)
     .bind(owner)
@@ -213,7 +212,8 @@ async fn terminal_transition(
 pub(crate) async fn insert_mail(
     connection: &mut PgConnection,
     entry: NewMailOutboxEntry,
-) -> Result<(), sqlx::Error> {
+) -> Result<Uuid, sqlx::Error> {
+    let idempotency_key = entry.idempotency_key.clone();
     sqlx::query(
         "INSERT INTO folioharbor.mail_outbox (mail_id,recipient_account_id,delivery_address,template_code,template_version,locale,token_ciphertext,encryption_key_id,token_nonce,idempotency_key,invitation_library_id,invitation_role,state,attempt_count,next_run_at,expires_at,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',0,$13,$14,clock_timestamp(),clock_timestamp()) ON CONFLICT (idempotency_key) DO NOTHING",
     )
@@ -231,7 +231,10 @@ pub(crate) async fn insert_mail(
     .bind(entry.invitation_role)
     .bind(entry.next_run_at)
     .bind(entry.expires_at)
-    .execute(connection)
+    .execute(&mut *connection)
     .await?;
-    Ok(())
+    sqlx::query_scalar("SELECT folioharbor.mail_outbox_id_for_key($1)")
+        .bind(idempotency_key)
+        .fetch_one(connection)
+        .await
 }

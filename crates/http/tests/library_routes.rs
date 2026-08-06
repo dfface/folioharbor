@@ -9,6 +9,7 @@ use axum::{
 };
 use folioharbor_application::{
     actor::Actor,
+    config::MailMode,
     error::AppError,
     identity::{
         AuthenticateSessionCommand, AuthenticateSessionUseCase, AuthenticatedSession,
@@ -254,6 +255,53 @@ fn openapi_exposes_the_complete_library_authorization_surface()
             .as_str()
             .is_some()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn disabled_mail_mode_removes_the_invitation_route_without_removing_library_routes()
+-> anyhow::Result<()> {
+    let owner = UserId::new();
+    let auth = Arc::new(RouteAuth(HashMap::from([("owner".to_owned(), owner)])));
+    let state = AppState::new(
+        Url::parse("https://library.example")?,
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth,
+    )
+    .with_mail_mode(MailMode::Disabled);
+    let app = router(state);
+    let invitation = app
+        .clone()
+        .oneshot(request(
+            &Method::POST,
+            &format!(
+                "/api/v1/libraries/{}/invitations",
+                LibraryId::new().as_uuid()
+            ),
+            "owner",
+            Body::from(r#"{"email":"reader@example.com","role":"reader"}"#),
+        ))
+        .await?;
+    assert_eq!(invitation.status(), StatusCode::NOT_FOUND);
+
+    let libraries = app
+        .oneshot(request(
+            &Method::GET,
+            "/api/v1/libraries",
+            "owner",
+            Body::empty(),
+        ))
+        .await?;
+    assert_eq!(libraries.status(), StatusCode::SERVICE_UNAVAILABLE);
     Ok(())
 }
 

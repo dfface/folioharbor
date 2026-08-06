@@ -109,12 +109,6 @@ pub(super) struct RawAuth {
     pub(super) password_reset_enabled: bool,
 }
 
-impl RawAuth {
-    pub(super) const fn any_mail_flow_enabled(&self) -> bool {
-        self.email_verification_enabled || self.invitation_enabled || self.password_reset_enabled
-    }
-}
-
 impl Default for RawAuth {
     fn default() -> Self {
         Self {

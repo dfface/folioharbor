@@ -13,8 +13,9 @@ use raw::RawSettings;
 use secret::{load_secret_ring, secret_environment};
 pub use types::{
     ApplicationSecretKeyId, ApplicationSecretRing, AuthSettings, ByteSize, DatabaseSettings,
-    DecryptionSecret, DedupScope, Duration, EncryptionSecret, MailSettings, ObservabilitySettings,
-    PublicUrl, ServerSettings, Settings, SmtpUrl, StorageSettings, WorkerSettings,
+    DecryptionSecret, DedupScope, Duration, EncryptionSecret, MailFlows, MailMode, MailSettings,
+    ObservabilitySettings, PublicUrl, ServerSettings, Settings, SmtpUrl, StorageSettings,
+    WorkerSettings,
 };
 
 #[derive(Clone, Default)]
@@ -75,13 +76,19 @@ impl Settings {
                 "must be greater than zero",
             ));
         }
+        let mail_mode = MailMode::from_flags(
+            raw.auth.registration_enabled,
+            raw.auth.email_verification_enabled,
+            raw.auth.invitation_enabled,
+            raw.auth.password_reset_enabled,
+        );
         let smtp_url = raw
             .mail
             .smtp_url
             .as_deref()
             .map(SmtpUrl::parse)
             .transpose()?;
-        if smtp_url.is_none() && raw.auth.any_mail_flow_enabled() {
+        if smtp_url.is_none() && mail_mode.is_enabled() {
             return Err(ConfigError::invalid(
                 "mail.smtp_url",
                 "is required when email verification, invitations, or password reset is enabled",
@@ -133,6 +140,7 @@ impl Settings {
                 application_secrets,
             },
             mail: MailSettings {
+                mode: mail_mode,
                 smtp_url,
                 from_address,
                 username,

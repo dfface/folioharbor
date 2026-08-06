@@ -35,20 +35,41 @@ fn localized_message(template: MailTemplate, locale: Locale) -> MailMessage {
 }
 
 #[test]
-fn verification_text_and_html_contain_the_same_single_use_link() {
+fn every_template_and_locale_contains_exactly_one_identical_link_per_alternative() {
     let settings = delivery_settings();
-    let rendered = render_message(
-        &message(MailTemplate::Verification),
-        &Url::parse("https://library.example/").expect("valid public URL"),
-        &settings.server.public_base_url,
-    )
-    .expect("configured base URL renders a message");
+    for locale in [Locale::En, Locale::ZhCn] {
+        for (template, path) in [
+            (MailTemplate::Verification, "verify-email"),
+            (MailTemplate::Invitation, "accept-invitation"),
+            (MailTemplate::PasswordReset, "reset-password"),
+        ] {
+            let mut message = localized_message(template, locale);
+            if template == MailTemplate::Invitation {
+                message.set_invitation_context("Fixture library", "reader");
+            }
+            let rendered = render_message(
+                &message,
+                &Url::parse("https://library.example/").expect("valid public URL"),
+                &settings.server.public_base_url,
+            )
+            .expect("configured base URL renders a message");
+            let link = format!("https://library.example/{path}?token=single-use-token");
 
-    let link = "https://library.example/verify-email?token=single-use-token";
-    assert!(rendered.text.contains(link));
-    assert!(rendered.html.contains(link));
-    assert!(rendered.text.contains("Verify your email"));
-    assert!(rendered.html.contains("Verify your email"));
+            assert_eq!(
+                rendered.text.matches(&link).count(),
+                1,
+                "{template:?} {locale:?} text"
+            );
+            assert_eq!(
+                rendered.html.matches(&link).count(),
+                1,
+                "{template:?} {locale:?} HTML"
+            );
+            assert!(!rendered.html.contains("<img"));
+            assert!(!rendered.html.contains("src="));
+            assert!(!rendered.html.contains("http://"));
+        }
+    }
 }
 
 #[test]

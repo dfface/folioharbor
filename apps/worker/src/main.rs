@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
     let config = RunnerConfig::new(settings.worker.concurrency)
         .ok_or_else(|| anyhow::anyhow!("worker concurrency must be positive"))?;
     let pool = connect_worker(&database_url).await?;
-    let smtp = SmtpMailer::new(&settings.mail)?;
+    let smtp = SmtpMailer::for_mode(&settings.mail)?;
     let blobs = Arc::new(LocalBlobStore::new(storage_root));
     let process = Arc::new(ProcessImportJob::new(
         Arc::new(PgImportRepository::new(pool.clone())),
@@ -53,13 +53,17 @@ async fn main() -> anyhow::Result<()> {
         blobs,
     ));
     let mail_repository = PgMailRepository::new(pool);
-    let mail_delivery = DeliverMailJob::new(
-        &mail_repository,
-        &smtp,
-        Arc::new(settings.auth.application_secrets),
-        settings.server.public_base_url,
-        worker_id.clone(),
-    );
+    let application_secrets = Arc::new(settings.auth.application_secrets);
+    let public_base_url = settings.server.public_base_url;
+    let mail_delivery = smtp.as_ref().map(|smtp| {
+        DeliverMailJob::new(
+            &mail_repository,
+            smtp,
+            application_secrets,
+            public_base_url,
+            worker_id.clone(),
+        )
+    });
     let runner = WorkerRunner::new(
         jobs.clone(),
         Arc::new(WorkerHandlers::with_cleanup(process, cleanup)),
@@ -70,8 +74,10 @@ async fn main() -> anyhow::Result<()> {
         jobs.ensure_cleanup_jobs(time::OffsetDateTime::now_utc())
             .await?;
         runner.run_once().await?;
-        mail_delivery
-            .run_once(time::OffsetDateTime::now_utc(), 25)
-            .await?;
+        if let Some(mail_delivery) = &mail_delivery {
+            mail_delivery
+                .run_once(time::OffsetDateTime::now_utc(), 25)
+                .await?;
+        }
     }
 }

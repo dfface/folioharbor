@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used)]
 
 use std::{
+    collections::BTreeMap,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -18,6 +19,7 @@ use axum::{
 };
 use folioharbor_application::{
     actor::Actor,
+    config::{ConfigSources, MailMode, Settings},
     error::AppError,
     identity::{
         AuthenticateSessionCommand, AuthenticateSessionUseCase, AuthenticatedSession,
@@ -225,6 +227,49 @@ fn app(fake: Arc<FakeAuth>) -> axum::Router {
     ))
 }
 
+fn app_with_mail_mode(fake: Arc<FakeAuth>, mode: MailMode) -> axum::Router {
+    router(
+        AppState::new(
+            Url::parse("https://library.example").expect("valid test URL"),
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            fake,
+        )
+        .with_mail_mode(mode),
+    )
+}
+
+fn enabled_mail_mode() -> MailMode {
+    Settings::load(ConfigSources {
+        environment: BTreeMap::from([
+            (
+                "FOLIOHARBOR_AUTH_APPLICATION_SECRET_KEY_ID".to_owned(),
+                "route-test".to_owned(),
+            ),
+            (
+                "FOLIOHARBOR_AUTH_APPLICATION_SECRET".to_owned(),
+                "0123456789abcdef0123456789abcdef".to_owned(),
+            ),
+            (
+                "FOLIOHARBOR_MAIL_SMTP_URL".to_owned(),
+                "smtp://mail.example:2525".to_owned(),
+            ),
+        ]),
+        ..ConfigSources::default()
+    })
+    .expect("valid enabled mail configuration")
+    .mail
+    .mode
+}
+
 async fn response_json(response: axum::response::Response) -> serde_json::Value {
     let bytes = response
         .into_body()
@@ -282,6 +327,67 @@ async fn request_validation_failures_are_correlated_problem_details() {
         let request_id = json["request_id"].as_str().expect("request ID");
         assert_eq!(request_id.len(), 26);
         assert_eq!(json["instance"], format!("/problems/{request_id}"));
+    }
+}
+
+#[tokio::test]
+async fn disabled_mail_mode_removes_all_mail_producing_auth_routes() {
+    for path in [
+        "/api/v1/auth/register",
+        "/api/v1/auth/verify-email",
+        "/api/v1/auth/forgot-password",
+        "/api/v1/auth/reset-password",
+    ] {
+        let response = app_with_mail_mode(Arc::new(FakeAuth::default()), MailMode::Disabled)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "route {path}");
+    }
+
+    let login = app_with_mail_mode(Arc::new(FakeAuth::default()), MailMode::Disabled)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/auth/login")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_ne!(login.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn enabled_mail_mode_keeps_all_mail_producing_auth_routes() {
+    for path in [
+        "/api/v1/auth/register",
+        "/api/v1/auth/verify-email",
+        "/api/v1/auth/forgot-password",
+        "/api/v1/auth/reset-password",
+    ] {
+        let response = app_with_mail_mode(Arc::new(FakeAuth::default()), enabled_mail_mode())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_ne!(response.status(), StatusCode::NOT_FOUND, "route {path}");
     }
 }
 
