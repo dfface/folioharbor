@@ -21,6 +21,7 @@ pub struct ImportWork {
 pub enum ImportReconciliation {
     Work(ImportWork),
     Complete,
+    OperatorRequired { code: String },
     TerminalFailure { code: String },
 }
 

@@ -196,7 +196,7 @@ async fn operator_required_is_durable_distinct_and_never_leased_after_restart() 
         .bind(library.as_uuid())
         .execute(&pools.owner)
         .await?;
-    sqlx::query("INSERT INTO folioharbor.upload_sessions(upload_id,library_id,created_by,file_name,media_type,declared_bytes,received_bytes,state,dedup_scope,storage_key,sha256,expires_at,created_at,updated_at) VALUES($1,$2,$3,'operator.epub','application/epub+zip',10,10,'operator_required','instance','blob:operator',decode(repeat('44',32),'hex'),$4,$5,$5)")
+    sqlx::query("INSERT INTO folioharbor.upload_sessions(upload_id,library_id,created_by,file_name,media_type,declared_bytes,received_bytes,state,dedup_scope,storage_key,sha256,expires_at,created_at,updated_at) VALUES($1,$2,$3,'operator.epub','application/epub+zip',10,10,'validating','instance','blob:operator',decode(repeat('44',32),'hex'),$4,$5,$5)")
         .bind(upload.as_uuid()).bind(library.as_uuid()).bind(user.as_uuid())
         .bind(now+Duration::hours(1)).bind(now).execute(&pools.owner).await?;
     sqlx::query("INSERT INTO folioharbor.quota_reservations(upload_id,library_id,reserved_bytes,expires_at,state) VALUES($1,$2,10,$3,'active')")
@@ -225,9 +225,33 @@ async fn operator_required_is_durable_distinct_and_never_leased_after_restart() 
             .len(),
         1
     );
+    sqlx::query("ALTER TABLE folioharbor.job_attempts ADD CONSTRAINT injected_operator_attempt_failure CHECK(outcome IS DISTINCT FROM 'operator_required') NOT VALID")
+        .execute(&pools.owner).await?;
     assert!(
         repository
-            .operator_required(
+            .pause_import_operator_required(
+                id,
+                "worker-a",
+                now + Duration::seconds(1),
+                "schema_incompatible",
+                "operator action required"
+            )
+            .await
+            .is_err()
+    );
+    let rolled_back: (String, String, bool) = sqlx::query_as(
+        "SELECT upload.state,job.state,attempt.finished_at IS NULL FROM folioharbor.upload_sessions upload JOIN folioharbor.background_jobs job ON job.job_id=$2 JOIN folioharbor.job_attempts attempt ON attempt.job_id=job.job_id AND attempt.attempt=job.attempt_count WHERE upload.upload_id=$1",
+    )
+    .bind(upload.as_uuid()).bind(id.as_uuid()).fetch_one(&pools.owner).await?;
+    assert_eq!(rolled_back, ("validating".into(), "leased".into(), true));
+    sqlx::query(
+        "ALTER TABLE folioharbor.job_attempts DROP CONSTRAINT injected_operator_attempt_failure",
+    )
+    .execute(&pools.owner)
+    .await?;
+    assert!(
+        repository
+            .pause_import_operator_required(
                 id,
                 "worker-a",
                 now + Duration::seconds(1),

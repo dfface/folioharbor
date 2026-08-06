@@ -255,6 +255,16 @@ async fn runner_maps_all_closed_failures_to_durable_queue_states_and_retries_tra
     sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,created_at,updated_at) VALUES($1,'Failures',$2,$2)").bind(library.as_uuid()).bind(now).execute(&pools.owner).await?;
     let uploads = [UploadId::new(), UploadId::new(), UploadId::new()];
     let ids = [JobId::new(), JobId::new(), JobId::new()];
+    sqlx::query("UPDATE folioharbor.libraries SET quota_reserved_bytes=1 WHERE library_id=$1")
+        .bind(library.as_uuid())
+        .execute(&pools.owner)
+        .await?;
+    sqlx::query("INSERT INTO folioharbor.upload_sessions(upload_id,library_id,created_by,file_name,media_type,declared_bytes,received_bytes,state,dedup_scope,storage_key,sha256,expires_at,created_at,updated_at) VALUES($1,$2,$3,'operator.epub','application/epub+zip',1,1,'validating','instance','blob:operator-fixture',decode(repeat('66',32),'hex'),$4,$5,$5)")
+        .bind(uploads[2].as_uuid()).bind(library.as_uuid()).bind(actor.as_uuid())
+        .bind(now+Duration::hours(1)).bind(now).execute(&pools.owner).await?;
+    sqlx::query("INSERT INTO folioharbor.quota_reservations(upload_id,library_id,reserved_bytes,expires_at,state) VALUES($1,$2,1,$3,'active')")
+        .bind(uploads[2].as_uuid()).bind(library.as_uuid()).bind(now+Duration::hours(1))
+        .execute(&pools.owner).await?;
     let jobs = Arc::new(PgJobRepository::new(pools.worker.clone()));
     for (index, upload) in uploads.into_iter().enumerate() {
         jobs.enqueue(
@@ -536,27 +546,29 @@ async fn operator_paused_import_retains_source_past_cleanup_then_resumes_to_succ
     let reconciliation = imports
         .reconcile(seeded.upload, seeded.library, RequestId::new(), now)
         .await?;
-    let folioharbor_application::ports::ImportReconciliation::Work(work) = reconciliation else {
+    let folioharbor_application::ports::ImportReconciliation::Work(_) = reconciliation else {
         anyhow::bail!("queued import did not reconcile to work");
     };
-    imports
-        .record_failure(
-            &work,
-            folioharbor_domain::imports::upload::UploadState::OperatorRequired,
-            "parser_configuration_invalid",
-            RequestId::new(),
-            now,
-        )
+    sqlx::query("UPDATE folioharbor.upload_sessions SET state='operator_required',error_code='parser_configuration_invalid' WHERE upload_id=$1")
+        .bind(seeded.upload.as_uuid()).execute(&pools.owner).await?;
+    sqlx::query("UPDATE folioharbor.background_jobs SET lease_expires_at=$2 WHERE job_id=$1")
+        .bind(seeded.job.as_uuid())
+        .bind(now - Duration::seconds(1))
+        .execute(&pools.owner)
         .await?;
-    assert!(
-        jobs.operator_required(
-            seeded.job,
-            "operator-pause",
-            now,
-            "parser_configuration_invalid",
-            "operator action required",
-        )
-        .await?
+    assert_eq!(
+        import_service(&pools, blobs.clone(), "operator-converge")
+            .run_once()
+            .await?,
+        1
+    );
+    let converged: (String, String, i32) = sqlx::query_as(
+        "SELECT upload.state,job.state,job.attempt_count FROM folioharbor.upload_sessions upload JOIN folioharbor.background_jobs job ON job.job_id=$2 WHERE upload.upload_id=$1",
+    )
+    .bind(seeded.upload.as_uuid()).bind(seeded.job.as_uuid()).fetch_one(&pools.owner).await?;
+    assert_eq!(
+        converged,
+        ("operator_required".into(), "operator_required".into(), 2)
     );
     let cleanup = CleanupImports::new(
         Arc::new(PgImportCleanupRepository::new(pools.worker.clone())),

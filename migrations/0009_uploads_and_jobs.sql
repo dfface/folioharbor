@@ -260,6 +260,55 @@ ALTER FUNCTION folioharbor.job_ensure_cleanup_worker(timestamptz) OWNER TO folio
 REVOKE ALL ON FUNCTION folioharbor.job_ensure_cleanup_worker(timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION folioharbor.job_ensure_cleanup_worker(timestamptz) TO folioharbor_worker;
 
+CREATE FUNCTION folioharbor.job_pause_import_operator_worker(
+ p_job uuid,p_owner text,p_now timestamptz,p_code text,p_summary text
+) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE target_library uuid;
+DECLARE target_upload uuid;
+DECLARE upload folioharbor.upload_sessions%ROWTYPE;
+DECLARE job folioharbor.background_jobs%ROWTYPE;
+BEGIN
+ IF session_user<>'folioharbor_worker' OR NOT folioharbor.is_worker()
+    OR length(p_owner) NOT BETWEEN 1 AND 128
+    OR p_code IS NULL OR p_code !~ '^[a-z][a-z0-9_]{0,63}$'
+    OR p_summary IS NULL OR length(p_summary)>512 THEN RETURN false; END IF;
+ SELECT candidate.library_id,
+  CASE WHEN candidate.input->>'upload_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+   THEN (candidate.input->>'upload_id')::uuid END
+  INTO target_library,target_upload FROM folioharbor.background_jobs candidate
+  WHERE candidate.job_id=p_job AND candidate.kind='import_epub' AND candidate.state='leased'
+    AND candidate.lease_owner=p_owner AND candidate.lease_expires_at>p_now
+    AND candidate.library_id IS NOT NULL AND candidate.input->'version'='1'::jsonb
+    AND jsonb_typeof(candidate.input->'upload_id')='string'
+    AND candidate.input->>'upload_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$';
+ IF target_library IS NULL OR target_upload IS NULL THEN RETURN false; END IF;
+ PERFORM 1 FROM folioharbor.libraries WHERE library_id=target_library FOR UPDATE;
+ SELECT * INTO upload FROM folioharbor.upload_sessions
+  WHERE upload_id=target_upload AND library_id=target_library FOR UPDATE;
+ SELECT * INTO job FROM folioharbor.background_jobs WHERE job_id=p_job FOR UPDATE;
+ IF upload.upload_id IS NULL OR upload.state NOT IN('validating','importing','operator_required')
+    OR upload.storage_key IS NULL
+    OR job.kind<>'import_epub' OR job.state<>'leased' OR job.lease_owner IS DISTINCT FROM p_owner
+    OR job.lease_expires_at<=p_now OR job.library_id IS DISTINCT FROM target_library
+    OR job.input->>'upload_id' IS DISTINCT FROM target_upload::text
+    OR NOT EXISTS(SELECT 1 FROM folioharbor.quota_reservations
+      WHERE upload_id=target_upload AND library_id=target_library AND state='active')
+    OR NOT EXISTS(SELECT 1 FROM folioharbor.job_attempts
+      WHERE job_id=p_job AND attempt=job.attempt_count AND finished_at IS NULL) THEN RETURN false; END IF;
+ UPDATE folioharbor.upload_sessions SET state='operator_required',error_code=p_code,
+  error_summary=p_summary,updated_at=p_now WHERE upload_id=target_upload;
+ UPDATE folioharbor.background_jobs SET state='operator_required',lease_owner=NULL,
+  lease_expires_at=NULL,error_code=p_code,error_summary=p_summary,updated_at=p_now WHERE job_id=p_job;
+ UPDATE folioharbor.job_attempts SET finished_at=p_now,outcome='operator_required',
+  error_code=p_code,error_summary=p_summary
+  WHERE job_id=p_job AND attempt=job.attempt_count AND finished_at IS NULL;
+ IF NOT FOUND THEN RAISE EXCEPTION 'operator-required attempt update failed' USING ERRCODE='23514'; END IF;
+ RETURN true;
+END $$;
+ALTER FUNCTION folioharbor.job_pause_import_operator_worker(uuid,text,timestamptz,text,text) OWNER TO folioharbor_owner;
+REVOKE ALL ON FUNCTION folioharbor.job_pause_import_operator_worker(uuid,text,timestamptz,text,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION folioharbor.job_pause_import_operator_worker(uuid,text,timestamptz,text,text) TO folioharbor_worker;
+
 CREATE FUNCTION folioharbor.job_resume_operator_worker(p_job uuid,p_now timestamptz)
 RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 DECLARE target_library uuid;
@@ -563,7 +612,7 @@ DECLARE reservation folioharbor.quota_reservations%ROWTYPE;
 BEGIN
  IF session_user<>'folioharbor_worker' OR NOT folioharbor.is_worker()
     OR p_library IS DISTINCT FROM folioharbor.current_library_id()
-    OR p_to NOT IN('failed','retry_wait','operator_required') THEN RETURN false; END IF;
+    OR p_to NOT IN('failed','retry_wait') THEN RETURN false; END IF;
  PERFORM 1 FROM folioharbor.libraries WHERE library_id=p_library FOR UPDATE;
  SELECT * INTO upload FROM folioharbor.upload_sessions
   WHERE upload_id=p_upload AND library_id=p_library FOR UPDATE;

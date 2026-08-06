@@ -70,6 +70,14 @@ pub trait JobRepository: Send + Sync {
         code: &str,
         summary: &str,
     ) -> Result<bool, JobRepositoryError>;
+    async fn pause_import_operator_required(
+        &self,
+        id: JobId,
+        owner: &str,
+        now: OffsetDateTime,
+        code: &str,
+        summary: &str,
+    ) -> Result<bool, JobRepositoryError>;
     async fn resume_operator_required(
         &self,
         id: JobId,

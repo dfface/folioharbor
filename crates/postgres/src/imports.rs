@@ -240,6 +240,13 @@ impl ImportRepository for PgImportRepository {
                 code: row.error_code.unwrap_or_else(|| "import_failed".to_owned()),
             });
         }
+        if row.outcome == "operator_required" {
+            return Ok(ImportReconciliation::OperatorRequired {
+                code: row
+                    .error_code
+                    .unwrap_or_else(|| "schema_incompatible".to_owned()),
+            });
+        }
         Ok(ImportReconciliation::Work(ImportWork {
             upload_id,
             library_id,
@@ -286,6 +293,9 @@ impl ImportRepository for PgImportRepository {
         request_id: RequestId,
         now: OffsetDateTime,
     ) -> Result<(), ImportRepositoryError> {
+        if to == UploadState::OperatorRequired {
+            return Err(ImportRepositoryError::InvalidState);
+        }
         let mut transaction = self.pool.begin().await.map_err(unavailable)?;
         PgTransactionContext::apply(
             &mut transaction,

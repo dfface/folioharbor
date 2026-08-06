@@ -176,8 +176,13 @@ async fn run_leased(
             jobs.fail(job.job_id, &owner, now, code, &summary).await?
         }
         Err(JobFailure::OperatorRequired { code, summary }) => {
-            jobs.operator_required(job.job_id, &owner, now, code, &summary)
-                .await?
+            if job.kind == folioharbor_domain::imports::job::JobKind::ImportEpub {
+                jobs.pause_import_operator_required(job.job_id, &owner, now, code, &summary)
+                    .await?
+            } else {
+                jobs.operator_required(job.job_id, &owner, now, code, &summary)
+                    .await?
+            }
         }
     };
     if !changed {
@@ -295,6 +300,17 @@ mod tests {
             _: OffsetDateTime,
         ) -> Result<bool, JobRepositoryError> {
             unreachable!("fixture does not resume jobs")
+        }
+
+        async fn pause_import_operator_required(
+            &self,
+            _: JobId,
+            _: &str,
+            _: OffsetDateTime,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, JobRepositoryError> {
+            unreachable!("fixture jobs succeed")
         }
     }
 

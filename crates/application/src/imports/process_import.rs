@@ -120,7 +120,8 @@ impl ProcessImportJob {
             .map_err(|error| self.repository_failure(error, &job, now))?
         {
             ImportReconciliation::Complete => return Ok(JobOutcome::AlreadyComplete),
-            ImportReconciliation::TerminalFailure { code } => {
+            ImportReconciliation::TerminalFailure { code }
+            | ImportReconciliation::OperatorRequired { code } => {
                 return Err(reconciled_failure(&code));
             }
             ImportReconciliation::Work(work) => work,
@@ -196,22 +197,18 @@ impl ProcessImportJob {
                 "blob_io_unavailable",
                 transient(self.retries, job, now, "blob_io_unavailable"),
             ),
-            PublicationParserError::Configuration => (
-                UploadState::OperatorRequired,
-                "parser_configuration_invalid",
-                operator(
+            PublicationParserError::Configuration => {
+                return operator(
                     "parser_configuration_invalid",
                     "parser configuration requires operator action",
-                ),
-            ),
-            PublicationParserError::Capacity => (
-                UploadState::OperatorRequired,
-                "storage_capacity_exhausted",
-                operator(
+                );
+            }
+            PublicationParserError::Capacity => {
+                return operator(
                     "storage_capacity_exhausted",
                     "storage requires operator action",
-                ),
-            ),
+                );
+            }
         };
         if let Err(repository_error) = self
             .imports

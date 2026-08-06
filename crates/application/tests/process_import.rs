@@ -248,19 +248,19 @@ async fn parser_dependency_and_configuration_failures_choose_retry_or_operator_a
     let cases = [
         (
             PublicationParserError::Unavailable,
-            UploadState::RetryWait,
+            Some(UploadState::RetryWait),
             "blob_io_unavailable",
             false,
         ),
         (
             PublicationParserError::Configuration,
-            UploadState::OperatorRequired,
+            None,
             "parser_configuration_invalid",
             true,
         ),
         (
             PublicationParserError::Capacity,
-            UploadState::OperatorRequired,
+            None,
             "storage_capacity_exhausted",
             true,
         ),
@@ -296,7 +296,7 @@ async fn parser_dependency_and_configuration_failures_choose_retry_or_operator_a
         );
         assert_eq!(
             *imports.transitions.lock().expect("transition fixture"),
-            vec![expected_state]
+            expected_state.into_iter().collect::<Vec<_>>()
         );
     }
 }

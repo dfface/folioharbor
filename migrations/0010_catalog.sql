@@ -334,6 +334,11 @@ BEGIN
         upload.storage_key,upload.state,NULL::text;
       RETURN;
     END IF;
+    IF upload.state='operator_required' THEN
+      RETURN QUERY SELECT 'operator_required'::text,upload.created_by,NULL::uuid,upload.received_bytes,
+        upload.storage_key,upload.state,upload.error_code;
+      RETURN;
+    END IF;
     IF upload.state='failed' AND upload.storage_key IS NOT NULL THEN
       SELECT * INTO reservation FROM folioharbor.quota_reservations
        WHERE upload_id=p_upload FOR UPDATE;
