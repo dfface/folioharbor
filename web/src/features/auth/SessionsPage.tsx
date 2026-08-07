@@ -8,9 +8,7 @@ import {
   type Session,
 } from "./api";
 import { requestErrorMessage, useRequestController } from "./form";
-import { sessionQueryKey } from "./session";
-
-const sessionsQueryKey = ["auth", "sessions"] as const;
+import { resetAuthIdentityQueries, sessionsQueryKey } from "./session";
 
 export function SessionsPage() {
   const { t } = useTranslation();
@@ -24,19 +22,12 @@ export function SessionsPage() {
     mutationFn: (session: Session) => revokeSession(session.session_id, requestSignal()),
     onSuccess: (_data, revokedSession) =>
       revokedSession.is_current
-        ? Promise.all([
-            queryClient.invalidateQueries({ queryKey: sessionsQueryKey }),
-            queryClient.invalidateQueries({ queryKey: sessionQueryKey }),
-          ])
+        ? resetAuthIdentityQueries(queryClient)
         : queryClient.invalidateQueries({ queryKey: sessionsQueryKey }),
   });
   const revokeAll = useMutation({
     mutationFn: (activeSessions: readonly Session[]) => revokeAllSessions(activeSessions, requestSignal()),
-    onSuccess: () =>
-      Promise.all([
-        queryClient.invalidateQueries({ queryKey: sessionsQueryKey }),
-        queryClient.invalidateQueries({ queryKey: sessionQueryKey }),
-      ]),
+    onSuccess: () => resetAuthIdentityQueries(queryClient),
   });
 
   const error = sessions.error ?? revokeOne.error ?? revokeAll.error;

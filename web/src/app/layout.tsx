@@ -5,7 +5,7 @@ import { Link, Outlet, useNavigate } from "react-router-dom";
 import i18n from "../i18n";
 import { logout } from "../features/auth/api";
 import { requestErrorMessage, useRequestController } from "../features/auth/form";
-import { sessionQueryKey } from "../features/auth/session";
+import { resetAuthIdentityQueries } from "../features/auth/session";
 
 export function AppLayout() {
   const { t } = useTranslation();
@@ -40,7 +40,7 @@ export function AuthenticatedLayout() {
   const mutation = useMutation({
     mutationFn: () => logout(requestSignal()),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: sessionQueryKey }).then(() => {
+      void resetAuthIdentityQueries(queryClient).then(() => {
         void navigate("/login", { replace: true });
       });
     },

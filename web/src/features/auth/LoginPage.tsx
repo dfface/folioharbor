@@ -14,7 +14,7 @@ import {
   useErrorSummaryState,
   useRequestController,
 } from "./form";
-import { sessionQueryKey } from "./session";
+import { resetAuthIdentityQueries } from "./session";
 
 export function LoginPage() {
   const { t } = useTranslation();
@@ -32,7 +32,7 @@ export function LoginPage() {
     onSuccess: () => {
       setError(null);
       setFieldErrors({});
-      void queryClient.invalidateQueries({ queryKey: sessionQueryKey }).then(() => {
+      void resetAuthIdentityQueries(queryClient).then(() => {
         void navigate("/", { replace: true });
       });
     },

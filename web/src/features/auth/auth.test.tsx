@@ -228,6 +228,72 @@ test("password recovery stays non-enumerating and reset establishes a new authen
   expect(await screen.findByRole("heading", { name: "FolioHarbor" })).toBeInTheDocument();
 });
 
+test("account B never sees account A's cached session list", async () => {
+  const accountASessionId = "018f47b5-58b4-7ba6-9a3a-d9f41f17a272";
+  const accountBSessionId = "018f47b5-58b4-7ba6-9a3a-d9f41f17a273";
+  const accountBUserId = "018f47b5-58b4-7ba6-9a3a-d9f41f17a274";
+  let authenticatedAccount: "a" | "b" | null = "a";
+  let releaseAccountBSessions: (() => void) | undefined;
+  const accountBSessionsPending = new Promise<void>((resolve) => {
+    releaseAccountBSessions = resolve;
+  });
+
+  server.use(
+    http.get(`${apiOrigin}/api/v1/auth/session`, () => {
+      if (authenticatedAccount === null) {
+        return unauthenticatedProblem();
+      }
+      const currentSessionId = authenticatedAccount === "a" ? accountASessionId : accountBSessionId;
+      return HttpResponse.json({ session_id: currentSessionId, is_current: true, status: "active" });
+    }),
+    http.get(`${apiOrigin}/api/v1/auth/sessions`, async () => {
+      const account = authenticatedAccount;
+      if (account === null) {
+        return unauthenticatedProblem();
+      }
+      if (account === "b") {
+        await accountBSessionsPending;
+      }
+      const currentSessionId = account === "a" ? accountASessionId : accountBSessionId;
+      return HttpResponse.json([{ session_id: currentSessionId, is_current: true, status: "active" }]);
+    }),
+    http.post(`${apiOrigin}/api/v1/auth/logout`, () => {
+      authenticatedAccount = null;
+      return new HttpResponse(null, { status: 204 });
+    }),
+    http.post(`${apiOrigin}/api/v1/auth/login`, async ({ request }) => {
+      const body: unknown = await request.json();
+      if (!matchesBody(body, { email: "account-b@example.com", password: "safe-password-456" })) {
+        return HttpResponse.json(problem("invalid_json_body", "01K1BODY000000000000000001"), { status: 422 });
+      }
+      authenticatedAccount = "b";
+      return HttpResponse.json({ user_id: accountBUserId, session_id: accountBSessionId });
+    }),
+  );
+
+  const user = userEvent.setup();
+  renderApp("/account/sessions");
+
+  expect(await screen.findByText(accountASessionId)).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Log out" }));
+  await screen.findByRole("heading", { name: "Log in" });
+
+  await user.type(screen.getByLabelText("Email"), "account-b@example.com");
+  await user.type(screen.getByLabelText("Password"), "safe-password-456");
+  await user.click(screen.getByRole("button", { name: "Log in" }));
+  await screen.findByRole("link", { name: "Sessions" });
+  await user.click(screen.getByRole("link", { name: "Sessions" }));
+  await screen.findByRole("heading", { name: "Account sessions" });
+
+  try {
+    expect(screen.queryByText(accountASessionId)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: `Revoke ${accountASessionId}` })).not.toBeInTheDocument();
+  } finally {
+    releaseAccountBSessions?.();
+  }
+  expect(await screen.findByText(accountBSessionId)).toBeInTheDocument();
+});
+
 test("the account page lists sessions and sends CSRF-protected revoke-one and revoke-all requests", async () => {
   const otherSessionId = "018f47b5-58b4-7ba6-9a3a-d9f41f17a270";
   const activeSessions = new Set([sessionId, otherSessionId]);
