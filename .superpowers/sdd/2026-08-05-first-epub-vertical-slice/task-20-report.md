@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented the Task 20 Web vertical slice and the smallest server/OpenAPI additions required to make it secure and usable. Library identity remains route-derived, effective capabilities remain server-derived, invitation outcomes expose only safe state, and terminal uploads can link to the server-selected Item.
+Implemented the Task 20 Web vertical slice and the smallest server/OpenAPI additions required to make it secure and usable. Independent-review P1/P2 findings are repaired: authenticated resource caches are isolated across identities, route detail cannot reintroduce a library absent from the visible list, migration history is gap-free through 0026 without renaming durable history, and invitation UI follows its dedicated capability and operation-specific role contract.
 
 ## RED evidence
 
@@ -13,6 +13,12 @@ Backend contract tests were also introduced before implementation:
 - the OpenAPI library test failed because `/api/v1/invitations/accept` was absent;
 - the upload contract test failed because `UploadStatus` had no `item_id`;
 - PostgreSQL-backed route tests established the required server-authoritative role matrix and safe invitation state behavior.
+
+Independent-review repairs followed focused RED/GREEN cycles:
+
+- the two-account Web regression initially rendered account A's library, member, capability links, catalog Item, and upload state while account B's resource responses were held pending; the unmatched-detail regression also stayed on account A's route;
+- the invitation regressions initially rendered the form when `can_invite_members` was false and exposed role values `[reader, editor, owner]`; mutation checks also proved invite-only navigation, direct-route access, and suppression of member-list reads failed under the old gates;
+- the migration-from-zero gate initially observed applied versions 1 through 26 while its invariant expected only 1 through 25.
 
 ## Delivered behavior
 
@@ -25,6 +31,8 @@ Backend contract tests were also introduced before implementation:
 - English and Simplified Chinese copy plus axe-core accessibility assertions on representative and lifecycle pages.
 - OpenAPI-generated Web DTOs for library capabilities, member operations, invitation acceptance, and upload Item targets.
 - Migration `0026_web_contracts.sql` for server-derived visible-library capabilities, detailed invitation acceptance, and atomic upload result Item persistence.
+- One authenticated-resource query-key root covers library detail/list, catalog, member, and upload caches; every successful identity transition uses the Task 19 reset/remove flow for that complete subtree.
+- Invitation and member-management controls are independently gated by `can_invite_members` and `can_manage_members`; invitation roles come directly from the generated operation request type and contain only `editor | reader`.
 
 ## GREEN evidence
 
@@ -37,7 +45,7 @@ pnpm --dir web test --run \
   src/features/members/member-flow.test.tsx
 EXIT 0
 Test Files 3 passed (3)
-Tests 27 passed (27)
+Tests 32 passed (32)
 ```
 
 All Web component tests:
@@ -46,7 +54,7 @@ All Web component tests:
 pnpm --dir web test --run
 EXIT 0
 Test Files 4 passed (4)
-Tests 40 passed (40)
+Tests 45 passed (45)
 ```
 
 Static and production checks:
@@ -60,7 +68,7 @@ EXIT 0
 
 pnpm --dir web build
 EXIT 0
-141 modules transformed
+142 modules transformed
 
 cargo fmt --check
 EXIT 0
@@ -106,6 +114,35 @@ FOLIOHARBOR_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres \
 EXIT 0 (1 passed)
 ```
 
+Independent-review repair gates:
+
+```text
+FOLIOHARBOR_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres \
+  cargo test -p folioharbor-postgres --test migration_from_zero \
+  migrations_from_zero_preserve_least_privilege_roles_and_are_idempotent -- --exact
+EXIT 0 (1 passed)
+
+FOLIOHARBOR_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres \
+  cargo test -p folioharbor-postgres --test library_repository \
+  invitations_are_email_bound_expiring_single_use_and_preserve_personal_libraries -- --exact
+EXIT 0 (1 passed)
+
+FOLIOHARBOR_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres \
+  cargo test -p folioharbor-postgres --test catalog_constraints \
+  exact_blob_is_idempotent_per_library_but_shared_across_libraries -- --exact
+EXIT 0 (1 passed)
+
+FOLIOHARBOR_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres \
+  cargo test -p folioharbor-postgres --test catalog_constraints \
+  concurrent_same_library_finalization_creates_one_active_item -- --exact
+EXIT 0 (1 passed)
+```
+
+Migration sequence decision: preserve committed `0026_web_contracts.sql` and its checksum. The
+governing plan now assigns the not-yet-implemented Task 22 operations migration to
+`0027_operations.sql`; renaming 0026 after review or possible application would make durable SQLx
+history unsafe.
+
 ## Unfinished Task 20 items
 
 No known functional Task 20 item is intentionally omitted from the implementation. The following broader verification was not completed before this reviewable checkpoint:
@@ -117,5 +154,5 @@ No known functional Task 20 item is intentionally omitted from the implementatio
 ## Concerns and follow-up
 
 - axe-core passes, but jsdom logs its expected `HTMLCanvasElement.getContext` not-implemented diagnostic while evaluating color contrast. This does not change the zero-violation assertions or test exit status; a real-browser accessibility pass remains valuable.
-- The plan had reserved migration number `0026` for later Task 22 work. Task 22 must use the next available migration number (or be renumbered during integration).
+- Task 22 must follow the amended governing-plan reservation and create `0027_operations.sql`; `0026_web_contracts.sql` is now immutable migration history.
 - The Web currently links Item read actions to the Task 21 reader route; implementing that route remains Task 21, outside this slice.

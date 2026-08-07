@@ -35,9 +35,9 @@ export function LibraryLayout() {
   }
 
   const library = current.data;
-  const visibleLibraries = libraries.data.some(({ library_id }) => library_id === library.library_id)
-    ? libraries.data
-    : [library, ...libraries.data];
+  if (!libraries.data.some(({ library_id }) => library_id === library.library_id)) {
+    return <Navigate to="/" replace />;
+  }
   const base = `/libraries/${encodeURIComponent(library.library_id)}`;
 
   return (
@@ -45,7 +45,7 @@ export function LibraryLayout() {
       <section aria-labelledby="current-library-title">
         <LibrarySwitcher
           currentLibraryId={library.library_id}
-          libraries={visibleLibraries}
+          libraries={libraries.data}
           onChange={(nextLibrary) => { void navigate(`/libraries/${encodeURIComponent(nextLibrary)}/books`); }}
         />
         <h2 id="current-library-title">{library.name}</h2>
@@ -53,7 +53,9 @@ export function LibraryLayout() {
         <nav aria-label={t("libraries.navigation")}>
           <Link to={`${base}/books`}>{t("libraries.books")}</Link>{" "}
           {library.capabilities.can_upload ? <Link to={`${base}/uploads`}>{t("libraries.uploads")}</Link> : null}{" "}
-          {library.capabilities.can_manage_members ? <Link to={`${base}/members`}>{t("libraries.members")}</Link> : null}{" "}
+          {library.capabilities.can_invite_members || library.capabilities.can_manage_members
+            ? <Link to={`${base}/members`}>{t("libraries.members")}</Link>
+            : null}{" "}
           {library.capabilities.can_manage_settings ? <Link to={`${base}/settings`}>{t("libraries.settings")}</Link> : null}
         </nav>
         <Outlet />

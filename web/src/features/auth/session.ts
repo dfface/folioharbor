@@ -1,6 +1,7 @@
 import { useQuery, type QueryClient } from "@tanstack/react-query";
 
 import { ApiProblem } from "../../api/problem";
+import { authenticatedResourcesQueryKey } from "../../api/queryKeys";
 import { currentSession, type Session } from "./api";
 
 export const sessionQueryKey = ["auth", "session"] as const;
@@ -9,9 +10,11 @@ export const sessionsQueryKey = ["auth", "sessions"] as const;
 export async function resetAuthIdentityQueries(queryClient: QueryClient): Promise<void> {
   await Promise.all([
     queryClient.resetQueries({ queryKey: sessionsQueryKey }),
+    queryClient.resetQueries({ queryKey: authenticatedResourcesQueryKey }),
     queryClient.invalidateQueries({ queryKey: sessionQueryKey }),
   ]);
   queryClient.removeQueries({ queryKey: sessionsQueryKey, type: "inactive" });
+  queryClient.removeQueries({ queryKey: authenticatedResourcesQueryKey, type: "inactive" });
 }
 
 async function loadSession(signal: AbortSignal): Promise<Session | null> {

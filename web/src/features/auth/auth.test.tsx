@@ -72,6 +72,7 @@ test("a reader can register, verify their email, log in, and reach the authentic
       }
       return HttpResponse.json({ session_id: sessionId, is_current: true, status: "active" });
     }),
+    http.get(`${apiOrigin}/api/v1/libraries`, () => HttpResponse.json([])),
     http.post(`${apiOrigin}/api/v1/auth/register`, async ({ request }) => {
       const body: unknown = await request.json();
       if (!matchesBody(body, { email: "reader@example.com", password: "safe-password-123" })) {
@@ -200,6 +201,7 @@ test("password recovery stays non-enumerating and reset establishes a new authen
         ? HttpResponse.json({ session_id: sessionId, is_current: true, status: "active" })
         : unauthenticatedProblem(),
     ),
+    http.get(`${apiOrigin}/api/v1/libraries`, () => HttpResponse.json([])),
     http.post(`${apiOrigin}/api/v1/auth/forgot-password`, () =>
       HttpResponse.json({ status: "accepted" }, { status: 202 }),
     ),
@@ -257,6 +259,7 @@ test("account B never sees account A's cached session list", async () => {
       const currentSessionId = account === "a" ? accountASessionId : accountBSessionId;
       return HttpResponse.json([{ session_id: currentSessionId, is_current: true, status: "active" }]);
     }),
+    http.get(`${apiOrigin}/api/v1/libraries`, () => HttpResponse.json([])),
     http.post(`${apiOrigin}/api/v1/auth/logout`, () => {
       authenticatedAccount = null;
       return new HttpResponse(null, { status: 204 });

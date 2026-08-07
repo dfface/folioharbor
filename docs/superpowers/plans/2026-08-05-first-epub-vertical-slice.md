@@ -791,7 +791,14 @@ migration 0021 for authoritative catalog capability projection and anti-enumerat
 semantics. Its code-quality hardening adds migration 0022 so authorization, allowed-start audit,
 and catalog capabilities all derive from persisted `item.download` RBAC. Its final hardening adds
 migration 0023 for the partition-compatible denied-download aggregation index. The remaining
-planned migrations are therefore numbered 0024 through 0026.
+planned migrations were therefore numbered 0024 through 0026.
+
+**Task 20 migration-sequence amendment (2026-08-07):** Task 20's server-backed Web contracts own
+additive migration `0026_web_contracts.sql`. Migration 0026 is already committed in repository
+history and may have been applied by review or local deployment environments, so its durable
+version and checksum remain unchanged. Task 22 has not been implemented; its operations migration
+reservation moves forward to `0027_operations.sql`. This preserves a gap-free applied sequence and
+avoids retroactively renaming migration history.
 
 - [ ] **Step 1: Write failing list/detail tests**
 
@@ -1311,7 +1318,7 @@ git commit -m "feat: add secure EPUB reader and progress sync"
 
 **Files:**
 
-- Create: `migrations/0026_operations.sql`
+- Create: `migrations/0027_operations.sql`
 - Create: `crates/application/src/operations/{mod,health,bootstrap_admin,consistency_check}.rs`
 - Create: `crates/postgres/src/operations.rs`
 - Create: `crates/http/src/routes/health.rs`
@@ -1353,7 +1360,7 @@ Migration completes before API/Worker; runtime processes use distinct role secre
 Document PostgreSQL plus Blob volume as one business backup set, schema version and Blob watermark recording, restore ordering, and post-restore `storage check` for missing Blob, orphan location, and hash mismatch. Do not claim crash-consistent cross-volume snapshots unless the operator provides them. Run CLI/health/Compose config tests and workspace/Web gates. Commit:
 
 ```bash
-git add migrations/0026_operations.sql crates apps deploy docs/operations
+git add migrations/0027_operations.sql crates apps deploy docs/operations
 git commit -m "feat: add deployment operations and observability"
 ```
 

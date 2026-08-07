@@ -1,9 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 
+import { libraryQueryKey } from "../libraries/queries";
 import { getUploadStatus } from "./api";
 
 export function uploadStatusQueryKey(libraryId: string, uploadId: string) {
-  return ["libraries", libraryId, "uploads", uploadId] as const;
+  return [...libraryQueryKey(libraryId), "uploads", uploadId] as const;
 }
 
 const terminalStates = new Set(["ready", "duplicate", "failed", "expired"]);

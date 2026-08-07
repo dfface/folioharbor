@@ -5,7 +5,14 @@ import { Navigate } from "react-router-dom";
 
 import { formText, requestErrorMessage, useRequestController } from "../auth/form";
 import { useCurrentLibrary } from "../libraries/LibraryLayout";
-import { changeMemberRole, inviteMember, removeMember, type MemberRole } from "./api";
+import {
+  changeMemberRole,
+  inviteMember,
+  removeMember,
+  type InvitationRole,
+  type InviteMemberRequest,
+  type MemberRole,
+} from "./api";
 import { membersQueryKey, useMembers } from "./queries";
 
 type Notice = "invited" | "removed" | "roleUpdated" | null;
@@ -13,7 +20,9 @@ type Notice = "invited" | "removed" | "roleUpdated" | null;
 export function MembersPage() {
   const { t } = useTranslation();
   const library = useCurrentLibrary();
-  const members = useMembers(library.library_id);
+  const canInviteMembers = library.capabilities.can_invite_members;
+  const canManageMembers = library.capabilities.can_manage_members;
+  const members = useMembers(library.library_id, canManageMembers);
   const queryClient = useQueryClient();
   const requestSignal = useRequestController();
   const [notice, setNotice] = useState<Notice>(null);
@@ -21,7 +30,7 @@ export function MembersPage() {
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: membersQueryKey(library.library_id) });
   const invitation = useMutation({
-    mutationFn: (input: { email: string; role: MemberRole }) => inviteMember(library.library_id, input, requestSignal()),
+    mutationFn: (input: InviteMemberRequest) => inviteMember(library.library_id, input, requestSignal()),
     onError: (cause) => { setNotice(null); setError(cause); },
     onSuccess: () => { setError(null); setNotice("invited"); },
   });
@@ -37,7 +46,7 @@ export function MembersPage() {
     onSuccess: () => { setError(null); setNotice("removed"); void refresh(); },
   });
 
-  if (!library.capabilities.can_manage_members) {
+  if (!canInviteMembers && !canManageMembers) {
     return <Navigate to={`/libraries/${encodeURIComponent(library.library_id)}/books`} replace />;
   }
 
@@ -48,7 +57,7 @@ export function MembersPage() {
     setNotice(null);
     invitation.mutate({
       email: formText(data, "email").trim(),
-      role: (formText(data, "role") || "reader") as MemberRole,
+      role: (formText(data, "role") || "reader") as InvitationRole,
     });
   }
 
@@ -57,20 +66,21 @@ export function MembersPage() {
       <h3 id="members-title">{t("members.title")}</h3>
       {error === null ? null : <p role="alert">{requestErrorMessage(error, t)}</p>}
       {notice === null ? null : <p role="status">{t(`members.${notice}`)}</p>}
-      <form onSubmit={submitInvitation}>
-        <label htmlFor="invite-email">{t("members.inviteEmail")}</label>
-        <input id="invite-email" name="email" type="email" required />
-        <label htmlFor="invite-role">{t("members.inviteRole")}</label>
-        <select id="invite-role" name="role" defaultValue="reader">
-          <option value="reader">{t("roles.reader")}</option>
-          <option value="editor">{t("roles.editor")}</option>
-          <option value="owner">{t("roles.owner")}</option>
-        </select>
-        <button type="submit" disabled={invitation.isPending}>{t("members.send")}</button>
-      </form>
-      {members.isPending ? <p role="status">{t("members.loading")}</p> : null}
-      {members.isError ? <p role="alert">{requestErrorMessage(members.error, t)}</p> : null}
-      {members.data === undefined ? null : (
+      {canInviteMembers ? (
+        <form onSubmit={submitInvitation}>
+          <label htmlFor="invite-email">{t("members.inviteEmail")}</label>
+          <input id="invite-email" name="email" type="email" required />
+          <label htmlFor="invite-role">{t("members.inviteRole")}</label>
+          <select id="invite-role" name="role" defaultValue="reader">
+            <option value="reader">{t("roles.reader")}</option>
+            <option value="editor">{t("roles.editor")}</option>
+          </select>
+          <button type="submit" disabled={invitation.isPending}>{t("members.send")}</button>
+        </form>
+      ) : null}
+      {canManageMembers && members.isPending ? <p role="status">{t("members.loading")}</p> : null}
+      {canManageMembers && members.isError ? <p role="alert">{requestErrorMessage(members.error, t)}</p> : null}
+      {!canManageMembers || members.data === undefined ? null : (
         <ul>
           {members.data.map((member) => (
             <li key={member.user_id}>

@@ -1,8 +1,10 @@
 import { apiClient } from "../../api/client";
-import type { components } from "../../api/generated";
+import type { components, operations } from "../../api/generated";
 
 export type LibraryMember = components["schemas"]["LibraryMember"];
 export type MemberRole = LibraryMember["role"];
+export type InviteMemberRequest = operations["inviteLibraryMember"]["requestBody"]["content"]["application/json"];
+export type InvitationRole = InviteMemberRequest["role"];
 export type InvitationAcceptance = components["schemas"]["InvitationAcceptance"];
 
 function signalOption(signal: AbortSignal | undefined): { signal?: AbortSignal } {
@@ -15,7 +17,7 @@ export function listMembers(libraryId: string, signal?: AbortSignal): Promise<Li
 
 export function inviteMember(
   libraryId: string,
-  input: { email: string; role: MemberRole },
+  input: InviteMemberRequest,
   signal?: AbortSignal,
 ): Promise<void> {
   return apiClient.request(`/api/v1/libraries/${encodeURIComponent(libraryId)}/invitations`, {

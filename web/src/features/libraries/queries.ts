@@ -1,11 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 
+import { librariesQueryKey } from "../../api/queryKeys";
 import { getLibrary, listLibraries } from "./api";
 
-export const librariesQueryKey = ["libraries"] as const;
+export { librariesQueryKey };
 
 export function libraryQueryKey(libraryId: string) {
-  return ["libraries", libraryId] as const;
+  return [...librariesQueryKey, libraryId] as const;
 }
 
 export function useLibraries() {

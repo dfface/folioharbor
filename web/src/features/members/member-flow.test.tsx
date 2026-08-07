@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import axe from "axe-core";
 import { HttpResponse, http } from "msw";
@@ -105,6 +105,81 @@ test("an owner invites, changes roles, removes members, and relies on the server
   expect(await screen.findByText("Member removed.")).toBeInTheDocument();
   expect(screen.queryByText(readerId)).not.toBeInTheDocument();
   expect((await axe.run(document.body)).violations).toEqual([]);
+});
+
+test("can_manage_members without can_invite_members hides invitation controls", async () => {
+  const manageOnlyLibrary = {
+    ...ownerLibrary,
+    capabilities: { ...ownerLibrary.capabilities, can_invite_members: false },
+  } as const;
+  let memberRequests = 0;
+  server.use(
+    http.get(`${apiOrigin}/api/v1/auth/session`, () =>
+      HttpResponse.json({ session_id: "018f47b5-58b4-7ba6-9a3a-d9f41f17a26e", is_current: true, status: "active" }),
+    ),
+    http.get(`${apiOrigin}/api/v1/libraries`, () => HttpResponse.json([manageOnlyLibrary])),
+    http.get(`${apiOrigin}/api/v1/libraries/:libraryId`, () => HttpResponse.json(manageOnlyLibrary)),
+    http.get(`${apiOrigin}/api/v1/libraries/:libraryId/books`, () => HttpResponse.json({ items: [] })),
+    http.get(`${apiOrigin}/api/v1/libraries/:libraryId/members`, () => {
+      memberRequests += 1;
+      return HttpResponse.json([{ user_id: readerId, role: "reader" }]);
+    }),
+  );
+
+  renderApp(`/libraries/${libraryId}/members`);
+
+  expect(await screen.findByLabelText(`Role for ${readerId}`)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: `Remove ${readerId}` })).toBeInTheDocument();
+  expect(screen.queryByLabelText("Invitee email")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Send invitation" })).not.toBeInTheDocument();
+  expect(memberRequests).toBe(1);
+});
+
+test("can_invite_members without can_manage_members exposes only invitation controls", async () => {
+  const inviteOnlyLibrary = {
+    ...ownerLibrary,
+    capabilities: {
+      ...ownerLibrary.capabilities,
+      can_invite_members: true,
+      can_manage_members: false,
+    },
+  } as const;
+  let memberRequests = 0;
+  server.use(
+    http.get(`${apiOrigin}/api/v1/auth/session`, () =>
+      HttpResponse.json({ session_id: "018f47b5-58b4-7ba6-9a3a-d9f41f17a26e", is_current: true, status: "active" }),
+    ),
+    http.get(`${apiOrigin}/api/v1/libraries`, () => HttpResponse.json([inviteOnlyLibrary])),
+    http.get(`${apiOrigin}/api/v1/libraries/:libraryId`, () => HttpResponse.json(inviteOnlyLibrary)),
+    http.get(`${apiOrigin}/api/v1/libraries/:libraryId/books`, () => HttpResponse.json({ items: [] })),
+    http.get(`${apiOrigin}/api/v1/libraries/:libraryId/members`, () => {
+      memberRequests += 1;
+      return HttpResponse.json([{ user_id: readerId, role: "reader" }]);
+    }),
+  );
+
+  renderApp(`/libraries/${libraryId}/members`);
+
+  expect(await screen.findByLabelText("Invitee email")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Members" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Send invitation" })).toBeInTheDocument();
+  expect(screen.queryByLabelText(`Role for ${readerId}`)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: `Remove ${readerId}` })).not.toBeInTheDocument();
+  expect(memberRequests).toBe(0);
+});
+
+test("invitation roles match the server contract and never offer owner", async () => {
+  authenticatedHandlers();
+  server.use(
+    http.get(`${apiOrigin}/api/v1/libraries/:libraryId/members`, () => HttpResponse.json([])),
+  );
+
+  renderApp(`/libraries/${libraryId}/members`);
+
+  const invitationRole = await screen.findByLabelText("Invitation role");
+  expect(within(invitationRole).getAllByRole("option").map((option) => option.getAttribute("value")))
+    .toEqual(["reader", "editor"]);
+  expect(within(invitationRole).queryByRole("option", { name: "Owner" })).not.toBeInTheDocument();
 });
 
 test("library settings update the reader download toggle without merging reading permission", async () => {
