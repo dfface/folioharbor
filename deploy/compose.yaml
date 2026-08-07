@@ -43,7 +43,7 @@ services:
       - -eu
       - -c
       - |
-        install -d -m 0700 -o "$${APP_UID}" -g "$${APP_GID}" /data/blobs /data/staging
+        install -d -m 0700 -o "$${APP_UID}" -g "$${APP_GID}" /data
     environment:
       APP_UID: ${FOLIOHARBOR_UID:-10001}
       APP_GID: ${FOLIOHARBOR_GID:-10001}
@@ -58,7 +58,7 @@ services:
     command: ["folioharbor", "migrate"]
     environment:
       FOLIOHARBOR_DATABASE_URL_FILE: /run/secrets/owner_database_url
-      FOLIOHARBOR_STORAGE_ROOT: /var/lib/folioharbor/blobs
+      FOLIOHARBOR_STORAGE_ROOT: /var/lib/folioharbor
     secrets:
       - owner_database_url
     depends_on:
@@ -84,8 +84,7 @@ services:
       FOLIOHARBOR_SERVER_PUBLIC_BASE_URL: ${FOLIOHARBOR_PUBLIC_BASE_URL:-https://library.example/}
       FOLIOHARBOR_AUTH_APPLICATION_SECRET_KEY_ID: ${FOLIOHARBOR_APPLICATION_SECRET_KEY_ID:-primary-2026}
       FOLIOHARBOR_AUTH_APPLICATION_SECRET_FILE: /run/secrets/application_secret
-      FOLIOHARBOR_STORAGE_ROOT: /var/lib/folioharbor/blobs
-      FOLIOHARBOR_STORAGE_STAGING_ROOT: /var/lib/folioharbor/staging
+      FOLIOHARBOR_STORAGE_ROOT: /var/lib/folioharbor
       FOLIOHARBOR_STORAGE_FREE_RESERVE_BYTES: ${FOLIOHARBOR_STORAGE_FREE_RESERVE_BYTES:-1073741824}
       FOLIOHARBOR_MAIL_SMTP_URL: ${FOLIOHARBOR_MAIL_SMTP_URL:-smtp://mailpit:1025}
       FOLIOHARBOR_MAIL_FROM_ADDRESS: ${FOLIOHARBOR_MAIL_FROM_ADDRESS:-noreply@library.example}

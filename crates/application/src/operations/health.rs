@@ -68,8 +68,11 @@ impl HealthService {
 #[async_trait]
 impl OperationsApi for HealthService {
     async fn readiness(&self) -> HealthStatus {
-        let (database, free_bytes) =
-            tokio::join!(self.database.database_health(), self.storage.free_bytes());
+        let (database, free_bytes, write_probe) = tokio::join!(
+            self.database.database_health(),
+            self.storage.free_bytes(),
+            self.storage.probe_write()
+        );
         let Ok(database) = database else {
             return HealthStatus::Unavailable;
         };
@@ -82,6 +85,7 @@ impl OperationsApi for HealthService {
         if !self.required_configuration_ready
             || free_bytes.is_err()
             || free_bytes.is_ok_and(|bytes| bytes < self.free_reserve_bytes)
+            || write_probe.is_err()
         {
             return HealthStatus::Unavailable;
         }

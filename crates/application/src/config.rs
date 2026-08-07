@@ -189,22 +189,10 @@ fn secret_string(value: String) -> SecretString {
 }
 
 fn validate_storage_paths(raw: &RawSettings) -> Result<(), ConfigError> {
-    let storage = &raw.storage;
-    for (key, path) in [
-        ("storage.root", &storage.root),
-        ("storage.staging_root", &storage.staging_root),
-    ] {
-        if !path.is_absolute() || path.parent().is_none() {
-            return Err(ConfigError::invalid(
-                key,
-                "must be an absolute path below the filesystem root",
-            ));
-        }
-    }
-    if storage.root == storage.staging_root {
+    if !raw.storage.root.is_absolute() || raw.storage.root.parent().is_none() {
         return Err(ConfigError::invalid(
-            "storage.staging_root",
-            "must differ from storage.root",
+            "storage.root",
+            "must be an absolute path below the filesystem root",
         ));
     }
     Ok(())

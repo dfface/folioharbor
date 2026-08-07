@@ -8,7 +8,11 @@ use axum::{
 };
 use folioharbor_application::config::ObservabilitySettings;
 use folioharbor_domain::id::RequestId;
-use opentelemetry::{KeyValue, propagation::Extractor, trace::TracerProvider as _};
+use opentelemetry::{
+    Context, KeyValue,
+    propagation::{Extractor, Injector, TextMapPropagator as _},
+    trace::{TraceContextExt as _, TracerProvider as _},
+};
 use opentelemetry_otlp::WithExportConfig as _;
 use opentelemetry_sdk::{Resource, metrics::SdkMeterProvider, trace::SdkTracerProvider};
 use tracing::Instrument as _;
@@ -64,17 +68,6 @@ impl TraceContext {
     }
 
     #[must_use]
-    pub fn generate() -> Self {
-        let trace_id = uuid::Uuid::now_v7().simple().to_string();
-        let parent_uuid = uuid::Uuid::now_v7().simple().to_string();
-        let parent_id = &parent_uuid[..16];
-        Self {
-            header: format!("00-{trace_id}-{parent_id}-01"),
-            trace_id,
-        }
-    }
-
-    #[must_use]
     pub fn trace_id(&self) -> &str {
         &self.trace_id
     }
@@ -82,6 +75,39 @@ impl TraceContext {
     #[must_use]
     pub fn as_header_value(&self) -> &str {
         &self.header
+    }
+}
+
+/// The W3C context of the actual OpenTelemetry server span for one request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequestTraceContext {
+    traceparent: String,
+    trace_id: String,
+}
+
+impl RequestTraceContext {
+    fn from_context(context: &Context) -> Option<Self> {
+        let span_context = context.span().span_context().clone();
+        if !span_context.is_valid() {
+            return None;
+        }
+        let mut injector = TraceparentInjector::default();
+        opentelemetry_sdk::propagation::TraceContextPropagator::new()
+            .inject_context(context, &mut injector);
+        Some(Self {
+            traceparent: injector.traceparent?,
+            trace_id: span_context.trace_id().to_string(),
+        })
+    }
+
+    #[must_use]
+    pub fn traceparent(&self) -> &str {
+        &self.traceparent
+    }
+
+    #[must_use]
+    pub fn trace_id(&self) -> &str {
+        &self.trace_id
     }
 }
 
@@ -205,6 +231,36 @@ impl TelemetryMetrics {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LiveOperationalMetrics {
+    pub pool_open: u64,
+    pub pool_idle: u64,
+    pub free_storage_bytes: Option<u64>,
+}
+
+/// Samples current process resources and records the corresponding gauges.
+pub async fn record_live_operational_metrics(
+    pool_open: u64,
+    pool_idle: u64,
+    pool_name: &str,
+    storage: &dyn folioharbor_application::ports::BlobStore,
+) -> LiveOperationalMetrics {
+    for (state, connections) in [("open", pool_open), ("idle", pool_idle)] {
+        if let Ok(attributes) = MetricAttributes::try_new([("pool", pool_name), ("state", state)]) {
+            TelemetryMetrics.record_pool_state(connections, &attributes);
+        }
+    }
+    let free_storage_bytes = storage.free_bytes().await.ok();
+    if let Some(bytes) = free_storage_bytes {
+        TelemetryMetrics.record_free_storage(bytes);
+    }
+    LiveOperationalMetrics {
+        pool_open,
+        pool_idle,
+        free_storage_bytes,
+    }
+}
+
 pub struct TelemetryGuard {
     tracer_provider: SdkTracerProvider,
     meter_provider: SdkMeterProvider,
@@ -289,12 +345,8 @@ pub fn init_observability(
 }
 
 pub async fn trace_request(mut request: Request, next: Next) -> Response {
-    let trace = request
-        .headers()
-        .get(&TRACEPARENT)
-        .and_then(|value| value.to_str().ok())
-        .and_then(TraceContext::parse)
-        .unwrap_or_else(TraceContext::generate);
+    let parent_context = opentelemetry_sdk::propagation::TraceContextPropagator::new()
+        .extract(&HeaderExtractor(request.headers()));
     let method = request.method().as_str().to_owned();
     let route = request
         .extensions()
@@ -308,21 +360,24 @@ pub async fn trace_request(mut request: Request, next: Next) -> Response {
         .unwrap_or_else(RequestId::new);
     request.extensions_mut().insert(request_id);
     let request_id = request_id.as_ulid().to_string();
-    request.extensions_mut().insert(trace.clone());
-    let parent_context = opentelemetry::global::get_text_map_propagator(|propagator| {
-        propagator.extract(&HeaderExtractor(request.headers()))
-    });
     let span = tracing::info_span!(
         "http.request",
         request_id = %request_id,
-        trace_id = %trace.trace_id(),
+        trace_id = tracing::field::Empty,
         method = %method,
         route = %route,
     );
     span.set_parent(parent_context);
+    let trace = RequestTraceContext::from_context(&span.context());
+    if let Some(trace) = trace.as_ref() {
+        span.record("trace_id", trace.trace_id());
+        request.extensions_mut().insert(trace.clone());
+    }
     let started = Instant::now();
     let mut response = next.run(request).instrument(span).await;
-    if let Ok(value) = HeaderValue::from_str(trace.as_header_value()) {
+    if let Some(trace) = trace
+        && let Ok(value) = HeaderValue::from_str(trace.traceparent())
+    {
         response.headers_mut().insert(TRACEPARENT, value);
     }
     let status = response.status();
@@ -339,6 +394,19 @@ pub async fn trace_request(mut request: Request, next: Next) -> Response {
         );
     }
     response
+}
+
+#[derive(Default)]
+struct TraceparentInjector {
+    traceparent: Option<String>,
+}
+
+impl Injector for TraceparentInjector {
+    fn set(&mut self, key: &str, value: String) {
+        if key.eq_ignore_ascii_case(TRACEPARENT.as_str()) {
+            self.traceparent = Some(value);
+        }
+    }
 }
 
 struct HeaderExtractor<'a>(&'a axum::http::HeaderMap);

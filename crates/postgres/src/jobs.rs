@@ -1,11 +1,11 @@
 use async_trait::async_trait;
-use folioharbor_application::ports::{JobRepository, JobRepositoryError, LeaseJobs};
+use folioharbor_application::ports::{JobBacklog, JobRepository, JobRepositoryError, LeaseJobs};
 use folioharbor_domain::{
     id::{JobId, LibraryId, RequestId},
     imports::job::{JobInput, JobKind, LeasedJob},
     time::OffsetDateTime,
 };
-use sqlx::PgPool;
+use sqlx::{PgPool, Row as _};
 use time::Duration;
 
 use crate::{DatabaseContext, PgTransactionContext};
@@ -114,15 +114,43 @@ impl JobRepository for PgJobRepository {
         Ok(JobId::from_uuid(stored))
     }
 
+    async fn backlog(&self, now: OffsetDateTime) -> Result<JobBacklog, JobRepositoryError> {
+        let mut transaction = self.transaction(RequestId::new(), None).await?;
+        let (runnable, scheduled_retry): (i64, i64) = sqlx::query_as(
+            "SELECT \
+                count(*) FILTER (WHERE next_run_at <= $1 AND \
+                    (state IN ('pending','retry_wait') OR \
+                     (state='leased' AND lease_expires_at <= $1))), \
+                count(*) FILTER (WHERE state='retry_wait' AND next_run_at > $1) \
+             FROM folioharbor.background_jobs",
+        )
+        .bind(now)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(persistence_error)?;
+        transaction.commit().await.map_err(persistence_error)?;
+        Ok(JobBacklog {
+            runnable: u64::try_from(runnable).map_err(|_| JobRepositoryError)?,
+            scheduled_retry: u64::try_from(scheduled_retry).map_err(|_| JobRepositoryError)?,
+        })
+    }
+
     async fn lease(&self, request: LeaseJobs) -> Result<Vec<LeasedJob>, JobRepositoryError> {
         let mut transaction = self.transaction(request.request_id, None).await?;
         let expires = request.now + request.lease_for;
-        let rows = sqlx::query!(r#"WITH candidates AS (SELECT job_id,state,attempt_count FROM folioharbor.background_jobs WHERE next_run_at <= $1 AND (state IN ('pending','retry_wait') OR (state='leased' AND lease_expires_at <= $1)) ORDER BY next_run_at,created_at FOR UPDATE SKIP LOCKED LIMIT $2), expired AS (UPDATE folioharbor.job_attempts a SET finished_at=$1,outcome='lease_expired' FROM candidates c WHERE c.state='leased' AND a.job_id=c.job_id AND a.attempt=c.attempt_count), leased AS (UPDATE folioharbor.background_jobs j SET state='leased',lease_owner=$3,lease_expires_at=$4,attempt_count=j.attempt_count+1,error_code=NULL,error_summary=NULL,updated_at=$1 FROM candidates c WHERE j.job_id=c.job_id RETURNING j.job_id,j.library_id,j.kind,j.input,j.attempt_count,j.lease_expires_at), attempts AS (INSERT INTO folioharbor.job_attempts(job_id,attempt,lease_owner,started_at) SELECT job_id,attempt_count,$3,$1 FROM leased) SELECT job_id AS "job_id!",library_id,kind AS "kind!",input AS "input!",attempt_count AS "attempt_count!",lease_expires_at AS "lease_expires_at!" FROM leased"#,request.now,i64::from(request.limit),&request.owner,expires).fetch_all(&mut *transaction).await.map_err(persistence_error)?;
+        let rows = sqlx::query(r"WITH candidates AS (SELECT job_id,state,attempt_count FROM folioharbor.background_jobs WHERE next_run_at <= $1 AND (state IN ('pending','retry_wait') OR (state='leased' AND lease_expires_at <= $1)) ORDER BY next_run_at,created_at FOR UPDATE SKIP LOCKED LIMIT $2), expired AS (UPDATE folioharbor.job_attempts a SET finished_at=$1,outcome='lease_expired' FROM candidates c WHERE c.state='leased' AND a.job_id=c.job_id AND a.attempt=c.attempt_count), leased AS (UPDATE folioharbor.background_jobs j SET state='leased',lease_owner=$3,lease_expires_at=$4,attempt_count=j.attempt_count+1,error_code=NULL,error_summary=NULL,updated_at=$1 FROM candidates c WHERE j.job_id=c.job_id RETURNING j.job_id,j.library_id,j.kind,j.input,j.origin_request_id,j.origin_traceparent,j.attempt_count,j.lease_expires_at), attempts AS (INSERT INTO folioharbor.job_attempts(job_id,attempt,lease_owner,started_at) SELECT job_id,attempt_count,$3,$1 FROM leased) SELECT job_id,library_id,kind,input,origin_request_id,origin_traceparent,attempt_count,lease_expires_at FROM leased")
+            .bind(request.now)
+            .bind(i64::from(request.limit))
+            .bind(&request.owner)
+            .bind(expires)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(persistence_error)?;
         let parsed: Result<Vec<_>, _> = rows
             .into_iter()
             .map(|row| {
-                let kind = row.kind;
-                let input = row.input;
+                let kind: String = row.try_get("kind").map_err(persistence_error)?;
+                let input: serde_json::Value = row.try_get("input").map_err(persistence_error)?;
                 let version = input
                     .get("version")
                     .and_then(serde_json::Value::as_u64)
@@ -145,13 +173,29 @@ impl JobRepository for PgJobRepository {
                 } else {
                     JobInput::CleanupV1
                 };
+                let origin_request_id = row
+                    .try_get::<Option<String>, _>("origin_request_id")
+                    .map_err(persistence_error)?
+                    .map(|value| RequestId::parse(&value).ok_or(JobRepositoryError))
+                    .transpose()?;
                 Ok(LeasedJob {
-                    job_id: JobId::from_uuid(row.job_id),
-                    library_id: row.library_id.map(LibraryId::from_uuid),
+                    job_id: JobId::from_uuid(row.try_get("job_id").map_err(persistence_error)?),
+                    library_id: row
+                        .try_get::<Option<uuid::Uuid>, _>("library_id")
+                        .map_err(persistence_error)?
+                        .map(LibraryId::from_uuid),
                     kind,
                     input,
-                    attempt: u32::try_from(row.attempt_count).map_err(|_| JobRepositoryError)?,
-                    lease_expires_at: row.lease_expires_at,
+                    origin_request_id,
+                    origin_traceparent: row
+                        .try_get("origin_traceparent")
+                        .map_err(persistence_error)?,
+                    attempt: u32::try_from(
+                        row.try_get::<i32, _>("attempt_count")
+                            .map_err(persistence_error)?,
+                    )
+                    .map_err(|_| JobRepositoryError)?,
+                    lease_expires_at: row.try_get("lease_expires_at").map_err(persistence_error)?,
                 })
             })
             .collect();

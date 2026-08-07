@@ -14,7 +14,7 @@ use folioharbor_application::{
 };
 use folioharbor_http::{
     AppState,
-    middleware::telemetry::{MetricAttributes, TelemetryMetrics, init_observability},
+    middleware::telemetry::{init_observability, record_live_operational_metrics},
 };
 use folioharbor_postgres::{
     PgAuditRepository, PgAuthorizationRepository, PgOperationsRepository, PgRateLimitRepository,
@@ -39,6 +39,27 @@ impl RandomSource for SystemRandom {
         }
     }
 }
+
+fn spawn_metrics_reporter(
+    pool: sqlx::PgPool,
+    blobs: Arc<dyn folioharbor_application::ports::BlobStore>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            record_live_operational_metrics(
+                u64::from(pool.size()),
+                u64::try_from(pool.num_idle()).unwrap_or(u64::MAX),
+                "api",
+                blobs.as_ref(),
+            )
+            .await;
+        }
+    })
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let settings = Settings::load(ConfigSources {
@@ -52,15 +73,10 @@ async fn main() -> anyhow::Result<()> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("FOLIOHARBOR_DATABASE_URL is required"))?;
     let pool = connect_api(database_url).await?;
-    if let Ok(attributes) = MetricAttributes::try_new([("pool", "api"), ("state", "open")]) {
-        TelemetryMetrics.record_pool_state(u64::from(pool.size()), &attributes);
-    }
     let health_blobs: Arc<dyn folioharbor_application::ports::BlobStore> = Arc::new(
         folioharbor_storage_local::LocalBlobStore::new(settings.storage.root.clone()),
     );
-    if let Ok(bytes) = health_blobs.free_bytes().await {
-        TelemetryMetrics.record_free_storage(bytes);
-    }
+    let metrics_reporter = spawn_metrics_reporter(pool.clone(), health_blobs.clone());
     let operations = Arc::new(HealthService::new(
         Arc::new(PgOperationsRepository::new(pool.clone())),
         health_blobs,
@@ -135,7 +151,10 @@ async fn main() -> anyhow::Result<()> {
         listener,
         folioharbor_http::router(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        metrics_reporter.abort();
+    })
     .await?;
     Ok(())
 }

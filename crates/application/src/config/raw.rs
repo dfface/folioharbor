@@ -70,7 +70,6 @@ pub(super) struct RawDatabase {
 #[serde(default, deny_unknown_fields)]
 pub(super) struct RawStorage {
     pub(super) root: PathBuf,
-    pub(super) staging_root: PathBuf,
     pub(super) library_quota_bytes: u64,
     pub(super) upload_limit_bytes: u64,
     pub(super) free_reserve_bytes: u64,
@@ -83,8 +82,7 @@ pub(super) struct RawStorage {
 impl Default for RawStorage {
     fn default() -> Self {
         Self {
-            root: PathBuf::from("/var/lib/folioharbor/blobs"),
-            staging_root: PathBuf::from("/var/lib/folioharbor/staging"),
+            root: PathBuf::from("/var/lib/folioharbor"),
             library_quota_bytes: 5 * GIB,
             upload_limit_bytes: GIB,
             free_reserve_bytes: GIB,
@@ -184,7 +182,6 @@ fn environment_path(key: &str) -> Option<&'static str> {
         "FOLIOHARBOR_SERVER_BIND_ADDRESS" => Some("server.bind_address"),
         "FOLIOHARBOR_SERVER_PUBLIC_BASE_URL" => Some("server.public_base_url"),
         "FOLIOHARBOR_STORAGE_ROOT" => Some("storage.root"),
-        "FOLIOHARBOR_STORAGE_STAGING_ROOT" => Some("storage.staging_root"),
         "FOLIOHARBOR_STORAGE_LIBRARY_QUOTA_BYTES" => Some("storage.library_quota_bytes"),
         "FOLIOHARBOR_STORAGE_UPLOAD_LIMIT_BYTES" => Some("storage.upload_limit_bytes"),
         "FOLIOHARBOR_STORAGE_FREE_RESERVE_BYTES" => Some("storage.free_reserve_bytes"),
@@ -216,7 +213,6 @@ fn apply_values(
             "server.bind_address" => raw.server.bind_address.clone_from(value),
             "server.public_base_url" => raw.server.public_base_url.clone_from(value),
             "storage.root" => raw.storage.root = PathBuf::from(value),
-            "storage.staging_root" => raw.storage.staging_root = PathBuf::from(value),
             "storage.library_quota_bytes" => raw.storage.library_quota_bytes = parse(key, value)?,
             "storage.upload_limit_bytes" => raw.storage.upload_limit_bytes = parse(key, value)?,
             "storage.free_reserve_bytes" => raw.storage.free_reserve_bytes = parse(key, value)?,

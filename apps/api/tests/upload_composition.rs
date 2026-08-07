@@ -9,30 +9,16 @@ use folioharbor_application::{
     catalog::PageRequest,
     config::{ConfigSources, Settings},
     imports::{CreateUploadRequest, ReceiveUploadRequest},
+    ports::{JobRepository as _, LeaseJobs},
 };
 use folioharbor_domain::id::{ItemId, LibraryId, ManifestationId, RequestId, SessionId, UserId};
 use folioharbor_domain::time::OffsetDateTime;
-use folioharbor_postgres::{PgPools, run_migrations};
+use folioharbor_postgres::{PgJobRepository, PgPools, run_migrations};
 use folioharbor_test_support::postgres::TestPostgres;
-use std::{collections::BTreeMap, fs};
+use std::{collections::BTreeMap, fs, path::Path};
 
-#[tokio::test]
-async fn production_upload_composition_uses_postgres_and_local_blob_storage() -> anyhow::Result<()>
-{
-    let database = TestPostgres::provision().await?;
-    let pools = PgPools::connect_for_tests(
-        &database.owner_url()?,
-        &database.api_url()?,
-        &database.worker_url()?,
-    )
-    .await?;
-    run_migrations(&pools.owner).await?;
-    let directory = tempfile::tempdir()?;
-    let blob_root = directory.path().join("blobs");
-    let staging_root = directory.path().join("staging");
-    fs::create_dir_all(&blob_root)?;
-    fs::create_dir_all(&staging_root)?;
-    let settings = Settings::load(ConfigSources {
+fn composition_settings(storage_root: &Path) -> anyhow::Result<Settings> {
+    Ok(Settings::load(ConfigSources {
         environment: BTreeMap::from([
             (
                 "FOLIOHARBOR_AUTH_APPLICATION_SECRET".into(),
@@ -48,15 +34,28 @@ async fn production_upload_composition_uses_postgres_and_local_blob_storage() ->
             ),
             (
                 "FOLIOHARBOR_STORAGE_ROOT".into(),
-                blob_root.to_string_lossy().into_owned(),
-            ),
-            (
-                "FOLIOHARBOR_STORAGE_STAGING_ROOT".into(),
-                staging_root.to_string_lossy().into_owned(),
+                storage_root.to_string_lossy().into_owned(),
             ),
         ]),
         ..ConfigSources::default()
-    })?;
+    })?)
+}
+
+#[tokio::test]
+async fn production_upload_composition_uses_postgres_and_local_blob_storage() -> anyhow::Result<()>
+{
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let directory = tempfile::tempdir()?;
+    let storage_root = directory.path().join("storage");
+    fs::create_dir_all(&storage_root)?;
+    let settings = composition_settings(&storage_root)?;
     let now = OffsetDateTime::now_utc();
     let actor = UserId::new();
     let library = LibraryId::new();
@@ -74,18 +73,35 @@ async fn production_upload_composition_uses_postgres_and_local_blob_storage() ->
             declared_bytes: 4,
         })
         .await?;
+    let origin_request_id = RequestId::new();
     let queued = api
         .receive_upload(ReceiveUploadRequest {
             actor,
-            request_id: RequestId::new(),
+            request_id: origin_request_id,
             library_id: library,
             upload_id: upload.upload_id,
+            traceparent: Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_owned()),
             bytes: Box::pin(futures_util::stream::iter([Ok(Bytes::from_static(
                 b"book",
             ))])),
         })
         .await?;
     assert_eq!(queued.state.as_str(), "queued");
+    let leased = PgJobRepository::new(pools.worker.clone())
+        .lease(LeaseJobs {
+            owner: "composition-worker".to_owned(),
+            now: OffsetDateTime::now_utc() + time::Duration::seconds(1),
+            lease_for: time::Duration::minutes(1),
+            limit: 1,
+            request_id: RequestId::new(),
+        })
+        .await?;
+    let job = leased.first().expect("import job");
+    assert_eq!(job.origin_request_id, Some(origin_request_id));
+    assert_eq!(
+        job.origin_traceparent.as_deref(),
+        Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+    );
     let catalog = build_catalog_api(&settings, pools.api.clone());
     let page = catalog
         .list_library_books(actor, library, RequestId::new(), PageRequest::default())

@@ -220,7 +220,6 @@ pub struct DatabaseSettings {
 #[derive(Debug)]
 pub struct StorageSettings {
     pub root: PathBuf,
-    pub staging_root: PathBuf,
     pub library_quota: ByteSize,
     pub upload_limit: ByteSize,
     pub free_reserve: ByteSize,
@@ -234,7 +233,6 @@ impl StorageSettings {
     pub(super) fn from_raw(raw: RawStorage) -> Result<Self, ConfigError> {
         Ok(Self {
             root: raw.root,
-            staging_root: raw.staging_root,
             library_quota: ByteSize::new("storage.library_quota_bytes", raw.library_quota_bytes)?,
             upload_limit: ByteSize::new("storage.upload_limit_bytes", raw.upload_limit_bytes)?,
             free_reserve: ByteSize::new("storage.free_reserve_bytes", raw.free_reserve_bytes)?,

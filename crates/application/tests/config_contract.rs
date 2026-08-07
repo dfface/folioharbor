@@ -47,6 +47,10 @@ fn approved_defaults_are_stable() {
     assert_eq!(settings.storage.library_quota.as_u64(), 5 * GIB);
     assert_eq!(settings.storage.upload_limit.as_u64(), GIB);
     assert_eq!(settings.storage.free_reserve.as_u64(), GIB);
+    assert_eq!(
+        settings.storage.root,
+        std::path::PathBuf::from("/var/lib/folioharbor")
+    );
     assert_eq!(settings.storage.dedup_scope, DedupScope::Instance);
     assert_eq!(settings.storage.failed_retention.as_seconds(), 24 * 60 * 60);
     assert_eq!(settings.storage.gc_delay.as_seconds(), 24 * 60 * 60);
@@ -359,12 +363,8 @@ fn smtp_from_address_is_validated_without_echoing_it() {
 }
 
 #[test]
-fn storage_paths_must_be_absolute_non_root_and_distinct() {
-    for (key, value) in [
-        ("storage.root", "relative"),
-        ("storage.root", "/"),
-        ("storage.staging_root", "/var/lib/folioharbor/blobs"),
-    ] {
+fn storage_root_must_be_absolute_and_non_root() {
+    for (key, value) in [("storage.root", "relative"), ("storage.root", "/")] {
         let error = Settings::load(ConfigSources {
             environment: minimum_environment(),
             cli: BTreeMap::from([(key.to_owned(), value.to_owned())]),
@@ -374,6 +374,18 @@ fn storage_paths_must_be_absolute_non_root_and_distinct() {
 
         assert!(error.to_string().contains(key));
     }
+}
+
+#[test]
+fn former_staging_root_setting_is_rejected_instead_of_silently_ignored() {
+    let error = Settings::load(ConfigSources {
+        toml: Some("[storage]\nstaging_root = \"/tmp/dead-setting\"\n".to_owned()),
+        environment: minimum_environment(),
+        ..ConfigSources::default()
+    })
+    .expect_err("the removed staging root must be rejected");
+
+    assert!(error.to_string().contains("storage.staging_root"));
 }
 
 #[test]

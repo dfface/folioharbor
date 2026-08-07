@@ -9,7 +9,10 @@ use folioharbor_application::{
         DatabaseHealth, HealthRepository, HealthRepositoryError, HealthService, HealthStatus,
         OperationsApi as _,
     },
-    ports::{BlobDisposition, BlobStore, BlobStoreError, PromotedBlob, PublicationSource},
+    ports::{
+        BlobDisposition, BlobStore, BlobStoreError, BlobStoreInventory, PromotedBlob,
+        PublicationSource,
+    },
 };
 use folioharbor_domain::imports::blob::{BlobIdentity, StorageKey};
 use sha2::Digest as _;
@@ -25,6 +28,8 @@ impl HealthRepository for FakeHealthRepository {
 
 struct FakeBlobStore {
     free_bytes: Result<u64, ()>,
+    write_probe: Result<(), ()>,
+    inventory: BlobStoreInventory,
     files: Mutex<BTreeMap<String, Vec<u8>>>,
 }
 
@@ -32,6 +37,8 @@ impl FakeBlobStore {
     fn health(free_bytes: Result<u64, ()>) -> Self {
         Self {
             free_bytes,
+            write_probe: Ok(()),
+            inventory: BlobStoreInventory::default(),
             files: Mutex::new(BTreeMap::new()),
         }
     }
@@ -75,6 +82,15 @@ impl BlobStore for FakeBlobStore {
             .map_err(|()| BlobStoreError::Io(std::io::Error::other("test capacity failure")))
     }
 
+    async fn probe_write(&self) -> Result<(), BlobStoreError> {
+        self.write_probe
+            .map_err(|()| BlobStoreError::Io(std::io::Error::other("test write failure")))
+    }
+
+    async fn inventory(&self) -> Result<BlobStoreInventory, BlobStoreError> {
+        Ok(self.inventory.clone())
+    }
+
     async fn open_publication(
         &self,
         key: &StorageKey,
@@ -97,20 +113,44 @@ impl BlobStore for FakeBlobStore {
 #[tokio::test]
 async fn readiness_requires_exact_schema_admin_configuration_and_storage_reserve() {
     let cases = [
-        (27, true, true, Ok(1_000), HealthStatus::Ready),
-        (26, true, true, Ok(1_000), HealthStatus::Unavailable),
-        (27, false, true, Ok(1_000), HealthStatus::BootstrapRequired),
-        (27, true, false, Ok(1_000), HealthStatus::Unavailable),
-        (27, true, true, Ok(99), HealthStatus::Unavailable),
-        (27, true, true, Err(()), HealthStatus::Unavailable),
+        (27, true, true, Ok(1_000), Ok(()), HealthStatus::Ready),
+        (26, true, true, Ok(1_000), Ok(()), HealthStatus::Unavailable),
+        (
+            27,
+            false,
+            true,
+            Ok(1_000),
+            Ok(()),
+            HealthStatus::BootstrapRequired,
+        ),
+        (
+            27,
+            true,
+            false,
+            Ok(1_000),
+            Ok(()),
+            HealthStatus::Unavailable,
+        ),
+        (27, true, true, Ok(99), Ok(()), HealthStatus::Unavailable),
+        (27, true, true, Err(()), Ok(()), HealthStatus::Unavailable),
+        (
+            27,
+            true,
+            true,
+            Ok(1_000),
+            Err(()),
+            HealthStatus::Unavailable,
+        ),
     ];
-    for (schema_version, admin, configuration, free_bytes, expected) in cases {
+    for (schema_version, admin, configuration, free_bytes, write_probe, expected) in cases {
+        let mut blobs = FakeBlobStore::health(free_bytes);
+        blobs.write_probe = write_probe;
         let service = HealthService::new(
             std::sync::Arc::new(FakeHealthRepository(Ok(DatabaseHealth {
                 schema_version,
                 system_administrator_exists: admin,
             }))),
-            std::sync::Arc::new(FakeBlobStore::health(free_bytes)),
+            std::sync::Arc::new(blobs),
             100,
             configuration,
         );
@@ -135,6 +175,15 @@ async fn consistency_check_classifies_missing_orphan_and_hash_mismatch_without_i
     let clean_digest: [u8; 32] = sha2::Sha256::digest(&clean).into();
     let store = FakeBlobStore {
         free_bytes: Ok(1_000),
+        write_probe: Ok(()),
+        inventory: BlobStoreInventory {
+            keys: vec![
+                StorageKey::from_opaque("clean".to_owned()),
+                StorageKey::from_opaque("mismatch".to_owned()),
+                StorageKey::from_opaque("filesystem-extra".to_owned()),
+            ],
+            invalid_locations: 1,
+        },
         files: Mutex::new(BTreeMap::from([
             ("clean".to_owned(), clean),
             ("mismatch".to_owned(), b"wrong".to_vec()),
@@ -153,7 +202,7 @@ async fn consistency_check_classifies_missing_orphan_and_hash_mismatch_without_i
         .expect("check");
     assert_eq!(report.checked, 4);
     assert_eq!(report.missing_blobs, 1);
-    assert_eq!(report.orphan_locations, 1);
+    assert_eq!(report.orphan_locations, 3);
     assert_eq!(report.hash_mismatches, 1);
     assert!(!report.is_clean());
 }

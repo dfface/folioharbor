@@ -290,6 +290,7 @@ impl UploadRepository for PgUploadRepository {
         &self,
         receipt: FinalizeUploadReceipt,
     ) -> Result<bool, UploadRepositoryError> {
+        let request_id = receipt.request_id.as_ulid().to_string();
         let mut transaction = self
             .transaction(receipt.actor, receipt.library_id, receipt.request_id)
             .await?;
@@ -301,14 +302,38 @@ impl UploadRepository for PgUploadRepository {
             receipt.library_id.as_uuid(),
             receipt.actor.as_uuid(),
             received,
-            receipt.storage_key,
-            receipt.staging_key,
+            &receipt.storage_key,
+            receipt.staging_key.as_deref(),
             receipt.job_id.as_uuid(),
             receipt.now,
         )
         .fetch_one(&mut *transaction)
         .await
         .map_err(persistence_error)?;
+        if changed {
+            let job_id: Option<uuid::Uuid> = sqlx::query_scalar(
+                "SELECT folioharbor.job_attach_upload_origin_authorized($1,$2,$3,$4,$5)",
+            )
+            .bind(receipt.upload_id.as_uuid())
+            .bind(receipt.library_id.as_uuid())
+            .bind(receipt.actor.as_uuid())
+            .bind(&request_id)
+            .bind(receipt.traceparent.as_deref())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(persistence_error)?;
+            let job_id = job_id.ok_or(UploadRepositoryError::Persistence)?;
+            let trace_id = receipt
+                .traceparent
+                .as_deref()
+                .map(|traceparent| &traceparent[3..35]);
+            tracing::info!(
+                job_id = %job_id,
+                request_id = %request_id,
+                trace_id,
+                "import job enqueued"
+            );
+        }
         transaction.commit().await.map_err(persistence_error)?;
         Ok(changed)
     }

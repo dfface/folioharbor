@@ -58,9 +58,40 @@ impl SecureRoot {
         Err(invalid_path())
     }
 
+    pub(crate) fn open_dir(&self, relative: &Path, create: bool) -> io::Result<Dir> {
+        let mut dir = self.dir.try_clone()?;
+        for component in relative.components() {
+            let name = normal_component(component)?;
+            dir = if create {
+                open_or_create_private(&dir, Path::new(&name))?
+            } else {
+                dir.open_dir_nofollow(Path::new(&name))?
+            };
+        }
+        Ok(dir)
+    }
+
+    pub(crate) fn verify_private(&self) -> io::Result<()> {
+        verify_private_dir(&self.dir)
+    }
+
     pub(crate) fn sync(&self) -> io::Result<()> {
         sync_dir(&self.dir)
     }
+}
+
+pub(crate) fn verify_private_dir(dir: &Dir) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use cap_std::fs::MetadataExt as _;
+        if dir.dir_metadata()?.mode() & 0o777 != 0o700 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "storage capability directory is not private",
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn sync_dir(dir: &Dir) -> io::Result<()> {

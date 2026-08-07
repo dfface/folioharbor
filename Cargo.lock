@@ -582,6 +582,7 @@ dependencies = [
  "secrecy",
  "sqlx",
  "tempfile",
+ "time",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -727,6 +728,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -775,6 +777,8 @@ dependencies = [
  "folioharbor-storage-local",
  "folioharbor-test-support",
  "lettre",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "secrecy",
  "serde_json",
  "sha2",
@@ -784,6 +788,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
  "zeroize",

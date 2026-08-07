@@ -11,7 +11,7 @@ use folioharbor_application::{
 };
 use folioharbor_epub::{EpubPublicationParser, ParserLimits};
 use folioharbor_http::middleware::telemetry::{
-    MetricAttributes, TelemetryMetrics, init_observability,
+    init_observability, record_live_operational_metrics,
 };
 use folioharbor_postgres::{
     PgCatalogRepository, PgGarbageCollectionRepository, PgImportCleanupRepository,
@@ -39,11 +39,10 @@ async fn main() -> anyhow::Result<()> {
     let config = RunnerConfig::new(settings.worker.concurrency)
         .ok_or_else(|| anyhow::anyhow!("worker concurrency must be positive"))?;
     let pool = connect_worker(database_url).await?;
-    if let Ok(attributes) = MetricAttributes::try_new([("pool", "worker"), ("state", "open")]) {
-        TelemetryMetrics.record_pool_state(u64::from(pool.size()), &attributes);
-    }
     let smtp = SmtpMailer::for_mode(&settings.mail)?;
     let blobs = Arc::new(LocalBlobStore::new(storage_root));
+    let metrics_blobs = blobs.clone();
+    let metrics_pool = pool.clone();
     let process = Arc::new(ProcessImportJob::new(
         Arc::new(PgImportRepository::new(pool.clone())),
         Arc::new(EpubPublicationParser::new(
@@ -90,6 +89,8 @@ async fn main() -> anyhow::Result<()> {
     );
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
+    let mut metrics_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+    metrics_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             result = async {
@@ -100,6 +101,14 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Ok::<(), anyhow::Error>(())
             } => result?,
+            _ = metrics_interval.tick() => {
+                record_live_operational_metrics(
+                    u64::from(metrics_pool.size()),
+                    u64::try_from(metrics_pool.num_idle()).unwrap_or(u64::MAX),
+                    "worker",
+                    metrics_blobs.as_ref(),
+                ).await;
+            }
             () = &mut shutdown => break,
         }
     }

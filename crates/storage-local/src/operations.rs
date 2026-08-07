@@ -3,8 +3,15 @@ use std::{
     path::Path,
 };
 
-use folioharbor_application::ports::{BlobDisposition, BlobStoreError, PromotedBlob};
-use folioharbor_domain::imports::blob::{BlobIdentity, StorageKey};
+use cap_fs_ext::DirExt as _;
+use cap_std::fs::Dir;
+use folioharbor_application::ports::{
+    BlobDisposition, BlobStoreError, BlobStoreInventory, PromotedBlob,
+};
+use folioharbor_domain::{
+    id::RequestId,
+    imports::blob::{BlobIdentity, StorageKey},
+};
 
 use super::{
     CapacityProbe, LocalBlobStore, MAX_RANGE_READ_BYTES, MIN_FREE_BYTES,
@@ -13,7 +20,7 @@ use super::{
         remove_named_file_if_present, verify_file,
     },
     paths,
-    secure_fs::{SecureRoot, sync_dir},
+    secure_fs::{SecureRoot, sync_dir, verify_private_dir},
 };
 
 #[cfg(test)]
@@ -185,6 +192,50 @@ impl<P: CapacityProbe> LocalBlobStore<P> {
         Ok(self.capacity.free_bytes(&self.root)?)
     }
 
+    pub(super) fn probe_write_sync(&self) -> Result<(), BlobStoreError> {
+        let root = self.secure_root()?;
+        root.verify_private()?;
+        let staging = root.open_dir(Path::new("staging"), true)?;
+        verify_private_dir(&staging)?;
+        let health = root.open_dir(Path::new("staging/.health"), true)?;
+        verify_private_dir(&health)?;
+        let name = format!("{}.probe", RequestId::new().as_ulid());
+        let mut created = false;
+        let result = (|| {
+            let mut file = health.open_with(&name, &private_create_options())?;
+            created = true;
+            file.write_all(b"ready")?;
+            file.sync_all()?;
+            drop(file);
+            health.remove_file(&name)?;
+            created = false;
+            sync_dir(&health)?;
+            Ok::<(), std::io::Error>(())
+        })();
+        if created {
+            let _ = health.remove_file(&name);
+            let _ = sync_dir(&health);
+        }
+        result.map_err(Into::into)
+    }
+
+    pub(super) fn inventory_sync(&self) -> Result<BlobStoreInventory, BlobStoreError> {
+        let root = self.secure_root()?;
+        let objects = match root.open_dir(Path::new("objects"), false) {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BlobStoreInventory::default());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut inventory = BlobStoreInventory::default();
+        inventory_directory(&objects, 0, &mut Vec::new(), &mut inventory)?;
+        inventory
+            .keys
+            .sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(inventory)
+    }
+
     pub(super) fn open_publication_sync(
         &self,
         key: &StorageKey,
@@ -194,6 +245,82 @@ impl<P: CapacityProbe> LocalBlobStore<P> {
         let (directory, name) = root.open_parent(&relative, false)?;
         Ok(Box::new(directory.open_with(name, &read_options())?))
     }
+}
+
+fn inventory_directory(
+    directory: &Dir,
+    depth: usize,
+    components: &mut Vec<String>,
+    inventory: &mut BlobStoreInventory,
+) -> Result<(), BlobStoreError> {
+    for entry in directory.entries()? {
+        let entry = entry?;
+        let Ok(name) = entry.file_name().into_string() else {
+            inventory.invalid_locations = inventory.invalid_locations.saturating_add(1);
+            continue;
+        };
+        let file_type = entry.file_type()?;
+        if depth < 3 {
+            if !file_type.is_dir() || !valid_inventory_directory(depth, &name) {
+                inventory.invalid_locations = inventory.invalid_locations.saturating_add(1);
+                continue;
+            }
+            let Ok(child) = directory.open_dir_nofollow(Path::new(&name)) else {
+                inventory.invalid_locations = inventory.invalid_locations.saturating_add(1);
+                continue;
+            };
+            components.push(name);
+            inventory_directory(&child, depth + 1, components, inventory)?;
+            components.pop();
+            continue;
+        }
+        if !file_type.is_file() {
+            inventory.invalid_locations = inventory.invalid_locations.saturating_add(1);
+            continue;
+        }
+        match physical_key(components, &name) {
+            Some(key) => inventory.keys.push(key),
+            None => {
+                inventory.invalid_locations = inventory.invalid_locations.saturating_add(1);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn valid_inventory_directory(depth: usize, name: &str) -> bool {
+    match depth {
+        0 => {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        }
+        1 | 2 => name.len() == 2 && name.bytes().all(is_lower_hex),
+        _ => false,
+    }
+}
+
+fn physical_key(components: &[String], file_name: &str) -> Option<StorageKey> {
+    let [namespace, first, second] = components else {
+        return None;
+    };
+    let (hash, size) = file_name.rsplit_once('-')?;
+    if hash.len() != 64
+        || !hash.bytes().all(is_lower_hex)
+        || first != &hash[0..2]
+        || second != &hash[2..4]
+        || size.parse::<u64>().is_err()
+    {
+        return None;
+    }
+    Some(StorageKey::from_opaque(format!(
+        "blob:{namespace}:{hash}:{size}"
+    )))
+}
+
+fn is_lower_hex(byte: u8) -> bool {
+    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
 }
 
 fn remove_source_if_present(root: &SecureRoot, relative: &Path) -> Result<(), BlobStoreError> {

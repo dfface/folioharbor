@@ -129,6 +129,7 @@ async fn normal_upload_promotes_and_reconciles_a_purged_content_addressed_blob()
             request_id: RequestId::new(),
             library_id: library,
             upload_id: upload,
+            traceparent: None,
             bytes: Box::pin(futures_util::stream::iter([Ok(content)])),
         })
         .await?;

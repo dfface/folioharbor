@@ -14,9 +14,14 @@ use folioharbor_application::{
 };
 use folioharbor_domain::{id::RequestId, imports::job::LeasedJob};
 use folioharbor_http::middleware::telemetry::{MetricAttributes, TelemetryMetrics};
+use opentelemetry::{
+    propagation::{Extractor, TextMapPropagator as _},
+    trace::TraceContextExt as _,
+};
 use time::{Duration, OffsetDateTime};
 use tokio::sync::Semaphore;
 use tracing::Instrument as _;
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RunnerConfig {
@@ -86,6 +91,7 @@ impl WorkerRunner {
     /// Returns when queue persistence or lease ownership fails.
     pub async fn run_once(&self) -> Result<usize, JobRepositoryError> {
         let now = OffsetDateTime::now_utc();
+        let backlog = self.jobs.backlog(now).await?;
         let jobs = self
             .jobs
             .lease(LeaseJobs {
@@ -97,9 +103,13 @@ impl WorkerRunner {
             })
             .await?;
         let count = jobs.len();
-        if let Ok(attributes) = MetricAttributes::try_new([("service", "worker")]) {
-            TelemetryMetrics
-                .record_queue_depth(u64::try_from(count).unwrap_or(u64::MAX), &attributes);
+        for (state, depth) in [
+            ("runnable", backlog.runnable),
+            ("scheduled_retry", backlog.scheduled_retry),
+        ] {
+            if let Ok(attributes) = MetricAttributes::try_new([("state", state)]) {
+                TelemetryMetrics.record_queue_depth(depth, &attributes);
+            }
         }
         let semaphore = Arc::new(Semaphore::new(self.config.concurrency));
         let mut tasks = Vec::with_capacity(count);
@@ -147,15 +157,29 @@ async fn run_leased(
     lease_for: Duration,
     job: LeasedJob,
 ) -> Result<(), JobRepositoryError> {
-    let request_id = RequestId::new();
-    let trace_id = uuid::Uuid::now_v7().simple().to_string();
+    let request_id = job.origin_request_id.unwrap_or_else(RequestId::new);
     let span = tracing::info_span!(
         "job",
         job_id = %job.job_id.as_uuid(),
         request_id = %request_id.as_ulid(),
-        trace_id = %trace_id,
+        trace_id = tracing::field::Empty,
         kind = job.kind.as_str(),
         attempt = job.attempt
+    );
+    if let Some(traceparent) = job.origin_traceparent.as_deref() {
+        let parent = opentelemetry_sdk::propagation::TraceContextPropagator::new()
+            .extract(&TraceparentExtractor(traceparent));
+        span.set_parent(parent);
+    }
+    let span_context = span.context().span().span_context().clone();
+    if span_context.is_valid() {
+        span.record("trace_id", span_context.trace_id().to_string());
+    }
+    tracing::info!(
+        parent: &span,
+        job_id = %job.job_id.as_uuid(),
+        request_id = %request_id.as_ulid(),
+        "job leased"
     );
     let started = Instant::now();
     let mut operation = Box::pin(dispatcher.dispatch(job.clone()).instrument(span));
@@ -221,6 +245,18 @@ async fn run_leased(
     Ok(())
 }
 
+struct TraceparentExtractor<'a>(&'a str);
+
+impl Extractor for TraceparentExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        key.eq_ignore_ascii_case("traceparent").then_some(self.0)
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        vec!["traceparent"]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -228,10 +264,15 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
 
+    use folioharbor_application::ports::JobBacklog;
     use folioharbor_domain::{
-        id::{JobId, LibraryId, UploadId},
+        id::{JobId, LibraryId, RequestId, UploadId},
         imports::job::{JobInput, JobKind},
     };
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::prelude::*;
 
     use super::*;
 
@@ -256,6 +297,20 @@ mod tests {
             _: OffsetDateTime,
         ) -> Result<JobId, JobRepositoryError> {
             Ok(id)
+        }
+
+        async fn backlog(&self, _: OffsetDateTime) -> Result<JobBacklog, JobRepositoryError> {
+            Ok(JobBacklog {
+                runnable: u64::try_from(
+                    self.leased
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .map_or(0, Vec::len),
+                )
+                .unwrap_or(u64::MAX),
+                scheduled_retry: 0,
+            })
         }
 
         async fn lease(&self, _: LeaseJobs) -> Result<Vec<LeasedJob>, JobRepositoryError> {
@@ -366,6 +421,8 @@ mod tests {
             library_id: Some(LibraryId::new()),
             kind: JobKind::ImportEpub,
             input: JobInput::upload_v1(UploadId::new().as_uuid().to_string()),
+            origin_request_id: None,
+            origin_traceparent: None,
             attempt: 1,
             lease_expires_at: OffsetDateTime::now_utc() + Duration::minutes(5),
         }
@@ -396,5 +453,56 @@ mod tests {
             delayed_finished.load(Ordering::SeqCst),
             "run_once returned while a spawned task could still mutate durable state"
         );
+    }
+
+    #[tokio::test]
+    async fn leased_job_span_is_a_child_of_the_persisted_api_context()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer().with_tracer(provider.tracer("worker-runner-test")),
+        );
+        let mut job = leased(JobId::new());
+        let origin_request_id = RequestId::new();
+        job.origin_request_id = Some(origin_request_id);
+        job.origin_traceparent =
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_owned());
+        let jobs = Arc::new(TwoJobRepository {
+            leased: Mutex::new(None),
+            failing_job: JobId::new(),
+        });
+        let dispatcher = Arc::new(DelayedDispatcher {
+            delayed_job: JobId::new(),
+            delayed_finished: Arc::new(AtomicBool::new(false)),
+        });
+
+        run_leased(
+            jobs,
+            dispatcher,
+            "trace-worker".to_owned(),
+            Duration::minutes(5),
+            job,
+        )
+        .with_subscriber(subscriber)
+        .await?;
+        provider.force_flush()?;
+        let spans = exporter.get_finished_spans()?;
+        let span = spans
+            .iter()
+            .find(|span| span.name == "job")
+            .ok_or_else(|| std::io::Error::other("job span was not exported"))?;
+        assert_eq!(
+            span.span_context.trace_id().to_string(),
+            "4bf92f3577b34da6a3ce929d0e0e4736"
+        );
+        assert_eq!(span.parent_span_id.to_string(), "00f067aa0ba902b7");
+        assert!(span.attributes.iter().any(|attribute| {
+            attribute.key.as_str() == "request_id"
+                && attribute.value.to_string() == origin_request_id.as_ulid().to_string()
+        }));
+        Ok(())
     }
 }

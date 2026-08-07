@@ -379,6 +379,7 @@ fn request(
         request_id: RequestId::new(),
         library_id: library,
         upload_id: upload,
+        traceparent: None,
         bytes: Box::pin(futures_util::stream::iter(items)),
     }
 }
@@ -448,6 +449,7 @@ async fn idle_body_is_heartbeated_and_lost_ownership_stops_without_deleting() {
                 request_id: RequestId::new(),
                 library_id: library,
                 upload_id: upload,
+                traceparent: None,
                 bytes: Box::pin(futures_util::stream::pending()),
             })
             .await

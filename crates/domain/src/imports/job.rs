@@ -83,6 +83,8 @@ pub struct LeasedJob {
     pub library_id: Option<LibraryId>,
     pub kind: JobKind,
     pub input: JobInput,
+    pub origin_request_id: Option<crate::id::RequestId>,
+    pub origin_traceparent: Option<String>,
     pub attempt: u32,
     pub lease_expires_at: OffsetDateTime,
 }

@@ -15,6 +15,14 @@ pub struct LeaseJobs {
     pub request_id: RequestId,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct JobBacklog {
+    /// Work leaseable at the observation time, including expired leases.
+    pub runnable: u64,
+    /// Retry work deliberately scheduled after the observation time.
+    pub scheduled_retry: u64,
+}
+
 #[derive(Debug, Error)]
 #[error("job persistence failed")]
 pub struct JobRepositoryError;
@@ -31,6 +39,7 @@ pub trait JobRepository: Send + Sync {
         idempotency_key: &str,
         run_at: OffsetDateTime,
     ) -> Result<JobId, JobRepositoryError>;
+    async fn backlog(&self, now: OffsetDateTime) -> Result<JobBacklog, JobRepositoryError>;
     async fn lease(&self, request: LeaseJobs) -> Result<Vec<LeasedJob>, JobRepositoryError>;
     async fn heartbeat(
         &self,

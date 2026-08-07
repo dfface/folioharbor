@@ -245,6 +245,7 @@ async fn concurrent_receipt_loser_never_creates_a_staging_file() -> anyhow::Resu
                     request_id: RequestId::new(),
                     library_id: library,
                     upload_id: upload,
+                    traceparent: None,
                     bytes: Box::pin(futures_util::stream::pending()),
                 })
                 .await
@@ -290,6 +291,7 @@ fn request(actor: UserId, library: LibraryId, upload: UploadId) -> ReceiveUpload
         request_id: RequestId::new(),
         library_id: library,
         upload_id: upload,
+        traceparent: None,
         bytes: Box::pin(futures_util::stream::iter([Ok(Bytes::from_static(
             b"book",
         ))])),

@@ -39,6 +39,7 @@ pub struct ReceiveUploadRequest {
     pub request_id: RequestId,
     pub library_id: LibraryId,
     pub upload_id: UploadId,
+    pub traceparent: Option<String>,
     pub bytes: UploadByteStream,
 }
 

@@ -1,7 +1,7 @@
 use super::AppState;
 use crate::{
     auth::AuthenticatedActor,
-    middleware::telemetry::{MetricAttributes, TelemetryMetrics},
+    middleware::telemetry::{MetricAttributes, RequestTraceContext, TelemetryMetrics},
     problem::{ProblemContext, response as problem_response},
 };
 use axum::{
@@ -138,7 +138,7 @@ async fn get_upload(
 async fn receive_upload(
     State(state): State<AppState>,
     Extension(context): Extension<ProblemContext>,
-    Extension(request_id): Extension<RequestId>,
+    (Extension(request_id), trace): (Extension<RequestId>, Option<Extension<RequestTraceContext>>),
     AuthenticatedActor(actor): AuthenticatedActor,
     Path((raw_library, raw_upload)): Path<(String, String)>,
     headers: HeaderMap,
@@ -169,6 +169,7 @@ async fn receive_upload(
             request_id,
             library_id,
             upload_id,
+            traceparent: trace.map(|Extension(trace)| trace.traceparent().to_owned()),
             bytes: Box::pin(stream),
         })
         .await

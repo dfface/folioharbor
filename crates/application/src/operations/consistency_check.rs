@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use folioharbor_domain::imports::blob::StorageKey;
 use sha2::{Digest as _, Sha256};
@@ -66,13 +68,23 @@ impl<R: ConsistencyRepository, B: BlobStore> ConsistencyCheck<'_, R, B> {
             .ready_blob_inventory()
             .await
             .map_err(|_| ConsistencyCheckError)?;
-        let mut report = ConsistencyReport::default();
+        let storage_inventory = self
+            .blobs
+            .inventory()
+            .await
+            .map_err(|_| ConsistencyCheckError)?;
+        let mut report = ConsistencyReport {
+            orphan_locations: storage_inventory.invalid_locations,
+            ..ConsistencyReport::default()
+        };
+        let mut expected_keys = HashSet::with_capacity(inventory.len());
         for entry in inventory {
             report.checked = report.checked.saturating_add(1);
             if !entry.location_is_canonical {
                 report.orphan_locations = report.orphan_locations.saturating_add(1);
                 continue;
             }
+            expected_keys.insert(entry.storage_key.clone());
             let mut source = match self.blobs.open_publication(&entry.storage_key).await {
                 Ok(source) => source,
                 Err(BlobStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -91,6 +103,11 @@ impl<R: ConsistencyRepository, B: BlobStore> ConsistencyCheck<'_, R, B> {
             let digest: [u8; 32] = hasher.finalize().into();
             if copied != entry.expected_byte_size || digest != entry.expected_sha256 {
                 report.hash_mismatches = report.hash_mismatches.saturating_add(1);
+            }
+        }
+        for key in storage_inventory.keys {
+            if !expected_keys.contains(&key) {
+                report.orphan_locations = report.orphan_locations.saturating_add(1);
             }
         }
         Ok(report)

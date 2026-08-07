@@ -176,6 +176,8 @@ fn leased(upload_id: UploadId, library_id: LibraryId) -> LeasedJob {
         library_id: Some(library_id),
         kind: JobKind::ImportEpub,
         input: JobInput::upload_v1(upload_id.as_uuid().to_string()),
+        origin_request_id: None,
+        origin_traceparent: None,
         attempt: 1,
         lease_expires_at: OffsetDateTime::from_unix_timestamp(1_700_000_300).expect("fixture time"),
     }

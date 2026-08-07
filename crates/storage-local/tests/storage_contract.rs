@@ -281,6 +281,85 @@ async fn adapter_created_root_is_owner_only() {
     assert_eq!(mode, 0o700);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn readiness_probe_rejects_unwritable_or_unsafe_staging_and_leaves_no_file() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let root = TempDir::new().expect("temporary root");
+    let staging = root.path().join("staging");
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("private root");
+    std::fs::create_dir(&staging).expect("staging directory");
+    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o500))
+        .expect("read-only staging");
+    let store = LocalBlobStore::with_capacity(root.path(), FakeCapacity::new(u64::MAX));
+    assert!(store.probe_write().await.is_err());
+
+    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700))
+        .expect("private staging");
+    store.probe_write().await.expect("writable private probe");
+    let health = staging.join(".health");
+    assert_eq!(
+        std::fs::read_dir(&health)
+            .expect("health directory")
+            .count(),
+        0,
+        "successful probes remove their private files"
+    );
+
+    std::fs::remove_dir(&health).expect("empty health directory");
+    let outside = TempDir::new().expect("outside directory");
+    symlink(outside.path(), &health).expect("unsafe health link");
+    assert!(store.probe_write().await.is_err());
+    assert_eq!(
+        std::fs::read_dir(outside.path())
+            .expect("outside listing")
+            .count(),
+        0
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn inventory_lists_only_canonical_objects_and_counts_unsafe_entries() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempDir::new().expect("temporary root");
+    let outside = TempDir::new().expect("outside directory");
+    let store = LocalBlobStore::with_capacity(root.path(), FakeCapacity::new(u64::MAX));
+    let staging = create_staging(&store, 'a').await;
+    store.append(&staging, b"blob").await.expect("append");
+    let installed = store
+        .promote(
+            &staging,
+            &identity(
+                StorageNamespace::for_scope(
+                    DedupScope::Instance,
+                    LibraryId::new(),
+                    UploadId::new(),
+                ),
+                b"blob",
+            ),
+        )
+        .await
+        .expect("promote");
+    std::fs::write(root.path().join("objects/unexpected"), b"invalid").expect("unexpected entry");
+    symlink(outside.path(), root.path().join("objects/unsafe-link"))
+        .expect("unsafe inventory link");
+
+    let inventory = store.inventory().await.expect("safe inventory");
+    assert_eq!(inventory.keys, vec![installed.key]);
+    assert_eq!(inventory.invalid_locations, 2);
+    assert_eq!(
+        std::fs::read_dir(outside.path())
+            .expect("outside listing")
+            .count(),
+        0,
+        "inventory never follows links"
+    );
+}
+
 #[test]
 fn dedup_scopes_resolve_to_the_required_stable_or_fresh_namespaces() {
     let library = LibraryId::from_uuid(uuid::Uuid::from_u128(11));

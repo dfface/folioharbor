@@ -66,6 +66,7 @@ pub struct FinalizeUploadReceipt {
     pub staging_key: Option<String>,
     pub job_id: JobId,
     pub request_id: RequestId,
+    pub traceparent: Option<String>,
     pub now: OffsetDateTime,
 }
 pub struct HeartbeatUploadReceipt {

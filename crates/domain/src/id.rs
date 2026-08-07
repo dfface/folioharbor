@@ -65,6 +65,11 @@ macro_rules! ulid_id {
             pub const fn as_ulid(self) -> Ulid {
                 self.0
             }
+
+            #[must_use]
+            pub fn parse(value: &str) -> Option<Self> {
+                Ulid::from_string(value).ok().map(Self)
+            }
         }
     };
 }

@@ -189,6 +189,7 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
                 staging_key: Some(attempt.staging_key.clone()),
                 job_id: JobId::new(),
                 request_id: RequestId::new(),
+                traceparent: None,
                 now
             })
             .await?
@@ -204,6 +205,7 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
                 staging_key: None,
                 job_id: JobId::new(),
                 request_id: RequestId::new(),
+                traceparent: None,
                 now,
             })
             .await?
@@ -374,6 +376,7 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
                 staging_key: Some(duplicate_attempt.staging_key),
                 job_id: JobId::new(),
                 request_id: RequestId::new(),
+                traceparent: None,
                 now,
             })
             .await?
@@ -429,6 +432,7 @@ async fn authorized_creation_atomically_creates_upload_and_quota_reservation() -
                 staging_key: None,
                 job_id: JobId::new(),
                 request_id: RequestId::new(),
+                traceparent: None,
                 now,
             })
             .await?

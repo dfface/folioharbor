@@ -24,12 +24,13 @@ use super::{
 
 const MAX_APPEND_BYTES: usize = 1024 * 1024;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ReceiptContext {
     actor: folioharbor_domain::id::UserId,
     library_id: folioharbor_domain::id::LibraryId,
     upload_id: UploadId,
     request_id: folioharbor_domain::id::RequestId,
+    traceparent: Option<String>,
 }
 
 struct ActiveReceipt {
@@ -102,9 +103,10 @@ impl UploadApi for UploadService {
                 library_id: request.library_id,
                 upload_id: request.upload_id,
                 request_id: request.request_id,
+                traceparent: request.traceparent.clone(),
             };
             let _ = self
-                .abort(context, &attempt, 0, "upload_storage_failed")
+                .abort(&context, &attempt, 0, "upload_storage_failed")
                 .await;
             return Err(storage_error(&error));
         }
@@ -113,11 +115,12 @@ impl UploadApi for UploadService {
             library_id: request.library_id,
             upload_id: request.upload_id,
             request_id: request.request_id,
+            traceparent: request.traceparent.clone(),
         };
         let (received, digest) = self
-            .stream_content(&mut request, context, &attempt, current.declared_bytes)
+            .stream_content(&mut request, &context, &attempt, current.declared_bytes)
             .await?;
-        let stored = self.promote(context, &attempt, received, digest).await?;
+        let stored = self.promote(&context, &attempt, received, digest).await?;
         let marked = self
             .uploads
             .mark_received(MarkUploadReceived {
@@ -138,7 +141,7 @@ impl UploadApi for UploadService {
                 code: "upload_state_conflict",
             });
         }
-        self.finalize(context, received, stored.as_str().to_owned(), None)
+        self.finalize(&context, received, stored.as_str().to_owned(), None)
             .await?;
         self.get_upload(GetUploadRequest {
             actor: request.actor,
@@ -158,11 +161,12 @@ impl UploadService {
     ) -> Result<UploadSession, AppError> {
         let storage = current.storage_key.as_ref().ok_or_else(dependency)?;
         self.finalize(
-            ReceiptContext {
+            &ReceiptContext {
                 actor: request.actor,
                 library_id: request.library_id,
                 upload_id: request.upload_id,
                 request_id: request.request_id,
+                traceparent: request.traceparent.clone(),
             },
             current.received_bytes.get(),
             storage.as_str().to_owned(),
@@ -180,7 +184,7 @@ impl UploadService {
 
     async fn finalize(
         &self,
-        context: ReceiptContext,
+        context: &ReceiptContext,
         received: u64,
         storage_key: String,
         staging_key: Option<String>,
@@ -196,6 +200,7 @@ impl UploadService {
                 staging_key,
                 job_id: JobId::new(),
                 request_id: context.request_id,
+                traceparent: context.traceparent.clone(),
                 now: self.clock.now(),
             })
             .await
@@ -210,7 +215,7 @@ impl UploadService {
 
     async fn promote(
         &self,
-        context: ReceiptContext,
+        context: &ReceiptContext,
         attempt: &ActiveReceipt,
         received: u64,
         digest: Sha256Digest,
@@ -284,7 +289,7 @@ impl UploadService {
     async fn stream_content(
         &self,
         request: &mut ReceiveUploadRequest,
-        context: ReceiptContext,
+        context: &ReceiptContext,
         attempt: &ActiveReceipt,
         declared: ByteCount,
     ) -> Result<(u64, Sha256Digest), AppError> {
@@ -337,7 +342,7 @@ impl UploadService {
 
     async fn heartbeat(
         &self,
-        context: ReceiptContext,
+        context: &ReceiptContext,
         attempt: &ActiveReceipt,
     ) -> Result<(), AppError> {
         let alive = self
@@ -364,7 +369,7 @@ impl UploadService {
 
     async fn abort(
         &self,
-        context: ReceiptContext,
+        context: &ReceiptContext,
         attempt: &ActiveReceipt,
         received: u64,
         code: &'static str,

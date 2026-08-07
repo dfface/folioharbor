@@ -29,6 +29,12 @@ pub struct PromotedBlob {
     pub disposition: BlobDisposition,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BlobStoreInventory {
+    pub keys: Vec<StorageKey>,
+    pub invalid_locations: u64,
+}
+
 pub trait PublicationSource: Read + Seek + Send {}
 impl<T: Read + Seek + Send> PublicationSource for T {}
 
@@ -50,6 +56,12 @@ pub trait BlobStore: Send + Sync {
     ) -> Result<PromotedBlob, BlobStoreError>;
     async fn delete(&self, key: &StorageKey) -> Result<(), BlobStoreError>;
     async fn free_bytes(&self) -> Result<u64, BlobStoreError>;
+    async fn probe_write(&self) -> Result<(), BlobStoreError> {
+        Err(BlobStoreError::InvalidKey)
+    }
+    async fn inventory(&self) -> Result<BlobStoreInventory, BlobStoreError> {
+        Err(BlobStoreError::InvalidKey)
+    }
     async fn open_publication(
         &self,
         _key: &StorageKey,

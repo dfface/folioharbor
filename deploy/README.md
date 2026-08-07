@@ -1,6 +1,6 @@
 # Official Compose deployment
 
-`compose.yaml` is the supported single-host topology: PostgreSQL 18, one-shot storage initialization, one-shot schema migration, API, Worker, one shared Blob/staging volume, and an optional Mailpit development profile. It intentionally does not bundle an HTTPS reverse proxy.
+`compose.yaml` is the supported single-host topology: PostgreSQL 18, one-shot storage initialization, one-shot schema migration, API, Worker, one shared storage volume (with managed `objects/` and `staging/` subdirectories), and an optional Mailpit development profile. It intentionally does not bundle an HTTPS reverse proxy.
 
 ## First start
 

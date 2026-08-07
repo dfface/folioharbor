@@ -42,6 +42,7 @@ tower.workspace = true
 uuid.workspace = true
 zip.workspace = true
 serde_yaml = "0.9"
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

@@ -8,6 +8,63 @@ use folioharbor_test_support::postgres::TestPostgres;
 use time::{Duration, OffsetDateTime};
 
 #[tokio::test]
+async fn runnable_backlog_is_not_capped_by_the_lease_batch_size() -> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let repository = PgJobRepository::new(pools.worker.clone());
+    let now = OffsetDateTime::now_utc();
+    for index in 0..7 {
+        repository
+            .enqueue(
+                JobId::new(),
+                None,
+                JobKind::CollectBlobsLater,
+                JobInput::cleanup_v1(),
+                &format!("backlog:{index}"),
+                now,
+            )
+            .await?;
+    }
+
+    let initial = repository.backlog(now).await?;
+    assert_eq!((initial.runnable, initial.scheduled_retry), (7, 0));
+    let leased = repository
+        .lease(LeaseJobs {
+            owner: "one-slot-worker".into(),
+            now,
+            lease_for: Duration::minutes(5),
+            limit: 1,
+            request_id: RequestId::new(),
+        })
+        .await?;
+    assert_eq!(leased.len(), 1);
+    repository
+        .retry(
+            leased[0].job_id,
+            "one-slot-worker",
+            now,
+            now + Duration::minutes(10),
+            "temporary_io",
+            "safe summary",
+        )
+        .await?;
+    let waiting = repository.backlog(now).await?;
+    assert_eq!((waiting.runnable, waiting.scheduled_retry), (6, 1));
+    let due = repository.backlog(now + Duration::minutes(11)).await?;
+    assert_eq!((due.runnable, due.scheduled_retry), (7, 0));
+
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn concurrent_workers_never_lease_the_same_job_and_expired_leases_recover()
 -> anyhow::Result<()> {
     let database = TestPostgres::provision().await?;
