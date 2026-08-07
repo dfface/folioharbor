@@ -29,17 +29,20 @@ impl ByteSize {
 pub struct Duration(u64);
 
 impl Duration {
-    // PostgreSQL intervals store their time component as signed 64-bit microseconds.
-    const MAX_POSTGRES_INTERVAL_SECONDS: u64 = i64::MAX as u64 / 1_000_000;
+    // This is the whole-second distance from the latest supported lifecycle
+    // input (2100-01-01T00:00:00Z) to the application/SQLx timestamp ceiling
+    // (9999-12-31T23:59:59Z). All database lifecycle paths add these durations
+    // to a supplied timestamp and may return the resulting deadline.
+    const MAX_LIFECYCLE_SECONDS: u64 = 249_299_855_999;
 
     fn new(key: &'static str, seconds: u64) -> Result<Self, ConfigError> {
         if seconds == 0 {
             return Err(ConfigError::invalid(key, "must be greater than zero"));
         }
-        if seconds > Self::MAX_POSTGRES_INTERVAL_SECONDS {
+        if seconds > Self::MAX_LIFECYCLE_SECONDS {
             return Err(ConfigError::invalid(
                 key,
-                "must fit in PostgreSQL's signed 64-bit microsecond interval range",
+                "must keep lifecycle deadlines representable through 2100-01-01T00:00:00Z",
             ));
         }
         Ok(Self(seconds))

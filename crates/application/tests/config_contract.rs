@@ -108,8 +108,11 @@ fn environment_overrides_toml_and_cli_overrides_environment() {
 }
 
 #[test]
-fn database_backed_storage_policy_durations_fit_postgres_interval_seconds() {
-    const GREATEST_POSTGRES_INTERVAL_SECONDS: u64 = 9_223_372_036_854;
+fn database_backed_storage_policy_durations_fit_the_supported_timestamp_horizon() {
+    // Whole seconds from the latest supported lifecycle input (2100-01-01T00:00:00Z)
+    // through the greatest timestamp representable by the application and SQLx
+    // (9999-12-31T23:59:59Z).
+    const GREATEST_SAFE_LIFECYCLE_SECONDS: u64 = 249_299_855_999;
 
     for (environment_key, config_key) in [
         (
@@ -128,24 +131,24 @@ fn database_backed_storage_policy_durations_fit_postgres_interval_seconds() {
         let mut greatest_environment = minimum_environment();
         greatest_environment.insert(
             environment_key.to_owned(),
-            GREATEST_POSTGRES_INTERVAL_SECONDS.to_string(),
+            GREATEST_SAFE_LIFECYCLE_SECONDS.to_string(),
         );
         Settings::load(ConfigSources {
             environment: greatest_environment,
             ..ConfigSources::default()
         })
-        .expect("greatest PostgreSQL interval duration");
+        .expect("greatest lifecycle duration safe through the supported timestamp horizon");
 
         let mut rejected_environment = minimum_environment();
         rejected_environment.insert(
             environment_key.to_owned(),
-            (GREATEST_POSTGRES_INTERVAL_SECONDS + 1).to_string(),
+            (GREATEST_SAFE_LIFECYCLE_SECONDS + 1).to_string(),
         );
         let error = Settings::load(ConfigSources {
             environment: rejected_environment,
             ..ConfigSources::default()
         })
-        .expect_err("first duration beyond PostgreSQL's interval range");
+        .expect_err("first duration beyond the supported lifecycle timestamp horizon");
         assert!(matches!(
             error,
             ConfigError::Invalid { key, .. } if key == config_key

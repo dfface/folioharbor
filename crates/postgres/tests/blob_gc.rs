@@ -33,6 +33,10 @@ struct SeededItem {
     storage_key: String,
 }
 
+const GREATEST_SAFE_LIFECYCLE_SECONDS: u64 = 249_299_855_999;
+const LATEST_SUPPORTED_LIFECYCLE_UNIX_SECONDS: i64 = 4_102_444_800;
+const GREATEST_APPLICATION_UNIX_SECONDS: i64 = 253_402_300_799;
+
 #[tokio::test]
 async fn delete_restore_honors_configured_recovery_period_and_audit_is_atomic() -> anyhow::Result<()>
 {
@@ -100,6 +104,55 @@ async fn delete_restore_honors_configured_recovery_period_and_audit_is_atomic() 
     .fetch_one(&pools.owner)
     .await?;
     assert_eq!(audit_count, 3, "two deletes and one restore are durable");
+
+    finish(database, pools).await
+}
+
+#[tokio::test]
+async fn lifecycle_duration_boundary_is_safe_for_delete_recovery_and_gc_delay() -> anyhow::Result<()>
+{
+    let (database, pools) = database().await?;
+    let seeded_at = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
+    let horizon = OffsetDateTime::from_unix_timestamp(LATEST_SUPPORTED_LIFECYCLE_UNIX_SECONDS)?;
+    let greatest_deadline = OffsetDateTime::from_unix_timestamp(GREATEST_APPLICATION_UNIX_SECONDS)?;
+    let deleting = seed_item(&pools, seeded_at, 71).await?;
+    let collecting = seed_item(&pools, seeded_at - Duration::days(8), 73).await?;
+    mark_deleted(&pools, &collecting, seeded_at - Duration::days(7)).await?;
+
+    let deleted = DeleteItem::new(
+        &PgItemLifecycleRepository::new(pools.api.clone())
+            .with_recovery_period_seconds(GREATEST_SAFE_LIFECYCLE_SECONDS),
+        &PgAuthorizationRepository::new(pools.api.clone()),
+    )
+    .execute(DeleteItemCommand {
+        actor: deleting.actor,
+        library_id: deleting.library,
+        item_id: deleting.item,
+        request_id: RequestId::new(),
+        now: horizon,
+    })
+    .await?;
+    assert_eq!(
+        deleted,
+        ItemLifecycle::Deleted {
+            deleted_at: horizon,
+            purge_eligible_at: greatest_deadline,
+        }
+    );
+
+    assert_eq!(
+        PgGarbageCollectionRepository::new(pools.worker.clone())
+            .with_gc_delay_seconds(GREATEST_SAFE_LIFECYCLE_SECONDS)
+            .prepare(horizon, 10)
+            .await?,
+        1
+    );
+    let purge_after: OffsetDateTime =
+        sqlx::query_scalar("SELECT purge_after FROM folioharbor.blob_locations WHERE blob_id=$1")
+            .bind(collecting.blob.as_uuid())
+            .fetch_one(&pools.owner)
+            .await?;
+    assert_eq!(purge_after, greatest_deadline);
 
     finish(database, pools).await
 }

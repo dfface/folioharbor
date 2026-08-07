@@ -154,12 +154,27 @@ function readPersisted(
   }
 }
 
-function hasPendingProgress(storage: Storage, accountId: string, deviceId: string): boolean {
-  const accountPrefix = `${progressKeyPrefix}${accountId}:`;
+function pendingProgressAccountIds(storage: Storage, deviceId: string): Set<string> {
   const deviceSuffix = `:${deviceId}`;
-  return Array.from({ length: storage.length }, (_, index) => storage.key(index))
-    .filter((key): key is string => key?.startsWith(accountPrefix) === true && key.endsWith(deviceSuffix))
-    .some((key) => (readPersisted(storage, key, accountId, deviceId)?.pending.length ?? 0) > 0);
+  const accountIds = new Set<string>();
+  const pendingKeys = Array.from({ length: storage.length }, (_, index) => storage.key(index))
+    .filter((key): key is string => key?.startsWith(progressKeyPrefix) === true && key.endsWith(deviceSuffix));
+  for (const key of pendingKeys) {
+    try {
+      const value: unknown = JSON.parse(storage.getItem(key) ?? "null");
+      if (
+        isObject(value) &&
+        typeof value.accountId === "string" &&
+        key.startsWith(`${progressKeyPrefix}${value.accountId}:`) &&
+        (readPersisted(storage, key, value.accountId, deviceId)?.pending.length ?? 0) > 0
+      ) {
+        accountIds.add(value.accountId);
+      }
+    } catch {
+      // Corrupt records cannot establish ownership of a legacy device.
+    }
+  }
+  return accountIds;
 }
 
 function deviceIdIsClaimedByAnotherAccount(storage: Storage, accountId: string, deviceId: string): boolean {
@@ -212,13 +227,19 @@ export function getOrCreateDeviceId(
     return existing;
   }
   const legacyDeviceId = storage.getItem(legacyDeviceIdKey);
+  const pendingAccountIds = legacyDeviceId === null
+    ? new Set<string>()
+    : pendingProgressAccountIds(storage, legacyDeviceId);
   const canPreserveLegacyIdentity = legacyDeviceId !== null &&
     /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(legacyDeviceId) &&
-    hasPendingProgress(storage, accountId, legacyDeviceId) &&
+    pendingAccountIds.size === 1 &&
+    pendingAccountIds.has(accountId) &&
     !deviceIdIsClaimedByAnotherAccount(storage, accountId, legacyDeviceId);
   const deviceId = canPreserveLegacyIdentity ? legacyDeviceId : createId();
   storage.setItem(accountKey, deviceId);
-  migratePendingProgress(storage, accountId, legacyDeviceId, deviceId);
+  if (!pendingAccountIds.has(accountId)) {
+    migratePendingProgress(storage, accountId, legacyDeviceId, deviceId);
+  }
   return deviceId;
 }
 

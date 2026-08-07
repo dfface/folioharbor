@@ -49,6 +49,10 @@ struct LocationLifecycleRow {
     purge_lease_expires_at: Option<OffsetDateTime>,
 }
 
+const GREATEST_SAFE_LIFECYCLE_SECONDS: u64 = 249_299_855_999;
+const LATEST_SUPPORTED_LIFECYCLE_UNIX_SECONDS: i64 = 4_102_444_800;
+const GREATEST_APPLICATION_UNIX_SECONDS: i64 = 253_402_300_799;
+
 #[tokio::test]
 async fn normal_upload_promotes_and_reconciles_a_purged_content_addressed_blob()
 -> anyhow::Result<()> {
@@ -160,6 +164,115 @@ async fn normal_upload_promotes_and_reconciles_a_purged_content_addressed_blob()
     assert!(location.purge_lease_owner.is_none());
     assert!(location.purge_lease_token.is_none());
     assert!(location.purge_lease_expires_at.is_none());
+
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn lifecycle_duration_boundary_is_safe_for_all_import_retention_paths() -> anyhow::Result<()>
+{
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let seeded_at = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
+    let horizon = OffsetDateTime::from_unix_timestamp(LATEST_SUPPORTED_LIFECYCLE_UNIX_SECONDS)?;
+    let greatest_deadline = OffsetDateTime::from_unix_timestamp(GREATEST_APPLICATION_UNIX_SECONDS)?;
+    let actor = UserId::new();
+    let library = LibraryId::new();
+    let expiring = UploadId::new();
+    let failing = UploadId::new();
+    let reconciling = UploadId::new();
+    sqlx::query("INSERT INTO folioharbor.user_accounts(user_id,normalized_email,display_email,status,created_at,verified_at) VALUES($1,$2,$2,'verified',$3,$3)")
+        .bind(actor.as_uuid())
+        .bind(format!("{}@duration-boundary.test", actor.as_uuid()))
+        .bind(seeded_at)
+        .execute(&pools.owner)
+        .await?;
+    sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,quota_reserved_bytes,created_at,updated_at) VALUES($1,'Duration boundary',3,$2,$2)")
+        .bind(library.as_uuid())
+        .bind(seeded_at)
+        .execute(&pools.owner)
+        .await?;
+
+    let uploads = [
+        (expiring, "received", "11", None),
+        (failing, "validating", "22", None),
+        (reconciling, "failed", "33", Some("invalid_epub")),
+    ];
+    for (upload, state, digest_byte, error_code) in uploads {
+        let storage_key = format!("blob:instance-v1:{}:1", digest_byte.repeat(32));
+        sqlx::query("INSERT INTO folioharbor.upload_sessions(upload_id,library_id,created_by,file_name,media_type,declared_bytes,received_bytes,state,dedup_scope,storage_key,sha256,error_code,expires_at,created_at,updated_at) VALUES($1,$2,$3,'boundary.epub','application/epub+zip',1,1,$4,'instance',$5,$6,$7,$8,$9,$9)")
+            .bind(upload.as_uuid())
+            .bind(library.as_uuid())
+            .bind(actor.as_uuid())
+            .bind(state)
+            .bind(storage_key)
+            .bind(vec![u8::from_str_radix(digest_byte, 16)?; 32])
+            .bind(error_code)
+            .bind(seeded_at)
+            .bind(seeded_at)
+            .execute(&pools.owner)
+            .await?;
+        sqlx::query("INSERT INTO folioharbor.quota_reservations(upload_id,library_id,reserved_bytes,expires_at,state) VALUES($1,$2,1,$3,'active')")
+            .bind(upload.as_uuid())
+            .bind(library.as_uuid())
+            .bind(horizon)
+            .execute(&pools.owner)
+            .await?;
+    }
+
+    assert_eq!(
+        PgImportCleanupRepository::new(pools.worker.clone())
+            .with_failed_retention_seconds(GREATEST_SAFE_LIFECYCLE_SECONDS)
+            .expire_abandoned(CleanupCursor::new(horizon, 10).expect("boundary cursor"))
+            .await?,
+        1
+    );
+    let repository = PgImportRepository::new(pools.worker.clone())
+        .with_failed_retention_seconds(GREATEST_SAFE_LIFECYCLE_SECONDS);
+    repository
+        .record_failure(
+            &ImportWork {
+                upload_id: failing,
+                library_id: library,
+                actor_id: actor,
+                blob_id: BlobId::new(),
+                logical_bytes: ByteCount::new(1),
+                storage_key: StorageKey::from_opaque(format!(
+                    "blob:instance-v1:{}:1",
+                    "22".repeat(32)
+                )),
+                state: UploadState::Validating,
+            },
+            UploadState::Failed,
+            "invalid_epub",
+            RequestId::new(),
+            horizon,
+        )
+        .await?;
+    assert!(matches!(
+        repository
+            .reconcile(reconciling, library, RequestId::new(), horizon)
+            .await?,
+        ImportReconciliation::TerminalFailure { code } if code == "invalid_epub"
+    ));
+
+    for upload in [expiring, failing, reconciling] {
+        let eligible_at: OffsetDateTime = sqlx::query_scalar(
+            "SELECT eligible_at FROM folioharbor.failed_upload_purges WHERE upload_id=$1",
+        )
+        .bind(upload.as_uuid())
+        .fetch_one(&pools.owner)
+        .await?;
+        assert_eq!(eligible_at, greatest_deadline);
+    }
 
     pools.close().await;
     database.cleanup().await?;

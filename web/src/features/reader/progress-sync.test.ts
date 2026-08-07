@@ -242,7 +242,10 @@ test("an offline retry reuses the exact mutation command and clears persistence 
   expect(storage.length).toBe(0);
 });
 
-test("a legacy pending command keeps its exact device identity across an account switch and reuses the committed result", async () => {
+test.each([
+  ["owner first", [accountA, accountB]],
+  ["other account first", [accountB, accountA]],
+] as const)("an unambiguous legacy pending command replays exactly with %s", async (_label, accessOrder) => {
   const clock = new FakeClock();
   const storage = new MemoryStorage();
   const accountAReplacement = "018f47b5-58b4-7ba6-9a3a-d9f41f17e003";
@@ -281,18 +284,93 @@ test("a legacy pending command keeps its exact device identity across an account
     },
   };
 
-  const accountBDevice = getOrCreateDeviceId(storage, accountB, () => deviceB);
-  const accountADevice = getOrCreateDeviceId(storage, accountA, () => accountAReplacement);
+  const generatedDevices = new Map([
+    [accountA, accountAReplacement],
+    [accountB, deviceB],
+  ]);
+  const devices = new Map<string, string>();
+  for (const accountId of accessOrder) {
+    devices.set(
+      accountId,
+      getOrCreateDeviceId(storage, accountId, () => generatedDevices.get(accountId) ?? "unexpected"),
+    );
+  }
+  const accountADevice = devices.get(accountA) ?? "missing";
   const sync = createSync(api, clock, { accountId: accountA, deviceId: accountADevice, storage });
   await sync.start();
 
-  expect(accountBDevice).toBe(deviceB);
+  expect(devices.get(accountB)).toBe(deviceB);
   expect(accountADevice).toBe(deviceA);
   expect(requests).toEqual([committedRequest]);
   expect(sync.snapshot()).toMatchObject({ status: "synced", version: 1, locator: committedRequest.locator });
   expect(storage.getItem(
     `folioharbor.reader.progress.v1:${accountA}:${manifestationId}:${deviceA}`,
   )).toBeNull();
+});
+
+test.each([
+  ["account A then account B", [accountA, accountB]],
+  ["account B then account A", [accountB, accountA]],
+] as const)("ambiguous legacy queues remain exact and unclaimed for %s", (_label, accessOrder) => {
+  const storage = new MemoryStorage();
+  const accountAReplacement = "018f47b5-58b4-7ba6-9a3a-d9f41f17e003";
+  const legacyQueues = new Map([
+    [accountA, JSON.stringify({
+      accountId: accountA,
+      deviceId: deviceA,
+      pending: [{
+        baseVersion: 4,
+        clientMutationId: "018f47b5-0000-4000-8000-0000000000a1",
+        createdAt: 1_700_000_000_000,
+        locator: locator(0.3),
+      }],
+      version: 4,
+    })],
+    [accountB, JSON.stringify({
+      accountId: accountB,
+      deviceId: deviceA,
+      pending: [{
+        baseVersion: 7,
+        clientMutationId: "018f47b5-0000-4000-8000-0000000000b1",
+        createdAt: 1_700_000_000_001,
+        locator: locator(0.6, "two"),
+      }],
+      version: 7,
+    })],
+  ]);
+  storage.setItem("folioharbor.reader.device-id.v1", deviceA);
+  for (const [accountId, queue] of legacyQueues) {
+    storage.setItem(
+      `folioharbor.reader.progress.v1:${accountId}:${manifestationId}:${deviceA}`,
+      queue,
+    );
+  }
+  const generatedDevices = new Map([
+    [accountA, accountAReplacement],
+    [accountB, deviceB],
+  ]);
+  const devices = new Map<string, string>();
+
+  for (const accountId of accessOrder) {
+    devices.set(
+      accountId,
+      getOrCreateDeviceId(storage, accountId, () => generatedDevices.get(accountId) ?? "unexpected"),
+    );
+  }
+
+  expect(devices).toEqual(new Map([
+    [accessOrder[0], generatedDevices.get(accessOrder[0])],
+    [accessOrder[1], generatedDevices.get(accessOrder[1])],
+  ]));
+  for (const [accountId, queue] of legacyQueues) {
+    const generatedDevice = generatedDevices.get(accountId) ?? "missing";
+    expect(storage.getItem(
+      `folioharbor.reader.progress.v1:${accountId}:${manifestationId}:${deviceA}`,
+    )).toBe(queue);
+    expect(storage.getItem(
+      `folioharbor.reader.progress.v1:${accountId}:${manifestationId}:${generatedDevice}`,
+    )).toBeNull();
+  }
 });
 
 test("a bounded lifecycle flush duplicates an in-flight command with the same mutation id for safe delivery", async () => {
