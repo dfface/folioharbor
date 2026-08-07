@@ -6,6 +6,7 @@ type Method = "DELETE" | "GET" | "HEAD" | "OPTIONS" | "PATCH" | "POST" | "PUT";
 export interface ApiRequestOptions {
   body?: unknown;
   headers?: HeadersInit;
+  keepalive?: boolean;
   method?: Method;
   signal?: AbortSignal;
 }
@@ -99,6 +100,9 @@ export const apiClient = {
     }
     if (options.signal !== undefined) {
       init.signal = options.signal;
+    }
+    if (options.keepalive !== undefined) {
+      init.keepalive = options.keepalive;
     }
 
     const response = await fetch(requestUrl(path), init);

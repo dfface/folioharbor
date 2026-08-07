@@ -15,6 +15,7 @@ import { LibraryHome, LibraryLayout } from "../features/libraries/LibraryLayout"
 import { SettingsPage } from "../features/libraries/SettingsPage";
 import { InvitationPage } from "../features/members/InvitationPage";
 import { MembersPage } from "../features/members/MembersPage";
+import { ReaderPage } from "../features/reader/ReaderPage";
 import { UploadPage } from "../features/uploads/UploadPage";
 import { AppLayout, AuthenticatedLayout } from "./layout";
 
@@ -70,6 +71,7 @@ export function AppRouter() {
               <Route index element={<Navigate to="books" replace />} />
               <Route path="books" element={<BooksPage />} />
               <Route path="items/:itemId" element={<ItemDetailPage />} />
+              <Route path="items/:itemId/read" element={<ReaderPage />} />
               <Route path="uploads" element={<UploadPage />} />
               <Route path="members" element={<MembersPage />} />
               <Route path="settings" element={<SettingsPage />} />
