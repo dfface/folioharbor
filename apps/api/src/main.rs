@@ -8,13 +8,17 @@ use folioharbor_application::{
     identity::IdentityApi,
     libraries::LibraryService,
     mail::MailOutbox,
+    operations::HealthService,
     ports::{Argon2PasswordHasher, Clock, RandomSource},
     rate_limit::DurableRateLimiter,
 };
-use folioharbor_http::AppState;
+use folioharbor_http::{
+    AppState,
+    middleware::telemetry::{MetricAttributes, TelemetryMetrics, init_observability},
+};
 use folioharbor_postgres::{
-    PgAuditRepository, PgAuthorizationRepository, PgRateLimitRepository, connect_api,
-    identity::PgIdentityRepository, libraries::PgLibraryRepository,
+    PgAuditRepository, PgAuthorizationRepository, PgOperationsRepository, PgRateLimitRepository,
+    connect_api, identity::PgIdentityRepository, libraries::PgLibraryRepository,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
@@ -37,17 +41,32 @@ impl RandomSource for SystemRandom {
 }
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
     let settings = Settings::load(ConfigSources {
         environment: std::env::vars().collect::<BTreeMap<_, _>>(),
         ..ConfigSources::default()
     })?;
+    let _telemetry = init_observability("folioharbor-api", &settings.observability)?;
     let database_url = settings
         .database
         .url
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("FOLIOHARBOR_DATABASE_URL is required"))?;
     let pool = connect_api(database_url).await?;
+    if let Ok(attributes) = MetricAttributes::try_new([("pool", "api"), ("state", "open")]) {
+        TelemetryMetrics.record_pool_state(u64::from(pool.size()), &attributes);
+    }
+    let health_blobs: Arc<dyn folioharbor_application::ports::BlobStore> = Arc::new(
+        folioharbor_storage_local::LocalBlobStore::new(settings.storage.root.clone()),
+    );
+    if let Ok(bytes) = health_blobs.free_bytes().await {
+        TelemetryMetrics.record_free_storage(bytes);
+    }
+    let operations = Arc::new(HealthService::new(
+        Arc::new(PgOperationsRepository::new(pool.clone())),
+        health_blobs,
+        settings.storage.free_reserve.as_u64(),
+        settings.mail.is_ready(),
+    ));
     let upload_api = build_upload_api(&settings, pool.clone());
     let catalog_api = build_catalog_api(&settings, pool.clone());
     let reader_api = build_reader_api(&settings, pool.clone());
@@ -109,12 +128,34 @@ async fn main() -> anyhow::Result<()> {
     let state = state
         .with_reader_api(reader_api)
         .with_progress_api(progress_api)
-        .with_download(download_api, download_blobs);
+        .with_download(download_api, download_blobs)
+        .with_operations(operations);
     let listener = tokio::net::TcpListener::bind(&settings.server.bind_address).await?;
     axum::serve(
         listener,
         folioharbor_http::router(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut signal) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            let _ = signal.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
 }

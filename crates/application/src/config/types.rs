@@ -379,4 +379,5 @@ pub struct WorkerSettings {
 #[derive(Debug)]
 pub struct ObservabilitySettings {
     pub log_filter: String,
+    pub otlp_endpoint: Option<Url>,
 }

@@ -30,6 +30,7 @@ use folioharbor_application::{
         RequestPasswordResetUseCase, RevokeSessionCommand, RevokeSessionOutcome,
         RevokeSessionUseCase, SafeSession, VerifiedAccount, VerifyEmailCommand, VerifyEmailUseCase,
     },
+    operations::{HealthStatus, OperationsApi, RegistrationGate},
     rate_limit::{CheckRateLimit, RateLimitDecision, RateLimitUseCase},
 };
 use folioharbor_domain::{
@@ -48,6 +49,7 @@ struct FakeAuth {
     rate_limited: Mutex<bool>,
     revoke_calls: AtomicUsize,
     fail_login_dependency: AtomicBool,
+    register_calls: AtomicUsize,
 }
 
 fn actor() -> Actor {
@@ -64,7 +66,29 @@ fn csrf_hash() -> TokenHash {
 #[async_trait]
 impl RegisterAccountUseCase for FakeAuth {
     async fn register(&self, _: RegisterAccountCommand) -> Result<PendingAccount, AppError> {
+        self.register_calls.fetch_add(1, Ordering::SeqCst);
         Ok(PendingAccount)
+    }
+}
+
+struct MutableBootstrapState(AtomicBool);
+
+#[async_trait]
+impl OperationsApi for MutableBootstrapState {
+    async fn readiness(&self) -> HealthStatus {
+        if self.0.load(Ordering::SeqCst) {
+            HealthStatus::Ready
+        } else {
+            HealthStatus::BootstrapRequired
+        }
+    }
+
+    async fn registration_gate(&self) -> RegistrationGate {
+        if self.0.load(Ordering::SeqCst) {
+            RegistrationGate::Available
+        } else {
+            RegistrationGate::BootstrapRequired
+        }
     }
 }
 #[async_trait]
@@ -247,6 +271,27 @@ fn app_with_auth_features(fake: Arc<FakeAuth>, features: AuthFeatures) -> axum::
     )
 }
 
+fn app_with_operations(fake: Arc<FakeAuth>, operations: Arc<dyn OperationsApi>) -> axum::Router {
+    router(
+        AppState::new(
+            Url::parse("https://library.example").expect("valid test URL"),
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            fake,
+        )
+        .with_auth_features(AuthFeatures::new([true, true, true, true]))
+        .with_operations(operations),
+    )
+}
+
 fn enabled_auth_features() -> AuthFeatures {
     Settings::load(ConfigSources {
         environment: BTreeMap::from([
@@ -396,6 +441,33 @@ async fn enabled_auth_features_keep_all_optional_auth_routes() {
 
         assert_ne!(response.status(), StatusCode::NOT_FOUND, "route {path}");
     }
+}
+
+#[tokio::test]
+async fn registration_opens_only_after_system_administrator_bootstrap() {
+    let fake = Arc::new(FakeAuth::default());
+    let operations = Arc::new(MutableBootstrapState(AtomicBool::new(false)));
+    let app = app_with_operations(fake.clone(), operations.clone());
+    let request = || {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/auth/register")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"email":"reader@example.com","password":"secret"}"#,
+            ))
+            .expect("request")
+    };
+
+    let blocked = app.clone().oneshot(request()).await.expect("response");
+    assert_eq!(blocked.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response_json(blocked).await["code"], "bootstrap_required");
+    assert_eq!(fake.register_calls.load(Ordering::SeqCst), 0);
+
+    operations.0.store(true, Ordering::SeqCst);
+    let available = app.oneshot(request()).await.expect("response");
+    assert_eq!(available.status(), StatusCode::ACCEPTED);
+    assert_eq!(fake.register_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

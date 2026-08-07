@@ -23,6 +23,7 @@ use folioharbor_application::{
         CompletePasswordResetCommand, LoginCommand, LogoutCommand, RegisterAccountCommand,
         RequestPasswordResetCommand, RevokeSessionCommand, SafeSession, VerifyEmailCommand,
     },
+    operations::RegistrationGate,
     rate_limit::{CheckRateLimit, RateLimitDecision, RateLimitPurpose},
 };
 use folioharbor_domain::{
@@ -169,6 +170,25 @@ async fn register(
     ClientIpPrefix(ip_prefix): ClientIpPrefix,
     ApiJson(body): ApiJson<Credentials>,
 ) -> Response {
+    match state.operations.registration_gate().await {
+        RegistrationGate::Available => {}
+        RegistrationGate::BootstrapRequired => {
+            return problem_response(
+                &AppError::DependencyUnavailable {
+                    code: "bootstrap_required",
+                },
+                &problem,
+            );
+        }
+        RegistrationGate::Unavailable => {
+            return problem_response(
+                &AppError::DependencyUnavailable {
+                    code: "registration_unavailable",
+                },
+                &problem,
+            );
+        }
+    }
     if let Err(error) = limited(
         &state,
         RateLimitPurpose::Registration,

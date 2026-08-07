@@ -156,9 +156,32 @@ impl Settings {
             },
             observability: ObservabilitySettings {
                 log_filter: raw.observability.log_filter,
+                otlp_endpoint: raw
+                    .observability
+                    .otlp_endpoint
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .map(parse_otlp_endpoint)
+                    .transpose()?,
             },
         })
     }
+}
+
+fn parse_otlp_endpoint(value: &str) -> Result<url::Url, ConfigError> {
+    let endpoint = url::Url::parse(value)
+        .map_err(|_| ConfigError::invalid("observability.otlp_endpoint", "must be a URL"))?;
+    if !matches!(endpoint.scheme(), "http" | "https")
+        || endpoint.host_str().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+    {
+        return Err(ConfigError::invalid(
+            "observability.otlp_endpoint",
+            "must be an HTTP(S) URL without embedded credentials",
+        ));
+    }
+    Ok(endpoint)
 }
 
 fn secret_string(value: String) -> SecretString {

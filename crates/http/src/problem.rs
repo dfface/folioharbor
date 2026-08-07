@@ -84,8 +84,9 @@ documents! {
         "library-service-unavailable",
         "publication-resource-unavailable", "rate-limit-unavailable",
         "reader-catalog-unavailable", "reading-repository-unavailable",
-        "upload-repository-unavailable", "upload-service-unavailable",
+        "registration-unavailable", "upload-repository-unavailable", "upload-service-unavailable",
     ],
+    Unavailable => ["bootstrap-required"],
     Internal => ["internal-error"],
 }
 
@@ -321,6 +322,12 @@ impl ProblemMapping {
 
 #[must_use]
 pub fn response(error: &AppError, context: &ProblemContext) -> Response {
+    if let AppError::Internal { error_id } = error {
+        tracing::error!(
+            error_id = %error_id.as_ulid(),
+            "request failed with an internal error"
+        );
+    }
     let problem = ProblemDetails::from_app_error(error, context);
     let status = StatusCode::from_u16(problem.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut response = (status, axum::Json(problem)).into_response();

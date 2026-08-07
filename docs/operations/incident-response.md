@@ -1,0 +1,9 @@
+# Incident response
+
+Start with the safe health state and a request/job/error identifier. `live` failure means the API process loop is unavailable. `bootstrap_required` means the instance has no system administrator; run the documented TTY bootstrap with owner credentials. `unavailable` deliberately combines dependency, exact-schema, required-configuration, and storage-reserve failures so public probes cannot inventory internals.
+
+Correlate structured JSON events with bounded request ID, job ID, and trace ID fields. Valid W3C `traceparent` is accepted and propagated. Internal failures are logged and attached only by error ID. Logs and telemetry must never contain Authorization headers, cookies, tokens, passwords, request bodies, email addresses, titles, user/Item IDs, Blob hashes, storage keys, or filesystem paths. Metrics use only the code-enforced bounded label allowlist.
+
+For database or schema incidents, stop writes, compare the binary release with `schema_metadata`, and use owner credentials only from an operator shell. Never point API or Worker at the owner URL. For low storage, stop uploads/Worker processing, preserve evidence, expand the shared filesystem, and run `folioharbor storage check`; do not bypass the reserve or delete unknown files manually. For a failed check, preserve both database rows and files, restore from the matching business backup set when necessary, and record the check counts and backup watermark.
+
+For suspected credential or token disclosure, revoke/rotate the affected role or application secret, retain old application keys only for the documented decryption window, restart processes to load new configuration, and inspect audit/access events by safe identifiers. Do not paste secret values, full URLs containing tokens, headers, or raw database URLs into the incident record.

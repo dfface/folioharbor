@@ -6,7 +6,7 @@ pub mod middleware;
 pub mod problem;
 pub mod routes;
 
-pub use routes::{AppState, router};
+pub use routes::{AppState, health_router, router};
 
 pub fn problem_document_router() -> axum::Router {
     routes::problem_document_router()

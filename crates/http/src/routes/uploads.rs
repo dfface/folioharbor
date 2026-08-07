@@ -1,6 +1,7 @@
 use super::AppState;
 use crate::{
     auth::AuthenticatedActor,
+    middleware::telemetry::{MetricAttributes, TelemetryMetrics},
     problem::{ProblemContext, response as problem_response},
 };
 use axum::{
@@ -172,7 +173,12 @@ async fn receive_upload(
         })
         .await
     {
-        Ok(upload) => accepted(upload),
+        Ok(upload) => {
+            if let Ok(attributes) = MetricAttributes::try_new([("outcome", "accepted")]) {
+                TelemetryMetrics.record_upload_bytes(upload.received_bytes.get(), &attributes);
+            }
+            accepted(upload)
+        }
         Err(error) => problem_response(&error, &context),
     }
 }

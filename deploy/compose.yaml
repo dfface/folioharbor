@@ -1,0 +1,196 @@
+name: folioharbor
+
+services:
+  postgres:
+    image: postgres:18.0-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: folioharbor
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      FOLIOHARBOR_OWNER_PASSWORD_FILE: /run/secrets/owner_password
+      FOLIOHARBOR_API_PASSWORD_FILE: /run/secrets/api_password
+      FOLIOHARBOR_WORKER_PASSWORD_FILE: /run/secrets/worker_password
+    secrets:
+      - postgres_password
+      - owner_password
+      - api_password
+      - worker_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d folioharbor"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    stop_grace_period: 60s
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+
+  storage-init:
+    image: alpine:3.22
+    restart: "no"
+    user: "0:0"
+    command:
+      - /bin/sh
+      - -eu
+      - -c
+      - |
+        install -d -m 0700 -o "$${APP_UID}" -g "$${APP_GID}" /data/blobs /data/staging
+    environment:
+      APP_UID: ${FOLIOHARBOR_UID:-10001}
+      APP_GID: ${FOLIOHARBOR_GID:-10001}
+    volumes:
+      - blob_data:/data
+    security_opt:
+      - no-new-privileges:true
+
+  migration:
+    image: ${FOLIOHARBOR_IMAGE:-ghcr.io/folioharbor/folioharbor:0.1.0}
+    restart: "no"
+    command: ["folioharbor", "migrate"]
+    environment:
+      FOLIOHARBOR_DATABASE_URL_FILE: /run/secrets/owner_database_url
+      FOLIOHARBOR_STORAGE_ROOT: /var/lib/folioharbor/blobs
+    secrets:
+      - owner_database_url
+    depends_on:
+      postgres:
+        condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+    volumes:
+      - blob_data:/var/lib/folioharbor:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=0700
+    security_opt:
+      - no-new-privileges:true
+
+  api:
+    image: ${FOLIOHARBOR_IMAGE:-ghcr.io/folioharbor/folioharbor:0.1.0}
+    restart: unless-stopped
+    command: ["folioharbor-api"]
+    environment: &runtime-environment
+      FOLIOHARBOR_SERVER_BIND_ADDRESS: 0.0.0.0:8080
+      FOLIOHARBOR_DATABASE_URL_FILE: /run/secrets/api_database_url
+      FOLIOHARBOR_SERVER_PUBLIC_BASE_URL: ${FOLIOHARBOR_PUBLIC_BASE_URL:-https://library.example/}
+      FOLIOHARBOR_AUTH_APPLICATION_SECRET_KEY_ID: ${FOLIOHARBOR_APPLICATION_SECRET_KEY_ID:-primary-2026}
+      FOLIOHARBOR_AUTH_APPLICATION_SECRET_FILE: /run/secrets/application_secret
+      FOLIOHARBOR_STORAGE_ROOT: /var/lib/folioharbor/blobs
+      FOLIOHARBOR_STORAGE_STAGING_ROOT: /var/lib/folioharbor/staging
+      FOLIOHARBOR_STORAGE_FREE_RESERVE_BYTES: ${FOLIOHARBOR_STORAGE_FREE_RESERVE_BYTES:-1073741824}
+      FOLIOHARBOR_MAIL_SMTP_URL: ${FOLIOHARBOR_MAIL_SMTP_URL:-smtp://mailpit:1025}
+      FOLIOHARBOR_MAIL_FROM_ADDRESS: ${FOLIOHARBOR_MAIL_FROM_ADDRESS:-noreply@library.example}
+      FOLIOHARBOR_OBSERVABILITY_LOG_FILTER: ${FOLIOHARBOR_LOG_FILTER:-info}
+      FOLIOHARBOR_OBSERVABILITY_OTLP_ENDPOINT: ${FOLIOHARBOR_OTLP_ENDPOINT:-}
+    secrets:
+      - application_secret
+      - api_database_url
+    volumes:
+      - blob_data:/var/lib/folioharbor
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      storage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/health/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    ports:
+      - "${FOLIOHARBOR_HTTP_BIND:-127.0.0.1:8080}:8080"
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=0700
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  worker:
+    image: ${FOLIOHARBOR_IMAGE:-ghcr.io/folioharbor/folioharbor:0.1.0}
+    restart: unless-stopped
+    command: ["folioharbor-worker"]
+    environment:
+      <<: *runtime-environment
+      FOLIOHARBOR_DATABASE_URL_FILE: /run/secrets/worker_database_url
+      FOLIOHARBOR_WORKER_CONCURRENCY: ${FOLIOHARBOR_WORKER_CONCURRENCY:-1}
+    secrets:
+      - application_secret
+      - worker_database_url
+    volumes:
+      - blob_data:/var/lib/folioharbor
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      storage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=0700
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  mailpit:
+    image: axllent/mailpit:v1.27
+    profiles: ["development"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8025:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  postgres_data:
+  blob_data:
+
+secrets:
+  postgres_password:
+    file: ${FOLIOHARBOR_POSTGRES_PASSWORD_FILE:-./secrets/postgres-password}
+  owner_password:
+    file: ${FOLIOHARBOR_OWNER_PASSWORD_FILE:-./secrets/owner-password}
+  api_password:
+    file: ${FOLIOHARBOR_API_PASSWORD_FILE:-./secrets/api-password}
+  worker_password:
+    file: ${FOLIOHARBOR_WORKER_PASSWORD_FILE:-./secrets/worker-password}
+  owner_database_url:
+    file: ${FOLIOHARBOR_OWNER_DATABASE_URL_FILE:-./secrets/owner-database-url}
+  api_database_url:
+    file: ${FOLIOHARBOR_API_DATABASE_URL_FILE:-./secrets/api-database-url}
+  worker_database_url:
+    file: ${FOLIOHARBOR_WORKER_DATABASE_URL_FILE:-./secrets/worker-database-url}
+  application_secret:
+    file: ${FOLIOHARBOR_APPLICATION_SECRET_FILE:-./secrets/application-secret}

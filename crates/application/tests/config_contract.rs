@@ -57,6 +57,36 @@ fn approved_defaults_are_stable() {
 }
 
 #[test]
+fn otlp_exporter_is_explicitly_configurable_and_defaults_to_disabled() {
+    let defaults = Settings::load(ConfigSources {
+        environment: minimum_environment(),
+        ..ConfigSources::default()
+    })
+    .expect("defaults");
+    assert!(defaults.observability.otlp_endpoint.is_none());
+
+    let mut environment = minimum_environment();
+    environment.insert(
+        "FOLIOHARBOR_OBSERVABILITY_OTLP_ENDPOINT".to_owned(),
+        "https://otel-collector.example:4317".to_owned(),
+    );
+    let configured = Settings::load(ConfigSources {
+        environment,
+        ..ConfigSources::default()
+    })
+    .expect("OTLP configuration");
+    assert_eq!(
+        configured
+            .observability
+            .otlp_endpoint
+            .as_ref()
+            .expect("endpoint")
+            .as_str(),
+        "https://otel-collector.example:4317/"
+    );
+}
+
+#[test]
 fn environment_overrides_toml_and_cli_overrides_environment() {
     let mut environment = minimum_environment();
     environment.insert(

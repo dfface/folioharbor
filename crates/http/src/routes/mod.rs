@@ -1,6 +1,7 @@
 mod auth;
 mod catalog;
 mod download;
+mod health;
 mod libraries;
 mod problems;
 mod progress;
@@ -18,6 +19,7 @@ use folioharbor_application::{
     },
     imports::{UnavailableUploadApi, UploadApi},
     libraries::{LibraryApi, UnavailableLibraryApi},
+    operations::{OperationsApi, ReadyOperations},
     ports::BlobStore,
     rate_limit::RateLimitUseCase,
     reader::{ProgressApi, ReaderApi, UnavailableProgressApi, UnavailableReaderApi},
@@ -46,6 +48,7 @@ pub struct AppState {
     pub progress_api: Arc<dyn ProgressApi>,
     pub download_api: Arc<dyn DownloadApi>,
     pub download_blobs: Option<Arc<dyn BlobStore>>,
+    pub operations: Arc<dyn OperationsApi>,
     auth_features: Option<AuthFeatures>,
 }
 impl AppState {
@@ -85,6 +88,7 @@ impl AppState {
             progress_api: Arc::new(UnavailableProgressApi),
             download_api: Arc::new(UnavailableDownloadApi),
             download_blobs: None,
+            operations: Arc::new(ReadyOperations),
             auth_features: None,
         }
     }
@@ -136,9 +140,16 @@ impl AppState {
         self.download_blobs = Some(blobs);
         self
     }
+
+    #[must_use]
+    pub fn with_operations(mut self, operations: Arc<dyn OperationsApi>) -> Self {
+        self.operations = operations;
+        self
+    }
 }
 pub fn router(state: AppState) -> Router {
     let auth_features = state.auth_features;
+    let operations = state.operations.clone();
     Router::new()
         .nest("/problems", problems::router())
         .nest("/api/v1/auth", auth::router(auth_features))
@@ -160,8 +171,18 @@ pub fn router(state: AppState) -> Router {
             middleware::request_id::attach,
         ))
         .with_state(state)
+        .merge(health::router(operations))
+        .layer(axum_middleware::from_fn(
+            middleware::telemetry::trace_request,
+        ))
 }
 
 pub(crate) fn problem_document_router() -> Router {
     problems::stateless_router()
+}
+
+pub fn health_router(
+    operations: Arc<dyn folioharbor_application::operations::OperationsApi>,
+) -> Router {
+    health::router(operations)
 }

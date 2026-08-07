@@ -11,8 +11,15 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+folioharbor-application = { path = "../../crates/application", version = "0.1.0" }
+folioharbor-domain = { path = "../../crates/domain", version = "0.1.0" }
 folioharbor-postgres = { path = "../../crates/postgres", version = "0.1.0" }
+folioharbor-storage-local = { path = "../../crates/storage-local", version = "0.1.0" }
+getrandom.workspace = true
+rpassword = "7.4"
 secrecy.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

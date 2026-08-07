@@ -6,7 +6,11 @@ use axum::{
 };
 use folioharbor_domain::id::RequestId;
 pub async fn attach(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
-    let request_id = RequestId::new();
+    let request_id = request
+        .extensions()
+        .get::<RequestId>()
+        .copied()
+        .unwrap_or_else(RequestId::new);
     request.extensions_mut().insert(request_id);
     request
         .extensions_mut()

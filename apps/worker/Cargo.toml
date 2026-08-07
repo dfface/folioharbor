@@ -11,6 +11,7 @@ async-trait.workspace = true
 folioharbor-application = { path = "../../crates/application", version = "0.1.0" }
 folioharbor-domain = { path = "../../crates/domain", version = "0.1.0" }
 folioharbor-epub = { path = "../../crates/epub", version = "0.1.0" }
+folioharbor-http = { path = "../../crates/http", version = "0.1.0" }
 folioharbor-postgres = { path = "../../crates/postgres", version = "0.1.0" }
 folioharbor-storage-local = { path = "../../crates/storage-local", version = "0.1.0" }
 lettre.workspace = true
@@ -21,6 +22,7 @@ tokio.workspace = true
 time.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+uuid.workspace = true
 zeroize.workspace = true
 
 [lints]
@@ -33,4 +35,3 @@ serde_json.workspace = true
 sqlx.workspace = true
 tempfile = "3.20"
 zip.workspace = true
-uuid.workspace = true

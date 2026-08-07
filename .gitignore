@@ -4,3 +4,5 @@ web/.vite/
 web/playwright-report/
 web/test-results/
 *.tsbuildinfo
+deploy/.env
+deploy/secrets/

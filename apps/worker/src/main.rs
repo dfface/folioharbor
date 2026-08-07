@@ -10,6 +10,9 @@ use folioharbor_application::{
     mail::DeliverMailJob,
 };
 use folioharbor_epub::{EpubPublicationParser, ParserLimits};
+use folioharbor_http::middleware::telemetry::{
+    MetricAttributes, TelemetryMetrics, init_observability,
+};
 use folioharbor_postgres::{
     PgCatalogRepository, PgGarbageCollectionRepository, PgImportCleanupRepository,
     PgImportRepository, PgJobRepository, PgMailRepository, connect_worker,
@@ -22,11 +25,11 @@ use folioharbor_worker::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
     let settings = Settings::load(ConfigSources {
         environment: std::env::vars().collect::<BTreeMap<_, _>>(),
         ..ConfigSources::default()
     })?;
+    let _telemetry = init_observability("folioharbor-worker", &settings.observability)?;
     let database_url = settings
         .database
         .url
@@ -36,6 +39,9 @@ async fn main() -> anyhow::Result<()> {
     let config = RunnerConfig::new(settings.worker.concurrency)
         .ok_or_else(|| anyhow::anyhow!("worker concurrency must be positive"))?;
     let pool = connect_worker(database_url).await?;
+    if let Ok(attributes) = MetricAttributes::try_new([("pool", "worker"), ("state", "open")]) {
+        TelemetryMetrics.record_pool_state(u64::from(pool.size()), &attributes);
+    }
     let smtp = SmtpMailer::for_mode(&settings.mail)?;
     let blobs = Arc::new(LocalBlobStore::new(storage_root));
     let process = Arc::new(ProcessImportJob::new(
@@ -82,14 +88,40 @@ async fn main() -> anyhow::Result<()> {
         worker_id.clone(),
         config,
     );
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
     loop {
-        jobs.ensure_cleanup_jobs(time::OffsetDateTime::now_utc())
-            .await?;
-        runner.run_once().await?;
-        if let Some(mail_delivery) = &mail_delivery {
-            mail_delivery
-                .run_once(time::OffsetDateTime::now_utc(), 25)
-                .await?;
+        tokio::select! {
+            result = async {
+                jobs.ensure_cleanup_jobs(time::OffsetDateTime::now_utc()).await?;
+                runner.run_once().await?;
+                if let Some(mail_delivery) = &mail_delivery {
+                    mail_delivery.run_once(time::OffsetDateTime::now_utc(), 25).await?;
+                }
+                Ok::<(), anyhow::Error>(())
+            } => result?,
+            () = &mut shutdown => break,
         }
+    }
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut signal) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            let _ = signal.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
     }
 }

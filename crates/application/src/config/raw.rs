@@ -154,12 +154,14 @@ impl Default for RawWorker {
 #[serde(default, deny_unknown_fields)]
 pub(super) struct RawObservability {
     pub(super) log_filter: String,
+    pub(super) otlp_endpoint: Option<String>,
 }
 
 impl Default for RawObservability {
     fn default() -> Self {
         Self {
             log_filter: "info".to_owned(),
+            otlp_endpoint: None,
         }
     }
 }
@@ -200,6 +202,7 @@ fn environment_path(key: &str) -> Option<&'static str> {
         "FOLIOHARBOR_MAIL_FROM_ADDRESS" => Some("mail.from_address"),
         "FOLIOHARBOR_WORKER_CONCURRENCY" => Some("worker.concurrency"),
         "FOLIOHARBOR_OBSERVABILITY_LOG_FILTER" => Some("observability.log_filter"),
+        "FOLIOHARBOR_OBSERVABILITY_OTLP_ENDPOINT" => Some("observability.otlp_endpoint"),
         _ => None,
     }
 }
@@ -243,6 +246,7 @@ fn apply_values(
             "mail.from_address" => raw.mail.from_address.clone_from(value),
             "worker.concurrency" => raw.worker.concurrency = parse(key, value)?,
             "observability.log_filter" => raw.observability.log_filter.clone_from(value),
+            "observability.otlp_endpoint" => raw.observability.otlp_endpoint = Some(value.clone()),
             _ => return Err(ConfigError::invalid(key, "unknown configuration key")),
         }
     }

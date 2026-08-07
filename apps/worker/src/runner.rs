@@ -4,6 +4,7 @@ use std::{
         atomic::{AtomicU32, Ordering},
     },
     time::Duration as StdDuration,
+    time::Instant,
 };
 
 use async_trait::async_trait;
@@ -12,6 +13,7 @@ use folioharbor_application::{
     ports::{JobRepository, JobRepositoryError, LeaseJobs},
 };
 use folioharbor_domain::{id::RequestId, imports::job::LeasedJob};
+use folioharbor_http::middleware::telemetry::{MetricAttributes, TelemetryMetrics};
 use time::{Duration, OffsetDateTime};
 use tokio::sync::Semaphore;
 use tracing::Instrument as _;
@@ -95,6 +97,10 @@ impl WorkerRunner {
             })
             .await?;
         let count = jobs.len();
+        if let Ok(attributes) = MetricAttributes::try_new([("service", "worker")]) {
+            TelemetryMetrics
+                .record_queue_depth(u64::try_from(count).unwrap_or(u64::MAX), &attributes);
+        }
         let semaphore = Arc::new(Semaphore::new(self.config.concurrency));
         let mut tasks = Vec::with_capacity(count);
         for job in jobs {
@@ -141,7 +147,17 @@ async fn run_leased(
     lease_for: Duration,
     job: LeasedJob,
 ) -> Result<(), JobRepositoryError> {
-    let span = tracing::info_span!("job", job_id = %job.job_id.as_uuid(), kind = job.kind.as_str(), attempt = job.attempt);
+    let request_id = RequestId::new();
+    let trace_id = uuid::Uuid::now_v7().simple().to_string();
+    let span = tracing::info_span!(
+        "job",
+        job_id = %job.job_id.as_uuid(),
+        request_id = %request_id.as_ulid(),
+        trace_id = %trace_id,
+        kind = job.kind.as_str(),
+        attempt = job.attempt
+    );
+    let started = Instant::now();
     let mut operation = Box::pin(dispatcher.dispatch(job.clone()).instrument(span));
     let heartbeat_every =
         StdDuration::from_secs(u64::try_from((lease_for.whole_seconds() / 3).max(1)).unwrap_or(1));
@@ -159,6 +175,20 @@ async fn run_leased(
         }
     };
     let now = OffsetDateTime::now_utc();
+    let (outcome, is_error, is_retry) = match &result {
+        Ok(()) => ("succeeded", false, false),
+        Err(JobFailure::Transient { .. }) => ("retry", true, true),
+        Err(JobFailure::Permanent { .. }) => ("failed", true, false),
+        Err(JobFailure::OperatorRequired { .. }) => ("operator_required", true, false),
+    };
+    if let Ok(attributes) =
+        MetricAttributes::try_new([("job_kind", job.kind.as_str()), ("outcome", outcome)])
+    {
+        TelemetryMetrics.record_job(started.elapsed().as_secs_f64(), is_error, &attributes);
+        if is_retry {
+            TelemetryMetrics.record_retry(&attributes);
+        }
+    }
     let changed = match result {
         Ok(()) => jobs.succeed(job.job_id, &owner, now).await?,
         Err(JobFailure::Transient { code, retry_at }) => {
