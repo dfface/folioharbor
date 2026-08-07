@@ -7,7 +7,6 @@ services:
       POSTGRES_DB: folioharbor
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-      POSTGRES_HOST_AUTH_METHOD: trust
       FOLIOHARBOR_OWNER_PASSWORD_FILE: /run/secrets/owner_password
       FOLIOHARBOR_API_PASSWORD_FILE: /run/secrets/api_password
       FOLIOHARBOR_WORKER_PASSWORD_FILE: /run/secrets/worker_password
@@ -24,6 +23,61 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+
+  database-url-init:
+    image: alpine:3.22
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        umask 077
+        install -d -m 0700 /database-urls
+        owner_password="$$(cat /run/secrets/owner_password)"
+        api_password="$$(cat /run/secrets/api_password)"
+        worker_password="$$(cat /run/secrets/worker_password)"
+        printf '%s' "postgres://folioharbor_owner:$${owner_password}@postgres/folioharbor" > /database-urls/owner
+        printf '%s' "postgres://folioharbor_api:$${api_password}@postgres/folioharbor" > /database-urls/api
+        printf '%s' "postgres://folioharbor_worker:$${worker_password}@postgres/folioharbor" > /database-urls/worker
+        chown 10001:10001 /database-urls /database-urls/owner /database-urls/api /database-urls/worker
+        chmod 0400 /database-urls/owner /database-urls/api /database-urls/worker
+    secrets:
+      - owner_password
+      - api_password
+      - worker_password
+    volumes:
+      - database_urls:/database-urls
+
+  database-auth-check:
+    image: postgres:18.0-alpine
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        attempts=0
+        until PGPASSWORD="$$(cat /run/secrets/api_password)" psql --host postgres --username folioharbor_api --dbname folioharbor --command 'SELECT 1' >/dev/null 2>&1 \
+          && PGPASSWORD="$$(cat /run/secrets/worker_password)" psql --host postgres --username folioharbor_worker --dbname folioharbor --command 'SELECT 1' >/dev/null 2>&1; do
+          attempts=$$((attempts + 1))
+          if [ "$$attempts" -ge 30 ]; then
+            echo 'database runtime roles did not become ready' >&2
+            exit 1
+          fi
+          sleep 1
+        done
+        if PGPASSWORD="$$(cat /run/secrets/worker_password)" psql --host postgres --username folioharbor_api --dbname folioharbor --command 'SELECT 1' >/dev/null 2>&1; then
+          echo 'API role accepted the Worker credential' >&2
+          exit 1
+        fi
+        if PGPASSWORD="$$(cat /run/secrets/owner_password)" psql --host postgres --username folioharbor_worker --dbname folioharbor --command 'SELECT 1' >/dev/null 2>&1; then
+          echo 'Worker role accepted the owner credential' >&2
+          exit 1
+        fi
+    secrets:
+      - owner_password
+      - api_password
+      - worker_password
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   mail-tls-init:
     image: folioharbor-e2e-app:local
@@ -87,7 +141,7 @@ services:
       dockerfile: tests/e2e/Dockerfile
     command: ["folioharbor", "migrate"]
     environment:
-      FOLIOHARBOR_DATABASE_URL: postgres://folioharbor_owner@postgres/folioharbor
+      FOLIOHARBOR_DATABASE_URL_FILE: /run/database-urls/owner
       FOLIOHARBOR_AUTH_APPLICATION_SECRET_KEY_ID: e2e-current
       FOLIOHARBOR_AUTH_APPLICATION_SECRET_FILE: /run/secrets/application_secret
       FOLIOHARBOR_MAIL_SMTP_URL: smtp://mailpit:1025
@@ -97,10 +151,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      database-url-init:
+        condition: service_completed_successfully
+      database-auth-check:
+        condition: service_completed_successfully
       storage-init:
         condition: service_completed_successfully
     volumes:
       - blob_data:/var/lib/folioharbor
+      - database_urls:/run/database-urls:ro
 
   bootstrap-admin:
     image: folioharbor-e2e-app:local
@@ -114,7 +173,7 @@ services:
           | script -q -e -c 'folioharbor admin create --email admin@e2e.invalid' /dev/null \
           >/dev/null 2>&1
     environment:
-      FOLIOHARBOR_DATABASE_URL: postgres://folioharbor_owner@postgres/folioharbor
+      FOLIOHARBOR_DATABASE_URL_FILE: /run/database-urls/owner
       FOLIOHARBOR_AUTH_APPLICATION_SECRET_KEY_ID: e2e-current
       FOLIOHARBOR_AUTH_APPLICATION_SECRET_FILE: /run/secrets/application_secret
       FOLIOHARBOR_MAIL_SMTP_URL: smtp://mailpit:1025
@@ -127,6 +186,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - blob_data:/var/lib/folioharbor
+      - database_urls:/run/database-urls:ro
 
   api:
     image: folioharbor-e2e-app:local
@@ -135,7 +195,7 @@ services:
     environment: &runtime_environment
       FOLIOHARBOR_SERVER_BIND_ADDRESS: 0.0.0.0:3000
       FOLIOHARBOR_SERVER_PUBLIC_BASE_URL: http://127.0.0.1:4173/
-      FOLIOHARBOR_DATABASE_URL: postgres://folioharbor_api@postgres/folioharbor
+      FOLIOHARBOR_DATABASE_URL_FILE: /run/database-urls/api
       FOLIOHARBOR_AUTH_APPLICATION_SECRET_KEY_ID: e2e-current
       FOLIOHARBOR_AUTH_APPLICATION_SECRET_FILE: /run/secrets/application_secret
       FOLIOHARBOR_STORAGE_ROOT: /var/lib/folioharbor
@@ -155,6 +215,7 @@ services:
     volumes:
       - blob_data:/var/lib/folioharbor
       - mail_tls:/run/mail-tls:ro
+      - database_urls:/run/database-urls:ro
     ports:
       - "127.0.0.1:3000:3000"
     healthcheck:
@@ -169,7 +230,7 @@ services:
     command: ["folioharbor-worker"]
     environment:
       <<: *runtime_environment
-      FOLIOHARBOR_DATABASE_URL: postgres://folioharbor_worker@postgres/folioharbor
+      FOLIOHARBOR_DATABASE_URL_FILE: /run/database-urls/worker
       FOLIOHARBOR_WORKER_CONCURRENCY: 1
     secrets:
       - application_secret
@@ -181,6 +242,7 @@ services:
     volumes:
       - blob_data:/var/lib/folioharbor
       - mail_tls:/run/mail-tls:ro
+      - database_urls:/run/database-urls:ro
     healthcheck:
       test: ["CMD-SHELL", "kill -0 1"]
       interval: 2s
@@ -191,6 +253,7 @@ volumes:
   postgres_data:
   blob_data:
   mail_tls:
+  database_urls:
 
 secrets:
   postgres_password:

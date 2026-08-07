@@ -129,6 +129,26 @@ test("a direct item link survives reload and presents user concepts and independ
   expect((await axe.run(document.body)).violations).toEqual([]);
 });
 
+test("a downloadable Item links to the production download route", async () => {
+  authenticatedLibraryHandlers();
+  server.use(
+    http.get(`${apiOrigin}/api/v1/libraries/:libraryId/items/:itemId`, () =>
+      HttpResponse.json({
+        ...book(firstItemId, "Downloadable Book", true),
+        manifestation_id: "018f47b5-58b4-7ba6-9a3a-d9f41f17d001",
+        identifiers: [],
+      }),
+    ),
+  );
+
+  renderApp(`/libraries/${personalId}/items/${firstItemId}`);
+
+  expect(await screen.findByRole("link", { name: "Download EPUB" })).toHaveAttribute(
+    "href",
+    `/api/v1/items/${firstItemId}/download`,
+  );
+});
+
 test("catalog pagination loads the opaque next page through an accessible control", async () => {
   authenticatedLibraryHandlers();
   const requestedCursors: (string | null)[] = [];

@@ -63,7 +63,7 @@ async fn bootstrap_is_transactional_idempotent_and_separate_from_library_roles()
             .await
             .expect("safe health"),
         DatabaseHealth {
-            schema_version: 27,
+            schema_version: 28,
             system_administrator_exists: true,
         }
     );

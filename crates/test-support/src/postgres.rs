@@ -12,6 +12,9 @@ const ROLES_SQL: &str = include_str!("../../../deploy/postgres/init/001-roles.sq
 pub struct TestPostgres {
     admin_url: String,
     database_name: String,
+    owner_password: String,
+    api_password: String,
+    worker_password: String,
 }
 
 #[derive(Debug, Error)]
@@ -22,6 +25,8 @@ pub enum TestPostgresError {
     Database(#[from] sqlx::Error),
     #[error("refusing to operate on a database outside the test namespace")]
     UnsafeDatabaseName,
+    #[error("PostgreSQL test role password is empty or unsafe")]
+    UnsafePassword,
 }
 
 impl TestPostgres {
@@ -44,7 +49,34 @@ impl TestPostgres {
             .max_connections(1)
             .connect(&admin_url)
             .await?;
-        sqlx::raw_sql(ROLES_SQL).execute(&admin).await?;
+        let owner_password = role_password(
+            "FOLIOHARBOR_TEST_OWNER_PASSWORD",
+            "folioharbor-test-owner-password",
+        )?;
+        let api_password = role_password(
+            "FOLIOHARBOR_TEST_API_PASSWORD",
+            "folioharbor-test-api-password",
+        )?;
+        let worker_password = role_password(
+            "FOLIOHARBOR_TEST_WORKER_PASSWORD",
+            "folioharbor-test-worker-password",
+        )?;
+        let mut role_setup = admin.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(5_066_353_826_641_225_813_i64)
+            .execute(&mut *role_setup)
+            .await?;
+        sqlx::raw_sql(ROLES_SQL).execute(&mut *role_setup).await?;
+        for (role, password) in [
+            ("folioharbor_owner", owner_password.as_str()),
+            ("folioharbor_api", api_password.as_str()),
+            ("folioharbor_worker", worker_password.as_str()),
+        ] {
+            sqlx::raw_sql(&format!("ALTER ROLE {role} PASSWORD '{password}'"))
+                .execute(&mut *role_setup)
+                .await?;
+        }
+        role_setup.commit().await?;
         sqlx::raw_sql(&format!(
             "CREATE DATABASE \"{database_name}\" OWNER folioharbor_owner"
         ))
@@ -54,6 +86,9 @@ impl TestPostgres {
         Ok(Self {
             admin_url,
             database_name,
+            owner_password,
+            api_password,
+            worker_password,
         })
     }
 
@@ -105,10 +140,28 @@ impl TestPostgres {
     fn role_url(&self, role: &str) -> Result<String, url::ParseError> {
         let mut url = Url::parse(&self.admin_url)?;
         let _ = url.set_username(role);
-        let _ = url.set_password(None);
+        let password = match role {
+            "folioharbor_owner" => &self.owner_password,
+            "folioharbor_api" => &self.api_password,
+            "folioharbor_worker" => &self.worker_password,
+            _ => unreachable!("test-support role URL requested for an unknown role"),
+        };
+        let _ = url.set_password(Some(password));
         url.set_path(&format!("/{}", self.database_name));
         Ok(url.into())
     }
+}
+
+fn role_password(environment_name: &str, fallback: &str) -> Result<String, TestPostgresError> {
+    let password = env::var(environment_name).unwrap_or_else(|_| fallback.to_owned());
+    if password.is_empty()
+        || !password
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(TestPostgresError::UnsafePassword);
+    }
+    Ok(password)
 }
 
 fn validate_database_name(name: &str) -> Result<(), TestPostgresError> {

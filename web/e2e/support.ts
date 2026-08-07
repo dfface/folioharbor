@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import {
   expect,
@@ -9,7 +9,12 @@ import {
 
 const apiBaseUrl = process.env.FOLIOHARBOR_E2E_API_URL ?? "http://127.0.0.1:3000";
 const mailBaseUrl = process.env.FOLIOHARBOR_E2E_MAIL_URL ?? "http://127.0.0.1:8025";
-const password = "Valid e2e password 2026!";
+
+export interface RegisteredAccount {
+  email: string;
+  password: string;
+  verificationToken: string;
+}
 
 export interface LibraryView {
   library_id: string;
@@ -27,9 +32,11 @@ export interface LibraryView {
 export interface SessionClient {
   api: APIRequestContext;
   email: string;
+  password: string;
   userId: string;
   cookieHeader: string;
   csrfToken: string;
+  sensitiveValues: string[];
 }
 
 export interface CollaborativePair {
@@ -37,6 +44,7 @@ export interface CollaborativePair {
   aliceLibrary: LibraryView;
   bob: SessionClient;
   bobPersonalLibrary: LibraryView;
+  sensitiveValues: string[];
 }
 
 export interface UploadView {
@@ -61,9 +69,13 @@ export async function responseJson(response: APIResponse): Promise<unknown> {
   return response.json() as Promise<unknown>;
 }
 
-export async function expectStatus(response: APIResponse, status: number): Promise<void> {
-  const body = await response.text();
-  expect(response.status(), body).toBe(status);
+export function expectStatus(response: APIResponse, status: number): Promise<void> {
+  return Promise.resolve().then(() => {
+    expect(
+      response.status() === status,
+      `HTTP status mismatch: expected ${String(status)}, received ${String(response.status())}`,
+    ).toBe(true);
+  });
 }
 
 function cookie(response: APIResponse, name: string): string {
@@ -148,7 +160,8 @@ export async function waitForMailToken(email: string, path: string): Promise<str
   throw new Error(`timed out waiting for ${path} mail to ${email}`);
 }
 
-export async function registerAndVerify(email: string): Promise<void> {
+export async function registerAndVerify(email: string): Promise<RegisteredAccount> {
+  const password = `E2E-${randomBytes(24).toString("base64url")}aA1!`;
   const api = await anonymousApi();
   try {
     const registered = await api.post("/api/v1/auth/register", {
@@ -158,12 +171,13 @@ export async function registerAndVerify(email: string): Promise<void> {
     const token = await waitForMailToken(email, "verify-email");
     const verified = await api.post("/api/v1/auth/verify-email", { data: { token } });
     await expectStatus(verified, 204);
+    return { email, password, verificationToken: token };
   } finally {
     await api.dispose();
   }
 }
 
-export async function login(email: string): Promise<SessionClient> {
+export async function login(email: string, password: string): Promise<SessionClient> {
   const anonymous = await anonymousApi();
   try {
     const response = await anonymous.post("/api/v1/auth/login", {
@@ -186,9 +200,11 @@ export async function login(email: string): Promise<SessionClient> {
     return {
       api,
       email,
+      password,
       userId: payload.user_id,
       cookieHeader: `folioharbor_session=${session}; folioharbor_csrf=${csrf}`,
       csrfToken: csrf,
+      sensitiveValues: [password, session, csrf],
     };
   } finally {
     await anonymous.dispose();
@@ -204,8 +220,8 @@ export async function libraries(client: SessionClient): Promise<LibraryView[]> {
 export async function createCollaborativePair(role: "reader" | "editor" = "reader"):
 Promise<CollaborativePair> {
   const aliceEmail = uniqueEmail("alice");
-  await registerAndVerify(aliceEmail);
-  const alice = await login(aliceEmail);
+  const aliceRegistration = await registerAndVerify(aliceEmail);
+  const alice = await login(aliceEmail, aliceRegistration.password);
   const aliceLibraries = await libraries(alice);
   expect(aliceLibraries).toHaveLength(1);
   const aliceLibrary = aliceLibraries[0];
@@ -221,8 +237,8 @@ Promise<CollaborativePair> {
   await expectStatus(invited, 204);
   const invitationToken = await waitForMailToken(bobEmail, "accept-invitation");
 
-  await registerAndVerify(bobEmail);
-  const bob = await login(bobEmail);
+  const bobRegistration = await registerAndVerify(bobEmail);
+  const bob = await login(bobEmail, bobRegistration.password);
   const beforeAcceptance = await libraries(bob);
   expect(beforeAcceptance).toHaveLength(1);
   const bobPersonalLibrary = beforeAcceptance[0];
@@ -238,7 +254,33 @@ Promise<CollaborativePair> {
     library_id: aliceLibrary.library_id,
   });
 
-  return { alice, aliceLibrary, bob, bobPersonalLibrary };
+  return {
+    alice,
+    aliceLibrary,
+    bob,
+    bobPersonalLibrary,
+    sensitiveValues: [
+      aliceRegistration.verificationToken,
+      bobRegistration.verificationToken,
+      invitationToken,
+      ...alice.sensitiveValues,
+      ...bob.sensitiveValues,
+    ],
+  };
+}
+
+export function infrastructureSecrets(): string[] {
+  return [
+    "POSTGRES_PASSWORD",
+    "OWNER_PASSWORD",
+    "API_PASSWORD",
+    "WORKER_PASSWORD",
+    "APPLICATION_SECRET",
+    "ADMIN_PASSWORD",
+  ].flatMap((name) => {
+    const value = process.env[`FOLIOHARBOR_E2E_${name}`];
+    return value === undefined ? [] : [value];
+  });
 }
 
 export async function uploadPublication(
@@ -363,15 +405,19 @@ export function generatedEpub(title = "Generated E2E Book", paddingBytes = 0): B
   <manifest>
     <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
     <item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>
+    <item id="chapter-two" href="chapter-two.xhtml" media-type="application/xhtml+xml"/>
   </manifest>
-  <spine><itemref idref="chapter"/></spine>
+  <spine><itemref idref="chapter"/><itemref idref="chapter-two"/></spine>
 </package>`],
     ["OEBPS/nav.xhtml", `<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml"><head><title>Contents</title></head>
-<body><nav epub:type="toc" xmlns:epub="http://www.idpf.org/2007/ops"><ol><li><a href="chapter.xhtml">Chapter</a></li></ol></nav></body></html>`],
+<body><nav epub:type="toc" xmlns:epub="http://www.idpf.org/2007/ops"><ol><li><a href="chapter.xhtml">Chapter One</a></li><li><a href="chapter-two.xhtml">Chapter Two</a></li></ol></nav></body></html>`],
     ["OEBPS/chapter.xhtml", `<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml"><head><title>${title}</title></head>
 <body><h1>${title}</h1><p>The complete vertical slice is readable.${padding}</p></body></html>`],
+    ["OEBPS/chapter-two.xhtml", `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>${title} — Chapter Two</title></head>
+<body><h1>${title} — Chapter Two</h1><p>Reading progress resumes on another device.</p></body></html>`],
   ]);
 }
 

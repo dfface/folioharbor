@@ -412,3 +412,69 @@ async fn repository_enforces_uniqueness_single_use_expiry_and_revocation() -> an
     database.cleanup().await.context("cleaning test database")?;
     Ok(())
 }
+
+#[tokio::test]
+async fn session_listing_and_revocation_apply_the_authenticated_user_rls_context()
+-> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let owner = PgPool::connect(&database.owner_url()?).await?;
+    run_migrations(&owner).await?;
+    let api = PgPool::connect(&database.api_url()?).await?;
+    let repository = PgIdentityRepository::new(api.clone());
+    let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
+    let user_id = UserId::new();
+    let session_id = SessionId::new();
+    sqlx::query(
+        "INSERT INTO folioharbor.user_accounts(\
+         user_id,normalized_email,display_email,status,created_at,verified_at\
+         ) VALUES($1,'browser-session@example.com','browser-session@example.com','verified',$2,$2)",
+    )
+    .bind(user_id.as_uuid())
+    .bind(now)
+    .execute(&owner)
+    .await?;
+    repository
+        .create_session(NewSession {
+            session_id,
+            user_id,
+            session_token_hash: SessionToken::parse(SecretString::from(
+                "browser session token".to_owned(),
+            ))
+            .hash_for_storage(),
+            csrf_token_hash: SessionToken::parse(SecretString::from(
+                "browser csrf token".to_owned(),
+            ))
+            .hash_for_storage(),
+            created_at: now,
+            idle_expires_at: now + time::Duration::minutes(30),
+            absolute_expires_at: now + time::Duration::hours(2),
+        })
+        .await?;
+
+    let sessions = repository.list_user_sessions(user_id).await?;
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id, session_id);
+    assert!(
+        repository
+            .revoke_user_session(
+                user_id,
+                session_id,
+                now + time::Duration::minutes(1),
+                SessionRevocationReason::UserRevoked,
+            )
+            .await?
+    );
+
+    let reason: Option<String> = sqlx::query_scalar(
+        "SELECT revocation_reason FROM folioharbor.user_sessions WHERE session_id=$1",
+    )
+    .bind(session_id.as_uuid())
+    .fetch_one(&owner)
+    .await?;
+    assert_eq!(reason.as_deref(), Some("user_revoked"));
+
+    api.close().await;
+    owner.close().await;
+    database.cleanup().await?;
+    Ok(())
+}

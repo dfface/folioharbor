@@ -1,9 +1,11 @@
 import { expect, test } from "@playwright/test";
 
+import { capturedServiceLogs, SensitiveCaptureGate, storageKeyForUpload } from "./security-scan";
 import {
   createCollaborativePair,
   expectStatus,
   generatedEpub,
+  infrastructureSecrets,
   newId,
   responseJson,
   sha256,
@@ -40,6 +42,13 @@ test("Alice uploads, Bob reads and syncs progress, then a permissioned Range dow
     if (itemId === null) {
       throw new Error("ready upload did not expose an Item");
     }
+    const gate = new SensitiveCaptureGate([
+      ...pair.sensitiveValues,
+      ...infrastructureSecrets(),
+      sha256(epub),
+      storageKeyForUpload(terminal.upload_id),
+      "/var/lib/folioharbor",
+    ]);
 
     const catalogResponse = await pair.bob.api.get(
       `/api/v1/libraries/${pair.aliceLibrary.library_id}/books`,
@@ -49,17 +58,23 @@ test("Alice uploads, Bob reads and syncs progress, then a permissioned Range dow
     expect(catalog.items).toEqual([
       expect.objectContaining({ item_id: itemId, can_read: true, can_download: false }),
     ]);
+    await gate.captureResponse("successful catalog", catalogResponse);
+    gate.assertSafe();
 
     const detailResponse = await pair.bob.api.get(
       `/api/v1/libraries/${pair.aliceLibrary.library_id}/items/${itemId}`,
     );
     await expectStatus(detailResponse, 200);
     const detail = await responseJson(detailResponse) as ItemDetail;
+    await gate.captureResponse("successful Item detail", detailResponse);
+    gate.assertSafe();
     const manifestResponse = await pair.bob.api.get(`/api/v1/items/${itemId}/manifest`);
     await expectStatus(manifestResponse, 200);
     const manifest = await responseJson(manifestResponse) as Manifest;
     expect(manifest.metadata.title).toBe("Generated E2E Book");
     expect(manifest.manifestationId).toBe(detail.manifestation_id);
+    await gate.captureResponse("successful manifest", manifestResponse);
+    gate.assertSafe();
     const chapter = manifest.readingOrder[0];
     if (chapter === undefined) {
       throw new Error("publication manifest did not expose reading order");
@@ -67,6 +82,8 @@ test("Alice uploads, Bob reads and syncs progress, then a permissioned Range dow
     const resource = await pair.bob.api.get(chapter.href);
     await expectStatus(resource, 200);
     expect(await resource.text()).toContain("complete vertical slice is readable");
+    await gate.captureResponse("successful resource", resource);
+    gate.assertSafe();
 
     const locator = {
       href: chapter.href,
@@ -91,6 +108,8 @@ test("Alice uploads, Bob reads and syncs progress, then a permissioned Range dow
     );
     await expectStatus(saved, 200);
     expect(await responseJson(saved)).toEqual(expect.objectContaining({ version: 1, locator }));
+    await gate.captureResponse("successful progress write", saved);
+    gate.assertSafe();
 
     const observedOnDeviceB = await pair.bob.api.get(
       `/api/v1/manifestations/${detail.manifestation_id}/progress`,
@@ -99,9 +118,13 @@ test("Alice uploads, Bob reads and syncs progress, then a permissioned Range dow
     expect(await responseJson(observedOnDeviceB)).toEqual(
       expect.objectContaining({ version: 1, locator }),
     );
+    await gate.captureResponse("successful progress read", observedOnDeviceB);
+    gate.assertSafe();
 
     const denied = await pair.bob.api.get(`/api/v1/items/${itemId}/download`);
     expect(denied.status()).toBe(403);
+    await gate.captureResponse("denied download", denied);
+    gate.assertSafe();
 
     const enabled = await pair.alice.api.patch(
       `/api/v1/libraries/${pair.aliceLibrary.library_id}/settings`,
@@ -113,13 +136,20 @@ test("Alice uploads, Bob reads and syncs progress, then a permissioned Range dow
       },
     );
     await expectStatus(enabled, 204);
+    await gate.captureResponse("successful permission change", enabled);
+    gate.assertSafe();
 
     const downloaded = await pair.bob.api.get(`/api/v1/items/${itemId}/download`, {
       headers: { Range: `bytes=0-${String(epub.byteLength - 1)}` },
     });
     await expectStatus(downloaded, 206);
     expect(downloaded.headers()["content-range"]).toBe(`bytes 0-${String(epub.byteLength - 1)}/${String(epub.byteLength)}`);
-    expect(sha256(await downloaded.body())).toBe(sha256(epub));
+    const digestMatches = sha256(await downloaded.body()) === sha256(epub);
+    expect(digestMatches, "Range download content digest did not match the upload").toBe(true);
+    await gate.captureResponse("successful Range download", downloaded);
+    gate.assertSafe();
+    gate.capture("API and Worker logs", capturedServiceLogs());
+    gate.assertSafe();
   } finally {
     await Promise.all([pair.alice.api.dispose(), pair.bob.api.dispose()]);
   }

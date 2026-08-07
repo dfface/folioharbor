@@ -4,12 +4,14 @@ use folioharbor_application::ports::{
     NewSession, PasswordResetSession, RegisterOutcome, SessionPrincipal, SessionRecord,
 };
 use folioharbor_domain::{
-    id::{SessionId, UserId},
+    id::{RequestId, SessionId, UserId},
     identity::{AccountStatus, NormalizedEmail, SessionRevocationReason, TokenHash},
     time::OffsetDateTime,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::{DatabaseContext, PgTransactionContext};
 
 #[derive(Clone, Debug)]
 pub struct PgIdentityRepository {
@@ -299,7 +301,15 @@ impl IdentityRepository for PgIdentityRepository {
         &self,
         user_id: UserId,
     ) -> Result<Vec<SessionRecord>, IdentityRepositoryError> {
-        let rows = sqlx::query!(r#"SELECT session_id AS "session_id!", created_at AS "created_at!", last_seen_at AS "last_seen_at!", idle_expires_at AS "idle_expires_at!", absolute_expires_at AS "absolute_expires_at!", revoked_at FROM folioharbor.user_sessions WHERE user_id = $1 ORDER BY created_at DESC"#, user_id.as_uuid()).fetch_all(&self.pool).await.map_err(persistence_error)?;
+        let mut transaction = self.pool.begin().await.map_err(persistence_error)?;
+        PgTransactionContext::apply(
+            &mut transaction,
+            &DatabaseContext::api_without_library(user_id, RequestId::new()),
+        )
+        .await
+        .map_err(persistence_error)?;
+        let rows = sqlx::query!(r#"SELECT session_id AS "session_id!", created_at AS "created_at!", last_seen_at AS "last_seen_at!", idle_expires_at AS "idle_expires_at!", absolute_expires_at AS "absolute_expires_at!", revoked_at FROM folioharbor.user_sessions WHERE user_id = $1 ORDER BY created_at DESC"#, user_id.as_uuid()).fetch_all(&mut *transaction).await.map_err(persistence_error)?;
+        transaction.commit().await.map_err(persistence_error)?;
         Ok(rows
             .into_iter()
             .map(|row| SessionRecord {
@@ -320,7 +330,15 @@ impl IdentityRepository for PgIdentityRepository {
         now: OffsetDateTime,
         reason: SessionRevocationReason,
     ) -> Result<bool, IdentityRepositoryError> {
-        let result = sqlx::query!("UPDATE folioharbor.user_sessions SET revoked_at = $3, revocation_reason = $4, version = version + 1 WHERE user_id = $1 AND session_id = $2 AND revoked_at IS NULL", user_id.as_uuid(), session_id.as_uuid(), now, revocation_reason_value(reason)).execute(&self.pool).await.map_err(persistence_error)?;
+        let mut transaction = self.pool.begin().await.map_err(persistence_error)?;
+        PgTransactionContext::apply(
+            &mut transaction,
+            &DatabaseContext::api_without_library(user_id, RequestId::new()),
+        )
+        .await
+        .map_err(persistence_error)?;
+        let result = sqlx::query!("UPDATE folioharbor.user_sessions SET revoked_at = $3, revocation_reason = $4, version = version + 1 WHERE user_id = $1 AND session_id = $2 AND revoked_at IS NULL", user_id.as_uuid(), session_id.as_uuid(), now, revocation_reason_value(reason)).execute(&mut *transaction).await.map_err(persistence_error)?;
+        transaction.commit().await.map_err(persistence_error)?;
         Ok(result.rows_affected() == 1)
     }
 }

@@ -20,7 +20,7 @@ Use this checklist from a clean clone on the exact commit proposed for the first
   scripts/check-migrations.sh
   ```
 
-- [ ] `scripts/check-migrations.sh` used PostgreSQL 18, migrated an empty database through every committed migration, reran migration idempotently, checked schema metadata, exercised API/Worker persistence, and passed the RLS matrix.
+- [ ] `scripts/check-migrations.sh` used password-authenticated PostgreSQL 18, upgraded the committed task base without checksum drift, migrated an empty database through every committed migration, reran migration idempotently, checked exact schema metadata, rejected cross-role credentials, exercised API/Worker persistence, and passed the RLS matrix.
 - [ ] Generated OpenAPI Web types are current (`pnpm web:check-generated-api`).
 - [ ] Dependency vulnerability/license checks, the production pnpm audit, and the secret scan passed without an unreviewed suppression.
 - [ ] The application image built from the release commit and the official `deploy/compose.yaml` reached its documented healthy state from empty volumes.

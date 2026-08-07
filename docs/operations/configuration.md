@@ -14,4 +14,4 @@ Use three PostgreSQL roles and credentials:
 
 Neither runtime role is superuser, database owner, `BYPASSRLS`, or a substitute for the other. A system administrator row is separate from library membership and grants no implicit `item.read` or other content permission.
 
-Readiness is intentionally aggregate. `/health/live` checks only the serving process. `/health/ready` returns `ready`, `bootstrap_required`, or `unavailable`; it never names the failed database, schema, storage path, reserve, or credential. Readiness requires database access, exact schema 27 compatibility, valid required configuration, usable Blob storage above the configured free reserve, and at least one system administrator.
+Readiness is intentionally aggregate. `/health/live` checks only the serving process. `/health/ready` returns `ready`, `bootstrap_required`, or `unavailable`; it never names the failed database, schema, storage path, reserve, or credential. Readiness requires database access, exact schema 28 compatibility, valid required configuration, usable Blob storage above the configured free reserve, and at least one system administrator.

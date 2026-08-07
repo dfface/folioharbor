@@ -16,7 +16,7 @@ interface ItemDetail {
 
 test("two simultaneous progress writers produce one durable winner and one explicit conflict", async () => {
   const pair = await createCollaborativePair();
-  const deviceB = await login(pair.bob.email);
+  const deviceB = await login(pair.bob.email, pair.bob.password);
   try {
     const upload = await uploadPublication(
       pair.alice,

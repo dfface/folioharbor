@@ -27,7 +27,7 @@ export function ItemDetailPage() {
       </dl>
       <div>
         {detail.can_read ? <Link to={`/libraries/${library.library_id}/items/${detail.item_id}/read`}>{t("catalog.readOnline")}</Link> : null}{" "}
-        {detail.can_download ? <a href={`/api/v1/items/${encodeURIComponent(detail.item_id)}/original`}>{t("catalog.download")}</a> : null}
+        {detail.can_download ? <a href={`/api/v1/items/${encodeURIComponent(detail.item_id)}/download`}>{t("catalog.download")}</a> : null}
       </div>
       {detail.can_read && !detail.can_download ? <p>{t("catalog.onlineOnly")}</p> : null}
     </article>
