@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented the Task 20 Web vertical slice and the smallest server/OpenAPI additions required to make it secure and usable. Independent-review P1/P2 findings are repaired: authenticated resource caches are isolated across identities, route detail cannot reintroduce a library absent from the visible list, migration history is gap-free through 0026 without renaming durable history, and invitation UI follows its dedicated capability and operation-specific role contract.
+Implemented the Task 20 Web vertical slice and the smallest server/OpenAPI additions required to make it secure and usable. Independent-review P1/P2 findings are repaired: authenticated resource caches are isolated across identities, route detail cannot reintroduce a library absent from the visible list, migration history is gap-free through 0026 without renaming durable history, invitation UI follows its dedicated capability and operation-specific role contract, and successful invitation navigation cannot be bounced by a cached pre-acceptance library list.
 
 ## RED evidence
 
@@ -19,6 +19,7 @@ Independent-review repairs followed focused RED/GREEN cycles:
 - the two-account Web regression initially rendered account A's library, member, capability links, catalog Item, and upload state while account B's resource responses were held pending; the unmatched-detail regression also stayed on account A's route;
 - the invitation regressions initially rendered the form when `can_invite_members` was false and exposed role values `[reader, editor, owner]`; mutation checks also proved invite-only navigation, direct-route access, and suppression of member-list reads failed under the old gates;
 - the migration-from-zero gate initially observed applied versions 1 through 26 while its invariant expected only 1 through 25.
+- the final re-review race regression first cached the personal-library list, accepted an invitation in the same SPA, held the post-acceptance list response pending, and observed navigation bounce from the accepted-library route to `/`.
 
 ## Delivered behavior
 
@@ -33,6 +34,7 @@ Independent-review repairs followed focused RED/GREEN cycles:
 - Migration `0026_web_contracts.sql` for server-derived visible-library capabilities, detailed invitation acceptance, and atomic upload result Item persistence.
 - One authenticated-resource query-key root covers library detail/list, catalog, member, and upload caches; every successful identity transition uses the Task 19 reset/remove flow for that complete subtree.
 - Invitation and member-management controls are independently gated by `can_invite_members` and `can_manage_members`; invitation roles come directly from the generated operation request type and contain only `editor | reader`.
+- Successful invitation acceptance removes only the exact cached library-list entry before navigation. The accepted route therefore waits for a fresh authoritative list, while library detail/catalog/member/upload caches and fail-closed authorization behavior remain intact.
 
 ## GREEN evidence
 
@@ -45,7 +47,7 @@ pnpm --dir web test --run \
   src/features/members/member-flow.test.tsx
 EXIT 0
 Test Files 3 passed (3)
-Tests 32 passed (32)
+Tests 33 passed (33)
 ```
 
 All Web component tests:
@@ -54,7 +56,7 @@ All Web component tests:
 pnpm --dir web test --run
 EXIT 0
 Test Files 4 passed (4)
-Tests 45 passed (45)
+Tests 46 passed (46)
 ```
 
 Static and production checks:

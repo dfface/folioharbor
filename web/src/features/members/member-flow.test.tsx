@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import axe from "axe-core";
 import { HttpResponse, http } from "msw";
@@ -242,6 +242,57 @@ test("successful invitation acceptance keeps personal and shared libraries in th
   expect(await screen.findByRole("heading", { name: "Team Library" })).toBeInTheDocument();
   expect(screen.getByRole("option", { name: "Personal Library" })).toBeInTheDocument();
   expect(screen.getByRole("option", { name: "Team Library" })).toBeInTheDocument();
+  expect(window.location.pathname).toBe(`/libraries/${libraryId}/books`);
+});
+
+test("successful invitation acceptance does not bounce from the accepted library while a cached list refreshes", async () => {
+  let accepted = false;
+  let postAcceptanceListRequests = 0;
+  let releasePostAcceptanceList: (() => void) | undefined;
+  const postAcceptanceListPending = new Promise<void>((resolve) => {
+    releasePostAcceptanceList = resolve;
+  });
+  server.use(
+    http.get(`${apiOrigin}/api/v1/auth/session`, () =>
+      HttpResponse.json({ session_id: "018f47b5-58b4-7ba6-9a3a-d9f41f17a26e", is_current: true, status: "active" }),
+    ),
+    http.get(`${apiOrigin}/api/v1/libraries`, async () => {
+      if (!accepted) {
+        return HttpResponse.json([personalLibrary]);
+      }
+      postAcceptanceListRequests += 1;
+      await postAcceptanceListPending;
+      return HttpResponse.json([personalLibrary, ownerLibrary]);
+    }),
+    http.get(`${apiOrigin}/api/v1/libraries/:libraryId`, ({ params }) =>
+      HttpResponse.json(String(params.libraryId) === personalId ? personalLibrary : ownerLibrary),
+    ),
+    http.get(`${apiOrigin}/api/v1/libraries/:libraryId/books`, () => HttpResponse.json({ items: [] })),
+    http.post(`${apiOrigin}/api/v1/invitations/accept`, () => {
+      accepted = true;
+      return HttpResponse.json({ status: "accepted", library_id: libraryId });
+    }),
+  );
+
+  const user = userEvent.setup();
+  renderApp(`/libraries/${personalId}/books`);
+  expect(await screen.findByRole("heading", { name: "Personal Library" })).toBeInTheDocument();
+
+  act(() => {
+    window.history.pushState({}, "", "/invitations/invitation-token");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  await user.click(await screen.findByRole("button", { name: "Accept invitation" }));
+  await waitFor(() => { expect(postAcceptanceListRequests).toBe(1); });
+
+  try {
+    expect(window.location.pathname).toBe(`/libraries/${libraryId}/books`);
+    expect(screen.queryByRole("heading", { name: "Personal Library" })).not.toBeInTheDocument();
+  } finally {
+    releasePostAcceptanceList?.();
+  }
+
+  expect(await screen.findByRole("heading", { name: "Team Library" })).toBeInTheDocument();
   expect(window.location.pathname).toBe(`/libraries/${libraryId}/books`);
 });
 

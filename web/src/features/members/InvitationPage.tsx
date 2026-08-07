@@ -25,9 +25,8 @@ export function InvitationPage() {
     mutationFn: () => acceptInvitation(token, requestSignal()),
     onSuccess: (result) => {
       if (result.status === "accepted" && result.library_id !== undefined && result.library_id !== null) {
-        void queryClient.invalidateQueries({ queryKey: librariesQueryKey }).then(() => {
-          void navigate(`/libraries/${encodeURIComponent(result.library_id ?? "")}/books`, { replace: true });
-        });
+        queryClient.removeQueries({ exact: true, queryKey: librariesQueryKey });
+        void navigate(`/libraries/${encodeURIComponent(result.library_id)}/books`, { replace: true });
       }
     },
   });
