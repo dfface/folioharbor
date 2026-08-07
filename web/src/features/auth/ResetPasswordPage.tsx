@@ -11,6 +11,7 @@ import {
   inputDescription,
   requestErrorMessage,
   requestFieldErrors,
+  useErrorSummaryState,
   useRequestController,
 } from "./form";
 import { sessionQueryKey } from "./session";
@@ -21,7 +22,7 @@ export function ResetPasswordPage() {
   const [searchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const requestSignal = useRequestController();
-  const [error, setError] = useState<string | null>(null);
+  const { error, focusVersion, setError } = useErrorSummaryState();
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string>>>({});
   const mutation = useMutation({
     mutationFn: (input: ResetPasswordRequest) => resetPassword(input, requestSignal()),
@@ -62,7 +63,7 @@ export function ResetPasswordPage() {
   return (
     <section aria-labelledby="reset-title">
       <h2 id="reset-title">{t("auth.resetPassword")}</h2>
-      <ErrorSummary message={error} />
+      <ErrorSummary focusVersion={focusVersion} message={error} />
       {mutation.isPending ? <p role="status" aria-live="polite">{t("auth.submitting")}</p> : null}
       <form noValidate onSubmit={handleSubmit}>
         <div>

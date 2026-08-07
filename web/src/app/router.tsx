@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 import { Navigate, Outlet, Route, Routes } from "react-router-dom";
 
 import { ForgotPasswordPage } from "../features/auth/ForgotPasswordPage";
+import { requestErrorMessage } from "../features/auth/form";
 import { LoginPage } from "../features/auth/LoginPage";
 import { RegisterPage } from "../features/auth/RegisterPage";
 import { ResetPasswordPage } from "../features/auth/ResetPasswordPage";
@@ -15,10 +16,18 @@ function SessionLoading() {
   return <p role="status" aria-live="polite">{t("app.loading")}</p>;
 }
 
+function SessionError({ error }: { error: unknown }) {
+  const { t } = useTranslation();
+  return <p role="alert">{requestErrorMessage(error, t)}</p>;
+}
+
 function RequireAnonymous() {
   const session = useSession();
   if (session.status === "loading") {
     return <SessionLoading />;
+  }
+  if (session.status === "error") {
+    return <SessionError error={session.error} />;
   }
   return session.status === "authenticated" ? <Navigate to="/" replace /> : <Outlet />;
 }
@@ -27,6 +36,9 @@ function RequireAuthentication() {
   const session = useSession();
   if (session.status === "loading") {
     return <SessionLoading />;
+  }
+  if (session.status === "error") {
+    return <SessionError error={session.error} />;
   }
   return session.status === "anonymous" ? <Navigate to="/login" replace /> : <Outlet />;
 }

@@ -11,6 +11,7 @@ import {
   inputDescription,
   requestErrorMessage,
   requestFieldErrors,
+  useErrorSummaryState,
   useRequestController,
 } from "./form";
 
@@ -18,7 +19,7 @@ export function VerifyEmailPage() {
   const { t } = useTranslation();
   const [searchParams] = useSearchParams();
   const requestSignal = useRequestController();
-  const [error, setError] = useState<string | null>(null);
+  const { error, focusVersion, setError } = useErrorSummaryState();
   const [fieldError, setFieldError] = useState<string | undefined>();
   const [status, setStatus] = useState<string | null>(null);
   const mutation = useMutation({
@@ -52,7 +53,7 @@ export function VerifyEmailPage() {
   return (
     <section aria-labelledby="verify-title">
       <h2 id="verify-title">{t("auth.verifyEmail")}</h2>
-      <ErrorSummary message={error} />
+      <ErrorSummary focusVersion={focusVersion} message={error} />
       {status === null ? null : <p role="status" aria-live="polite">{status}</p>}
       {mutation.isPending ? <p role="status" aria-live="polite">{t("auth.submitting")}</p> : null}
       <form noValidate onSubmit={handleSubmit}>

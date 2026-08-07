@@ -11,13 +11,14 @@ import {
   inputDescription,
   requestErrorMessage,
   requestFieldErrors,
+  useErrorSummaryState,
   useRequestController,
 } from "./form";
 
 export function RegisterPage() {
   const { t } = useTranslation();
   const requestSignal = useRequestController();
-  const [error, setError] = useState<string | null>(null);
+  const { error, focusVersion, setError } = useErrorSummaryState();
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string>>>({});
   const [status, setStatus] = useState<string | null>(null);
   const mutation = useMutation({
@@ -59,7 +60,7 @@ export function RegisterPage() {
   return (
     <section aria-labelledby="register-title">
       <h2 id="register-title">{t("auth.register")}</h2>
-      <ErrorSummary message={error} />
+      <ErrorSummary focusVersion={focusVersion} message={error} />
       {status === null ? null : <p role="status" aria-live="polite">{status}</p>}
       {mutation.isPending ? <p role="status" aria-live="polite">{t("auth.submitting")}</p> : null}
       <form noValidate onSubmit={handleSubmit}>

@@ -21,8 +21,14 @@ export function SessionsPage() {
     queryKey: sessionsQueryKey,
   });
   const revokeOne = useMutation({
-    mutationFn: (sessionId: string) => revokeSession(sessionId, requestSignal()),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: sessionsQueryKey }),
+    mutationFn: (session: Session) => revokeSession(session.session_id, requestSignal()),
+    onSuccess: (_data, revokedSession) =>
+      revokedSession.is_current
+        ? Promise.all([
+            queryClient.invalidateQueries({ queryKey: sessionsQueryKey }),
+            queryClient.invalidateQueries({ queryKey: sessionQueryKey }),
+          ])
+        : queryClient.invalidateQueries({ queryKey: sessionsQueryKey }),
   });
   const revokeAll = useMutation({
     mutationFn: (activeSessions: readonly Session[]) => revokeAllSessions(activeSessions, requestSignal()),
@@ -48,14 +54,16 @@ export function SessionsPage() {
             <span>{session.session_id}</span>{" "}
             <span>{t(`sessions.${session.status}`)}</span>{" "}
             {session.is_current ? <strong>{t("sessions.current")}</strong> : null}{" "}
-            <button
-              type="button"
-              aria-label={t("sessions.revoke", { sessionId: session.session_id })}
-              disabled={revokeOne.isPending || revokeAll.isPending}
-              onClick={() => { revokeOne.mutate(session.session_id); }}
-            >
-              {t("sessions.revoke", { sessionId: session.session_id })}
-            </button>
+            {session.status === "revoked" ? null : (
+              <button
+                type="button"
+                aria-label={t("sessions.revoke", { sessionId: session.session_id })}
+                disabled={revokeOne.isPending || revokeAll.isPending}
+                onClick={() => { revokeOne.mutate(session); }}
+              >
+                {t("sessions.revoke", { sessionId: session.session_id })}
+              </button>
+            )}
           </li>
         ))}
       </ul>

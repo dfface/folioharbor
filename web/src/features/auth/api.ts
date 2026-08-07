@@ -77,9 +77,9 @@ export function revokeSession(sessionId: string, signal?: AbortSignal): Promise<
 }
 
 export async function revokeAllSessions(sessions: readonly Session[], signal?: AbortSignal): Promise<void> {
-  const current = sessions.find((session) => session.is_current);
+  const current = sessions.find((session) => session.is_current && session.status !== "revoked");
   for (const session of sessions) {
-    if (!session.is_current) {
+    if (!session.is_current && session.status !== "revoked") {
       await revokeSession(session.session_id, signal);
     }
   }

@@ -1,20 +1,21 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { TFunction } from "i18next";
 
 import { ApiProblem, isAbortError, problemMessage } from "../../api/problem";
 
 interface ErrorSummaryProps {
+  focusVersion: number;
   message: string | null;
 }
 
-export function ErrorSummary({ message }: ErrorSummaryProps) {
+export function ErrorSummary({ focusVersion, message }: ErrorSummaryProps) {
   const summaryRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (message !== null) {
       summaryRef.current?.focus();
     }
-  }, [message]);
+  }, [focusVersion, message]);
 
   if (message === null) {
     return null;
@@ -24,6 +25,18 @@ export function ErrorSummary({ message }: ErrorSummaryProps) {
       {message}
     </div>
   );
+}
+
+export function useErrorSummaryState() {
+  const [state, setState] = useState({ focusVersion: 0, message: null as string | null });
+  const setError = useCallback((message: string | null) => {
+    setState((current) => ({
+      focusVersion: message === null ? current.focusVersion : current.focusVersion + 1,
+      message,
+    }));
+  }, []);
+
+  return { error: state.message, focusVersion: state.focusVersion, setError };
 }
 
 interface FieldErrorProps {

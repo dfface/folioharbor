@@ -176,6 +176,21 @@ test("client validation links field errors and focuses the error summary", async
   expect(screen.getByLabelText("Password")).toHaveAccessibleDescription("Password is required.");
 });
 
+test("repeated client validation refocuses an unchanged error summary", async () => {
+  server.use(http.get(`${apiOrigin}/api/v1/auth/session`, unauthenticatedProblem));
+
+  const user = userEvent.setup();
+  renderApp("/register");
+
+  const submit = await screen.findByRole("button", { name: "Create account" });
+  await user.click(submit);
+  const summary = await screen.findByRole("alert");
+  expect(summary).toHaveFocus();
+
+  await user.click(submit);
+  expect(summary).toHaveFocus();
+});
+
 test("password recovery stays non-enumerating and reset establishes a new authenticated session", async () => {
   let authenticated = false;
 
@@ -249,4 +264,121 @@ test("the account page lists sessions and sends CSRF-protected revoke-one and re
 
   await user.click(screen.getByRole("button", { name: "Revoke all sessions" }));
   expect(await screen.findByRole("heading", { name: "Log in" })).toBeInTheDocument();
+});
+
+test("revoking the current session through its row returns to the anonymous login route", async () => {
+  let currentSessionActive = true;
+
+  document.cookie = "folioharbor_csrf=csrf-token; Path=/";
+  server.use(
+    http.get(`${apiOrigin}/api/v1/auth/session`, () =>
+      currentSessionActive
+        ? HttpResponse.json({ session_id: sessionId, is_current: true, status: "active" })
+        : unauthenticatedProblem(),
+    ),
+    http.get(`${apiOrigin}/api/v1/auth/sessions`, () =>
+      HttpResponse.json(
+        currentSessionActive
+          ? [{ session_id: sessionId, is_current: true, status: "active" }]
+          : [],
+      ),
+    ),
+    http.post(`${apiOrigin}/api/v1/auth/sessions/:sessionId/revoke`, ({ params }) => {
+      if (String(params.sessionId) === sessionId) {
+        currentSessionActive = false;
+      }
+      return new HttpResponse(null, { status: 204 });
+    }),
+  );
+
+  const user = userEvent.setup();
+  renderApp("/account/sessions");
+
+  await user.click(await screen.findByRole("button", { name: `Revoke ${sessionId}` }));
+
+  expect(await screen.findByRole("heading", { name: "Log in" })).toBeInTheDocument();
+});
+
+test("a revoked session history row has no revoke-one action", async () => {
+  const revokedSessionId = "018f47b5-58b4-7ba6-9a3a-d9f41f17a271";
+
+  server.use(
+    http.get(`${apiOrigin}/api/v1/auth/session`, () =>
+      HttpResponse.json({ session_id: sessionId, is_current: true, status: "active" }),
+    ),
+    http.get(`${apiOrigin}/api/v1/auth/sessions`, () =>
+      HttpResponse.json([
+        { session_id: sessionId, is_current: true, status: "active" },
+        { session_id: revokedSessionId, is_current: false, status: "revoked" },
+      ]),
+    ),
+  );
+
+  renderApp("/account/sessions");
+
+  expect(await screen.findByText(revokedSessionId)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: `Revoke ${revokedSessionId}` })).not.toBeInTheDocument();
+});
+
+test("revoked session history does not prevent revoke-all from revoking the current session", async () => {
+  const revokedSessionId = "018f47b5-58b4-7ba6-9a3a-d9f41f17a271";
+  let currentSessionActive = true;
+
+  document.cookie = "folioharbor_csrf=csrf-token; Path=/";
+  server.use(
+    http.get(`${apiOrigin}/api/v1/auth/session`, () =>
+      currentSessionActive
+        ? HttpResponse.json({ session_id: sessionId, is_current: true, status: "active" })
+        : unauthenticatedProblem(),
+    ),
+    http.get(`${apiOrigin}/api/v1/auth/sessions`, () =>
+      HttpResponse.json([
+        { session_id: revokedSessionId, is_current: false, status: "revoked" },
+        { session_id: sessionId, is_current: true, status: "active" },
+      ]),
+    ),
+    http.post(`${apiOrigin}/api/v1/auth/sessions/:sessionId/revoke`, ({ params }) => {
+      const id = String(params.sessionId);
+      if (id === revokedSessionId) {
+        return HttpResponse.json(problem("session_not_found", "01K1SESSIONHISTORY000000000", 404), {
+          status: 404,
+          headers: { "Content-Type": "application/problem+json" },
+        });
+      }
+      if (id === sessionId) {
+        currentSessionActive = false;
+      }
+      return new HttpResponse(null, { status: 204 });
+    }),
+  );
+
+  const user = userEvent.setup();
+  renderApp("/account/sessions");
+
+  await user.click(await screen.findByRole("button", { name: "Revoke all sessions" }));
+
+  expect(await screen.findByRole("heading", { name: "Log in" })).toBeInTheDocument();
+});
+
+test.each([
+  { blockedHeading: "Log in", route: "/login" },
+  { blockedHeading: "Account sessions", route: "/account/sessions" },
+])("a session-load failure stays on $route and renders a safe error", async ({ blockedHeading, route }) => {
+  const requestId = "01K1SESSIONLOAD0000000000000";
+  server.use(
+    http.get(`${apiOrigin}/api/v1/auth/session`, () =>
+      HttpResponse.json(problem("identity_service_unavailable", requestId, 500), {
+        status: 500,
+        headers: { "Content-Type": "application/problem+json" },
+      }),
+    ),
+  );
+
+  renderApp(route);
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("The request could not be completed.");
+  expect(alert).toHaveTextContent(requestId);
+  expect(screen.queryByRole("heading", { name: blockedHeading })).not.toBeInTheDocument();
+  expect(window.location.pathname).toBe(route);
 });

@@ -19,6 +19,7 @@ async function loadSession(signal: AbortSignal): Promise<Session | null> {
 type SessionState =
   | { status: "anonymous" }
   | { status: "authenticated"; session: Session }
+  | { status: "error"; error: unknown }
   | { status: "loading" };
 
 export function useSession(): SessionState {
@@ -31,6 +32,9 @@ export function useSession(): SessionState {
 
   if (query.isPending) {
     return { status: "loading" };
+  }
+  if (query.isError) {
+    return { error: query.error, status: "error" };
   }
   if (query.data == null) {
     return { status: "anonymous" };
