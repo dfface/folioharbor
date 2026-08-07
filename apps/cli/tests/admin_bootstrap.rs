@@ -1,5 +1,7 @@
 #![allow(clippy::expect_used)]
 
+use std::collections::BTreeMap;
+
 use folioharbor_cli::commands::{Command, ParseError, parse};
 use secrecy::{ExposeSecret as _, SecretString};
 
@@ -31,6 +33,14 @@ fn admin_create_accepts_only_an_email_and_never_a_password_source() {
 fn storage_check_and_migrate_are_explicit_commands() {
     assert_eq!(parse(["storage", "check"]), Ok(Command::CheckStorage));
     assert_eq!(parse(["migrate"]), Ok(Command::Migrate));
+}
+
+#[test]
+fn storage_check_default_root_comes_from_the_shared_validated_configuration() {
+    let root = folioharbor_cli::check_storage::storage_root_from_environment(BTreeMap::new())
+        .expect("default storage configuration");
+
+    assert_eq!(root, std::path::PathBuf::from("/var/lib/folioharbor"));
 }
 
 #[test]

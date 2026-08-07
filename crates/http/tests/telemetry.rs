@@ -1,6 +1,6 @@
 #![allow(clippy::expect_used)]
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use axum::{
@@ -13,17 +13,31 @@ use axum::{
 use folioharbor_application::ports::{BlobStore, BlobStoreError, PromotedBlob, PublicationSource};
 use folioharbor_domain::imports::blob::{BlobIdentity, StorageKey};
 use folioharbor_http::middleware::telemetry::{
-    MetricAttributes, RequestTraceContext, TraceContext, record_live_operational_metrics,
-    trace_request,
+    MetricAttributes, OperationalMetrics, RequestTraceContext, TraceContext,
+    build_observability_subscriber, trace_request,
 };
 use http_body_util::BodyExt as _;
-use opentelemetry::trace::TracerProvider as _;
-use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+use opentelemetry::{metrics::MeterProvider as _, trace::TracerProvider as _};
+use opentelemetry_sdk::{
+    metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider, data},
+    trace::{InMemorySpanExporter, SdkTracerProvider},
+};
 use tower::ServiceExt as _;
 use tracing::instrument::WithSubscriber as _;
-use tracing_subscriber::prelude::*;
 
-struct ChangingFreeSpace(AtomicU64);
+struct ChangingFreeSpace {
+    bytes: AtomicU64,
+    fail: AtomicBool,
+}
+
+impl ChangingFreeSpace {
+    fn new(bytes: u64) -> Self {
+        Self {
+            bytes: AtomicU64::new(bytes),
+            fail: AtomicBool::new(false),
+        }
+    }
+}
 
 #[async_trait]
 impl BlobStore for ChangingFreeSpace {
@@ -50,7 +64,11 @@ impl BlobStore for ChangingFreeSpace {
         Err(BlobStoreError::InvalidKey)
     }
     async fn free_bytes(&self) -> Result<u64, BlobStoreError> {
-        Ok(self.0.load(Ordering::SeqCst))
+        if self.fail.load(Ordering::SeqCst) {
+            Err(std::io::Error::other("free-space sampling failed").into())
+        } else {
+            Ok(self.bytes.load(Ordering::SeqCst))
+        }
     }
     async fn open_publication(
         &self,
@@ -62,10 +80,11 @@ impl BlobStore for ChangingFreeSpace {
 
 #[tokio::test]
 async fn operational_gauge_refresh_reads_current_pool_and_storage_state_each_time() {
-    let storage = ChangingFreeSpace(AtomicU64::new(100));
-    let first = record_live_operational_metrics(2, 1, "api", &storage).await;
-    storage.0.store(40, Ordering::SeqCst);
-    let second = record_live_operational_metrics(5, 3, "api", &storage).await;
+    let storage = ChangingFreeSpace::new(100);
+    let metrics = OperationalMetrics::new("api");
+    let first = metrics.record(2, 1, &storage).await;
+    storage.bytes.store(40, Ordering::SeqCst);
+    let second = metrics.record(5, 3, &storage).await;
 
     assert_eq!(first.pool_open, 2);
     assert_eq!(first.pool_idle, 1);
@@ -73,6 +92,62 @@ async fn operational_gauge_refresh_reads_current_pool_and_storage_state_each_tim
     assert_eq!(second.pool_open, 5);
     assert_eq!(second.pool_idle, 3);
     assert_eq!(second.free_storage_bytes, Some(40));
+}
+
+fn exported_free_storage(exporter: &InMemoryMetricExporter) -> Vec<u64> {
+    exporter
+        .get_finished_metrics()
+        .expect("finished metrics")
+        .iter()
+        .flat_map(data::ResourceMetrics::scope_metrics)
+        .flat_map(data::ScopeMetrics::metrics)
+        .filter(|metric| metric.name() == "folioharbor.storage.free")
+        .flat_map(|metric| match metric.data() {
+            data::AggregatedMetrics::U64(data::MetricData::Gauge(gauge)) => gauge
+                .data_points()
+                .map(data::GaugeDataPoint::value)
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn failed_free_storage_sample_exports_no_stale_cumulative_gauge() {
+    let exporter = InMemoryMetricExporter::default();
+    let provider = SdkMeterProvider::builder()
+        .with_reader(PeriodicReader::builder(exporter.clone()).build())
+        .build();
+    let metrics = OperationalMetrics::with_meter("api", &provider.meter("operations-test"));
+    let storage = ChangingFreeSpace::new(100);
+
+    assert_eq!(
+        metrics.record(2, 1, &storage).await.free_storage_bytes,
+        Some(100)
+    );
+    provider.force_flush().expect("first collection");
+    assert_eq!(exported_free_storage(&exporter), vec![100]);
+
+    exporter.reset();
+    storage.bytes.store(40, Ordering::SeqCst);
+    assert_eq!(
+        metrics.record(2, 1, &storage).await.free_storage_bytes,
+        Some(40)
+    );
+    provider.force_flush().expect("changed collection");
+    assert_eq!(exported_free_storage(&exporter), vec![40]);
+
+    exporter.reset();
+    storage.fail.store(true, Ordering::SeqCst);
+    assert_eq!(
+        metrics.record(2, 1, &storage).await.free_storage_bytes,
+        None
+    );
+    provider.force_flush().expect("failed collection");
+    assert!(
+        exported_free_storage(&exporter).is_empty(),
+        "an invalid sample must withdraw the previous gauge point"
+    );
 }
 
 #[test]
@@ -120,8 +195,7 @@ async fn exported_request(inbound: Option<&str>) -> (String, String, String, Str
         .with_simple_exporter(exporter.clone())
         .build();
     let tracer = provider.tracer("folioharbor-http-test");
-    let subscriber =
-        tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
+    let subscriber = build_observability_subscriber(tracer, "warn").expect("production subscriber");
     let app = Router::new()
         .route("/trace", get(trace_echo))
         .layer(middleware::from_fn(trace_request));
@@ -168,6 +242,15 @@ async fn exported_request(inbound: Option<&str>) -> (String, String, String, Str
 #[tokio::test]
 async fn headerless_request_returns_and_exposes_the_real_exported_sdk_span_context() {
     let (traceparent, body, exported_trace_id, exported_span_id) = exported_request(None).await;
+    assert_eq!(&traceparent[3..35], exported_trace_id);
+    assert_eq!(&traceparent[36..52], exported_span_id);
+    assert_eq!(body, format!("{exported_trace_id}|{traceparent}"));
+}
+
+#[tokio::test]
+async fn warn_filter_preserves_the_real_exported_request_span_and_response_context() {
+    let (traceparent, body, exported_trace_id, exported_span_id) = exported_request(None).await;
+
     assert_eq!(&traceparent[3..35], exported_trace_id);
     assert_eq!(&traceparent[36..52], exported_span_id);
     assert_eq!(body, format!("{exported_trace_id}|{traceparent}"));

@@ -1,4 +1,7 @@
-use std::time::Instant;
+use std::{
+    sync::{Arc, RwLock},
+    time::Instant,
+};
 
 use axum::{
     extract::{MatchedPath, Request},
@@ -10,11 +13,16 @@ use folioharbor_application::config::ObservabilitySettings;
 use folioharbor_domain::id::RequestId;
 use opentelemetry::{
     Context, KeyValue,
+    metrics::{Meter, ObservableGauge},
     propagation::{Extractor, Injector, TextMapPropagator as _},
     trace::{TraceContextExt as _, TracerProvider as _},
 };
 use opentelemetry_otlp::WithExportConfig as _;
-use opentelemetry_sdk::{Resource, metrics::SdkMeterProvider, trace::SdkTracerProvider};
+use opentelemetry_sdk::{
+    Resource,
+    metrics::SdkMeterProvider,
+    trace::{SdkTracer, SdkTracerProvider},
+};
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_subscriber::prelude::*;
@@ -238,26 +246,91 @@ pub struct LiveOperationalMetrics {
     pub free_storage_bytes: Option<u64>,
 }
 
-/// Samples current process resources and records the corresponding gauges.
-pub async fn record_live_operational_metrics(
-    pool_open: u64,
-    pool_idle: u64,
-    pool_name: &str,
-    storage: &dyn folioharbor_application::ports::BlobStore,
-) -> LiveOperationalMetrics {
-    for (state, connections) in [("open", pool_open), ("idle", pool_idle)] {
-        if let Ok(attributes) = MetricAttributes::try_new([("pool", pool_name), ("state", state)]) {
-            TelemetryMetrics.record_pool_state(connections, &attributes);
+/// Retained observable gauges backed by the latest operational sample.
+#[derive(Clone, Debug)]
+pub struct OperationalMetrics {
+    state: Arc<RwLock<LiveOperationalMetrics>>,
+    _pool_gauge: ObservableGauge<u64>,
+    _free_storage_gauge: ObservableGauge<u64>,
+}
+
+impl OperationalMetrics {
+    #[must_use]
+    pub fn new(pool_name: impl Into<String>) -> Self {
+        let meter = opentelemetry::global::meter("folioharbor.operations");
+        Self::with_meter(pool_name, &meter)
+    }
+
+    #[must_use]
+    pub fn with_meter(pool_name: impl Into<String>, meter: &Meter) -> Self {
+        let pool_name = pool_name.into();
+        let state = Arc::new(RwLock::new(LiveOperationalMetrics {
+            pool_open: 0,
+            pool_idle: 0,
+            free_storage_bytes: None,
+        }));
+        let pool_state = Arc::clone(&state);
+        let pool_gauge = meter
+            .u64_observable_gauge("folioharbor.database.pool.connections")
+            .with_callback(move |observer| {
+                let sample = *pool_state
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                observer.observe(
+                    sample.pool_open,
+                    &[
+                        KeyValue::new("pool", pool_name.clone()),
+                        KeyValue::new("state", "open"),
+                    ],
+                );
+                observer.observe(
+                    sample.pool_idle,
+                    &[
+                        KeyValue::new("pool", pool_name.clone()),
+                        KeyValue::new("state", "idle"),
+                    ],
+                );
+            })
+            .build();
+        let storage_state = Arc::clone(&state);
+        let free_storage_gauge = meter
+            .u64_observable_gauge("folioharbor.storage.free")
+            .with_unit("By")
+            .with_callback(move |observer| {
+                if let Some(bytes) = storage_state
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .free_storage_bytes
+                {
+                    observer.observe(bytes, &[]);
+                }
+            })
+            .build();
+        Self {
+            state,
+            _pool_gauge: pool_gauge,
+            _free_storage_gauge: free_storage_gauge,
         }
     }
-    let free_storage_bytes = storage.free_bytes().await.ok();
-    if let Some(bytes) = free_storage_bytes {
-        TelemetryMetrics.record_free_storage(bytes);
-    }
-    LiveOperationalMetrics {
-        pool_open,
-        pool_idle,
-        free_storage_bytes,
+
+    /// Samples current process resources. A failed free-space sample
+    /// invalidates that gauge until a subsequent successful sample.
+    pub async fn record(
+        &self,
+        pool_open: u64,
+        pool_idle: u64,
+        storage: &dyn folioharbor_application::ports::BlobStore,
+    ) -> LiveOperationalMetrics {
+        let sample = LiveOperationalMetrics {
+            pool_open,
+            pool_idle,
+            free_storage_bytes: storage.free_bytes().await.ok(),
+        };
+        *self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = sample;
+        sample
     }
 }
 
@@ -325,23 +398,36 @@ pub fn init_observability(
         opentelemetry_sdk::propagation::TraceContextPropagator::new(),
     );
     let tracer = tracer_provider.tracer(service_name);
-    let filter = tracing_subscriber::EnvFilter::try_new(&settings.log_filter)
-        .map_err(|_| TelemetryInitError)?;
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_opentelemetry::layer().with_tracer(tracer))
-        .with(
-            tracing_subscriber::fmt::layer()
-                .json()
-                .with_current_span(true)
-                .with_span_list(true),
-        )
+    build_observability_subscriber(tracer, &settings.log_filter)?
         .try_init()
         .map_err(|_| TelemetryInitError)?;
     Ok(TelemetryGuard {
         tracer_provider,
         meter_provider,
     })
+}
+
+/// Builds the exact production subscriber while allowing tests to install it
+/// as a scoped subscriber. Log verbosity does not disable correlation spans.
+///
+/// # Errors
+///
+/// Returns [`TelemetryInitError`] when `log_filter` is invalid.
+pub fn build_observability_subscriber(
+    tracer: SdkTracer,
+    log_filter: &str,
+) -> Result<impl tracing::Subscriber + Send + Sync, TelemetryInitError> {
+    let filter =
+        tracing_subscriber::EnvFilter::try_new(log_filter).map_err(|_| TelemetryInitError)?;
+    Ok(tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(tracer))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_current_span(true)
+                .with_span_list(true)
+                .with_filter(filter),
+        ))
 }
 
 pub async fn trace_request(mut request: Request, next: Next) -> Response {

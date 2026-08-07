@@ -168,6 +168,22 @@ impl Settings {
     }
 }
 
+impl StorageSettings {
+    /// Loads and validates the storage subset without requiring unrelated
+    /// application secrets or service dependencies.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when a source is invalid or the configured
+    /// storage root is not an absolute non-root path.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn load(sources: ConfigSources) -> Result<Self, ConfigError> {
+        let raw = RawSettings::parse(&sources)?;
+        validate_storage_paths(&raw)?;
+        Self::from_raw(raw.storage)
+    }
+}
+
 fn parse_otlp_endpoint(value: &str) -> Result<url::Url, ConfigError> {
     let endpoint = url::Url::parse(value)
         .map_err(|_| ConfigError::invalid("observability.otlp_endpoint", "must be a URL"))?;

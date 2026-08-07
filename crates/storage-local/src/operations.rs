@@ -197,25 +197,54 @@ impl<P: CapacityProbe> LocalBlobStore<P> {
         root.verify_private()?;
         let staging = root.open_dir(Path::new("staging"), true)?;
         verify_private_dir(&staging)?;
-        let health = root.open_dir(Path::new("staging/.health"), true)?;
-        verify_private_dir(&health)?;
+        let staging_health = root.open_dir(Path::new("staging/.health"), true)?;
+        verify_private_dir(&staging_health)?;
+        let objects = root.open_dir(Path::new("objects"), true)?;
+        verify_private_dir(&objects)?;
+        let object_health = root.open_dir(Path::new("objects/.health"), true)?;
+        verify_private_dir(&object_health)?;
         let name = format!("{}.probe", RequestId::new().as_ulid());
-        let mut created = false;
+        let mut source_created = false;
+        let mut destination_created = false;
         let result = (|| {
-            let mut file = health.open_with(&name, &private_create_options())?;
-            created = true;
+            let mut file = staging_health.open_with(&name, &private_create_options())?;
+            source_created = true;
             file.write_all(b"ready")?;
             file.sync_all()?;
             drop(file);
-            health.remove_file(&name)?;
-            created = false;
-            sync_dir(&health)?;
+
+            staging_health.hard_link(&name, &object_health, &name)?;
+            destination_created = true;
+            let mut installed = object_health.open_with(&name, &read_options())?;
+            if read_up_to(&mut installed, b"ready".len())? != b"ready" {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "storage readiness object probe changed during installation",
+                ));
+            }
+            installed.sync_all()?;
+            drop(installed);
+            sync_dir(&object_health)?;
+
+            object_health.remove_file(&name)?;
+            destination_created = false;
+            sync_dir(&object_health)?;
+            staging_health.remove_file(&name)?;
+            source_created = false;
+            sync_dir(&staging_health)?;
             Ok::<(), std::io::Error>(())
         })();
-        if created {
-            let _ = health.remove_file(&name);
-            let _ = sync_dir(&health);
+        if destination_created {
+            let _ = object_health.remove_file(&name);
+            let _ = sync_dir(&object_health);
         }
+        if source_created {
+            let _ = staging_health.remove_file(&name);
+            let _ = sync_dir(&staging_health);
+        }
+        drop(object_health);
+        let _ = objects.remove_dir(".health");
+        let _ = sync_dir(&objects);
         result.map_err(Into::into)
     }
 

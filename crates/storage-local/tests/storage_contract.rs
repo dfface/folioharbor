@@ -322,6 +322,34 @@ async fn readiness_probe_rejects_unwritable_or_unsafe_staging_and_leaves_no_file
 
 #[cfg(unix)]
 #[tokio::test]
+async fn readiness_probe_rejects_an_unsafe_object_install_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = TempDir::new().expect("temporary root");
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("private root");
+    let objects = root.path().join("objects");
+    std::fs::create_dir(&objects).expect("objects directory");
+    std::fs::set_permissions(&objects, std::fs::Permissions::from_mode(0o500))
+        .expect("unsafe objects mode");
+    let store = LocalBlobStore::with_capacity(root.path(), FakeCapacity::new(u64::MAX));
+
+    assert!(
+        store.probe_write().await.is_err(),
+        "readiness must prove the worker can install a staged file into objects"
+    );
+    assert!(
+        !root.path().join("staging/.health").exists()
+            || std::fs::read_dir(root.path().join("staging/.health"))
+                .expect("staging health listing")
+                .next()
+                .is_none(),
+        "failed readiness probes must remove their source file"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn inventory_lists_only_canonical_objects_and_counts_unsafe_entries() {
     use std::os::unix::fs::symlink;
 

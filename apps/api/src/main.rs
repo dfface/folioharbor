@@ -14,7 +14,7 @@ use folioharbor_application::{
 };
 use folioharbor_http::{
     AppState,
-    middleware::telemetry::{init_observability, record_live_operational_metrics},
+    middleware::telemetry::{OperationalMetrics, init_observability},
 };
 use folioharbor_postgres::{
     PgAuditRepository, PgAuthorizationRepository, PgOperationsRepository, PgRateLimitRepository,
@@ -43,19 +43,20 @@ impl RandomSource for SystemRandom {
 fn spawn_metrics_reporter(
     pool: sqlx::PgPool,
     blobs: Arc<dyn folioharbor_application::ports::BlobStore>,
+    metrics: OperationalMetrics,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            record_live_operational_metrics(
-                u64::from(pool.size()),
-                u64::try_from(pool.num_idle()).unwrap_or(u64::MAX),
-                "api",
-                blobs.as_ref(),
-            )
-            .await;
+            metrics
+                .record(
+                    u64::from(pool.size()),
+                    u64::try_from(pool.num_idle()).unwrap_or(u64::MAX),
+                    blobs.as_ref(),
+                )
+                .await;
         }
     })
 }
@@ -76,7 +77,11 @@ async fn main() -> anyhow::Result<()> {
     let health_blobs: Arc<dyn folioharbor_application::ports::BlobStore> = Arc::new(
         folioharbor_storage_local::LocalBlobStore::new(settings.storage.root.clone()),
     );
-    let metrics_reporter = spawn_metrics_reporter(pool.clone(), health_blobs.clone());
+    let metrics_reporter = spawn_metrics_reporter(
+        pool.clone(),
+        health_blobs.clone(),
+        OperationalMetrics::new("api"),
+    );
     let operations = Arc::new(HealthService::new(
         Arc::new(PgOperationsRepository::new(pool.clone())),
         health_blobs,

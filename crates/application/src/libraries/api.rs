@@ -22,6 +22,8 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+// These are independent role capabilities, not mutually exclusive states.
+#[allow(clippy::struct_excessive_bools)]
 pub struct LibraryCapabilities {
     pub can_upload: bool,
     pub can_invite_members: bool,

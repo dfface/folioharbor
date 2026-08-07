@@ -168,6 +168,12 @@ fn apply_environment(
     raw: &mut RawSettings,
     environment: &BTreeMap<String, String>,
 ) -> Result<(), ConfigError> {
+    if environment.contains_key("FOLIOHARBOR_STORAGE_STAGING_ROOT") {
+        return Err(ConfigError::invalid(
+            "FOLIOHARBOR_STORAGE_STAGING_ROOT",
+            "has been removed; staging is derived beneath FOLIOHARBOR_STORAGE_ROOT",
+        ));
+    }
     let values = environment
         .iter()
         .filter_map(|(key, value)| {

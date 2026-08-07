@@ -10,9 +10,7 @@ use folioharbor_application::{
     mail::DeliverMailJob,
 };
 use folioharbor_epub::{EpubPublicationParser, ParserLimits};
-use folioharbor_http::middleware::telemetry::{
-    init_observability, record_live_operational_metrics,
-};
+use folioharbor_http::middleware::telemetry::{OperationalMetrics, init_observability};
 use folioharbor_postgres::{
     PgCatalogRepository, PgGarbageCollectionRepository, PgImportCleanupRepository,
     PgImportRepository, PgJobRepository, PgMailRepository, connect_worker,
@@ -21,7 +19,29 @@ use folioharbor_storage_local::LocalBlobStore;
 use folioharbor_worker::{
     RunnerConfig, WorkerRunner,
     handlers::{SmtpMailer, WorkerHandlers},
+    runtime::{await_iteration_or_drain, spawn_periodic_reporter},
 };
+
+fn spawn_metrics_reporter(
+    pool: sqlx::PgPool,
+    blobs: Arc<dyn folioharbor_application::ports::BlobStore>,
+    metrics: OperationalMetrics,
+) -> tokio::task::JoinHandle<()> {
+    spawn_periodic_reporter(std::time::Duration::from_secs(15), move || {
+        let pool = pool.clone();
+        let blobs = blobs.clone();
+        let metrics = metrics.clone();
+        async move {
+            metrics
+                .record(
+                    u64::from(pool.size()),
+                    u64::try_from(pool.num_idle()).unwrap_or(u64::MAX),
+                    blobs.as_ref(),
+                )
+                .await;
+        }
+    })
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -87,32 +107,45 @@ async fn main() -> anyhow::Result<()> {
         worker_id.clone(),
         config,
     );
+    let metrics_reporter = spawn_metrics_reporter(
+        metrics_pool,
+        metrics_blobs,
+        OperationalMetrics::new("worker"),
+    );
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
-    let mut metrics_interval = tokio::time::interval(std::time::Duration::from_secs(15));
-    metrics_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            result = async {
-                jobs.ensure_cleanup_jobs(time::OffsetDateTime::now_utc()).await?;
+    let result = loop {
+        let outcome = await_iteration_or_drain(
+            async {
+                jobs.ensure_cleanup_jobs(time::OffsetDateTime::now_utc())
+                    .await?;
                 runner.run_once().await?;
                 if let Some(mail_delivery) = &mail_delivery {
-                    mail_delivery.run_once(time::OffsetDateTime::now_utc(), 25).await?;
+                    mail_delivery
+                        .run_once(time::OffsetDateTime::now_utc(), 25)
+                        .await?;
                 }
                 Ok::<(), anyhow::Error>(())
-            } => result?,
-            _ = metrics_interval.tick() => {
-                record_live_operational_metrics(
-                    u64::from(metrics_pool.size()),
-                    u64::try_from(metrics_pool.num_idle()).unwrap_or(u64::MAX),
-                    "worker",
-                    metrics_blobs.as_ref(),
-                ).await;
-            }
-            () = &mut shutdown => break,
+            },
+            shutdown.as_mut(),
+        )
+        .await;
+        let shutdown_requested = outcome.shutdown_requested();
+        let Some(iteration) = outcome.into_inner() else {
+            break Ok(());
+        };
+        if let Err(error) = iteration {
+            break Err(error);
         }
-    }
-    Ok(())
+        if shutdown_requested {
+            break Ok(());
+        }
+    };
+    // Compose's stop_grace_period is the outer hard bound; until then the
+    // worker drains its retained batch before stopping this reporter.
+    metrics_reporter.abort();
+    let _ = metrics_reporter.await;
+    result
 }
 
 async fn shutdown_signal() {

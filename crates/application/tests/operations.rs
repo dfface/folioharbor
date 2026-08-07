@@ -162,9 +162,7 @@ struct FakeInventory(Vec<BlobInventoryEntry>);
 
 #[async_trait]
 impl ConsistencyRepository for FakeInventory {
-    async fn ready_blob_inventory(
-        &self,
-    ) -> Result<Vec<BlobInventoryEntry>, ConsistencyRepositoryError> {
+    async fn blob_inventory(&self) -> Result<Vec<BlobInventoryEntry>, ConsistencyRepositoryError> {
         Ok(self.0.clone())
     }
 }
@@ -216,6 +214,7 @@ fn entry(
     BlobInventoryEntry {
         storage_key: StorageKey::from_opaque(key.to_owned()),
         location_is_canonical,
+        integrity_required: true,
         expected_sha256,
         expected_byte_size,
     }

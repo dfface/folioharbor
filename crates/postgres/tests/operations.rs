@@ -1,13 +1,24 @@
 #![allow(clippy::expect_used)]
 
 use folioharbor_application::operations::{
-    BootstrapAdminOutcome, BootstrapAdminRepository as _, DatabaseHealth, HealthRepository as _,
-    NewSystemAdministrator,
+    BootstrapAdminOutcome, BootstrapAdminRepository as _, ConsistencyCheck, DatabaseHealth,
+    HealthRepository as _, NewSystemAdministrator,
 };
-use folioharbor_domain::{id::UserId, identity::NormalizedEmail, time::OffsetDateTime};
+use folioharbor_application::ports::BlobStore as _;
+use folioharbor_domain::{
+    id::{LibraryId, UploadId, UserId},
+    identity::NormalizedEmail,
+    imports::blob::{
+        BlobIdentity, ByteCount, DedupScope, Sha256Digest, StorageKey, StorageNamespace,
+    },
+    time::OffsetDateTime,
+};
 use folioharbor_postgres::{PgOperationsRepository, connect_api, connect_owner, run_migrations};
+use folioharbor_storage_local::LocalBlobStore;
 use folioharbor_test_support::postgres::TestPostgres;
 use secrecy::SecretString;
+use sha2::{Digest as _, Sha256};
+use time::Duration;
 
 #[tokio::test]
 async fn bootstrap_is_transactional_idempotent_and_separate_from_library_roles() {
@@ -122,6 +133,123 @@ async fn concurrent_same_email_bootstrap_waits_and_returns_the_idempotent_outcom
     owner.close().await;
     second_owner.close().await;
     database.cleanup().await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn consistency_inventory_respects_every_physical_owner_lifecycle_state() {
+    let database = TestPostgres::provision().await.expect("test database");
+    let owner = connect_owner(&SecretString::from(
+        database.owner_url().expect("owner URL"),
+    ))
+    .await
+    .expect("owner");
+    run_migrations(&owner).await.expect("migrations");
+    let directory = tempfile::tempdir().expect("storage root");
+    let blobs = LocalBlobStore::new(directory.path());
+    let now = OffsetDateTime::now_utc();
+
+    for (index, state) in [
+        "ready",
+        "quarantined",
+        "purge_pending",
+        "deleting",
+        "purged",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let payload = vec![u8::try_from(index + 1).expect("small fixture"); index + 5];
+        let digest = Sha256Digest::from_bytes(Sha256::digest(&payload).into());
+        let identity = BlobIdentity::new(
+            StorageNamespace::for_scope(DedupScope::Instance, LibraryId::new(), UploadId::new()),
+            digest,
+            ByteCount::new(u64::try_from(payload.len()).expect("small fixture")),
+        );
+        let staging = StorageKey::from_opaque(format!("staging:{}", identity.sha256().to_hex()));
+        blobs
+            .create_staging_for(&staging)
+            .await
+            .expect("staging file");
+        blobs.append(&staging, &payload).await.expect("append");
+        let installed = blobs.promote(&staging, &identity).await.expect("promote");
+
+        let pending_at = (state == "purge_pending" || state == "deleting" || state == "purged")
+            .then_some(now - Duration::hours(24));
+        let purge_after = pending_at.map(|_| now);
+        let purged_at = (state == "purged").then_some(now);
+        let lease_owner = (state == "deleting").then_some("consistency-test");
+        let lease_token = (state == "deleting").then(uuid::Uuid::now_v7);
+        let lease_expires_at = (state == "deleting").then_some(now + Duration::minutes(5));
+        let blob_id = uuid::Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO folioharbor.blobs(blob_id,storage_namespace,sha256,byte_size,created_at) \
+             VALUES($1,$2,$3,$4,$5)",
+        )
+        .bind(blob_id)
+        .bind(identity.namespace().as_str())
+        .bind(identity.sha256().as_bytes().to_vec())
+        .bind(i64::try_from(payload.len()).expect("small fixture"))
+        .bind(now)
+        .execute(&owner)
+        .await
+        .expect("blob row");
+        sqlx::query(
+            "INSERT INTO folioharbor.blob_locations( \
+               blob_id,storage_key,state,created_at,updated_at,purge_pending_at,purge_after, \
+               purged_at,purge_lease_owner,purge_lease_token,purge_lease_expires_at) \
+             VALUES($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10)",
+        )
+        .bind(blob_id)
+        .bind(installed.key.as_str())
+        .bind(state)
+        .bind(now)
+        .bind(pending_at)
+        .bind(purge_after)
+        .bind(purged_at)
+        .bind(lease_owner)
+        .bind(lease_token)
+        .bind(lease_expires_at)
+        .execute(&owner)
+        .await
+        .expect("lifecycle location");
+
+        if matches!(state, "quarantined" | "purge_pending" | "deleting") {
+            std::fs::write(
+                object_path(directory.path(), &installed.key),
+                vec![b'!'; payload.len()],
+            )
+            .expect("non-ready bytes may already be corrupt or deleting");
+        }
+    }
+
+    let report = ConsistencyCheck::new(&PgOperationsRepository::new(owner.clone()), &blobs)
+        .execute()
+        .await
+        .expect("consistency check");
+    assert_eq!(report.checked, 1, "only ready bytes require integrity I/O");
+    assert_eq!(report.missing_blobs, 0);
+    assert_eq!(report.hash_mismatches, 0);
+    assert_eq!(
+        report.orphan_locations, 1,
+        "only the physical file retained after a purged row is orphaned"
+    );
+
+    owner.close().await;
+    database.cleanup().await.expect("cleanup");
+}
+
+fn object_path(root: &std::path::Path, key: &StorageKey) -> std::path::PathBuf {
+    let mut components = key.as_str().split(':');
+    assert_eq!(components.next(), Some("blob"));
+    let namespace = components.next().expect("namespace");
+    let hash = components.next().expect("hash");
+    let size = components.next().expect("size");
+    assert!(components.next().is_none());
+    root.join("objects")
+        .join(namespace)
+        .join(&hash[0..2])
+        .join(&hash[2..4])
+        .join(format!("{hash}-{size}"))
 }
 
 fn administrator(now: OffsetDateTime, email: &str) -> NewSystemAdministrator {

@@ -60,15 +60,13 @@ impl BootstrapAdminRepository for PgOperationsRepository {
 
 #[async_trait]
 impl ConsistencyRepository for PgOperationsRepository {
-    async fn ready_blob_inventory(
-        &self,
-    ) -> Result<Vec<BlobInventoryEntry>, ConsistencyRepositoryError> {
+    async fn blob_inventory(&self) -> Result<Vec<BlobInventoryEntry>, ConsistencyRepositoryError> {
         let rows = sqlx::query(
-            "SELECT location.storage_key, blob.storage_namespace, blob.sha256, \
+            "SELECT location.storage_key, location.state, blob.storage_namespace, blob.sha256, \
                     encode(blob.sha256, 'hex') AS sha256_hex, blob.byte_size \
              FROM folioharbor.blob_locations AS location \
              JOIN folioharbor.blobs AS blob USING (blob_id) \
-             WHERE location.state = 'ready' \
+             WHERE location.state IN ('ready','quarantined','purge_pending','deleting') \
              ORDER BY location.blob_id, location.storage_key",
         )
         .fetch_all(&self.pool)
@@ -97,9 +95,13 @@ impl ConsistencyRepository for PgOperationsRepository {
                     .map_err(|_| ConsistencyRepositoryError)?;
                 let location_is_canonical =
                     storage_key == format!("blob:{namespace}:{sha256_hex}:{expected_byte_size}");
+                let state: String = row
+                    .try_get("state")
+                    .map_err(|_| ConsistencyRepositoryError)?;
                 Ok(BlobInventoryEntry {
                     storage_key: StorageKey::from_opaque(storage_key),
                     location_is_canonical,
+                    integrity_required: state == "ready",
                     expected_sha256,
                     expected_byte_size,
                 })

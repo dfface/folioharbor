@@ -389,6 +389,27 @@ fn former_staging_root_setting_is_rejected_instead_of_silently_ignored() {
 }
 
 #[test]
+fn former_staging_root_environment_variable_is_rejected_instead_of_silently_ignored() {
+    let mut environment = minimum_environment();
+    environment.insert(
+        "FOLIOHARBOR_STORAGE_STAGING_ROOT".to_owned(),
+        "/tmp/dead-setting".to_owned(),
+    );
+    let error = Settings::load(ConfigSources {
+        environment,
+        ..ConfigSources::default()
+    })
+    .expect_err("the removed staging-root environment variable must be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("FOLIOHARBOR_STORAGE_STAGING_ROOT")
+    );
+    assert!(!error.to_string().contains("/tmp/dead-setting"));
+}
+
+#[test]
 fn old_application_secrets_are_retained_for_decryption_only() {
     let mut environment = minimum_environment();
     environment.insert(

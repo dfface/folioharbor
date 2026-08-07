@@ -57,6 +57,8 @@ struct LibraryResponse {
     capabilities: LibraryCapabilitiesResponse,
 }
 #[derive(Serialize)]
+// These are independent role capabilities, not mutually exclusive states.
+#[allow(clippy::struct_excessive_bools)]
 struct LibraryCapabilitiesResponse {
     can_upload: bool,
     can_invite_members: bool,

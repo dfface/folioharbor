@@ -261,7 +261,7 @@ impl Extractor for TraceparentExtractor<'_> {
 mod tests {
     use std::sync::{
         Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     use folioharbor_application::ports::JobBacklog;
@@ -269,12 +269,15 @@ mod tests {
         id::{JobId, LibraryId, RequestId, UploadId},
         imports::job::{JobInput, JobKind},
     };
+    use folioharbor_http::middleware::telemetry::build_observability_subscriber;
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
     use tracing::instrument::WithSubscriber as _;
-    use tracing_subscriber::prelude::*;
 
     use super::*;
+    use crate::runtime::{await_iteration_or_drain, spawn_periodic_reporter};
+
+    static RUNNER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     struct TwoJobRepository {
         leased: Mutex<Option<Vec<LeasedJob>>>,
@@ -415,6 +418,28 @@ mod tests {
         }
     }
 
+    struct BlockingDispatcher {
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+        released: Arc<AtomicBool>,
+        changed: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl JobDispatcher for BlockingDispatcher {
+        async fn dispatch(&self, _: LeasedJob) -> Result<(), JobFailure> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            self.changed.notify_waiters();
+            while !self.released.load(Ordering::SeqCst) {
+                self.changed.notified().await;
+            }
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            self.changed.notify_waiters();
+            Ok(())
+        }
+    }
+
     fn leased(job_id: JobId) -> LeasedJob {
         LeasedJob {
             job_id,
@@ -430,6 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn first_task_error_waits_for_all_spawned_tasks_before_returning() {
+        let _test_guard = RUNNER_TEST_LOCK.lock().await;
         let failing_job = JobId::new();
         let delayed_job = JobId::new();
         let delayed_finished = Arc::new(AtomicBool::new(false));
@@ -455,16 +481,90 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used)]
+    async fn live_metrics_never_cancel_jobs_and_shutdown_drains_at_the_concurrency_cap() {
+        let _test_guard = RUNNER_TEST_LOCK.lock().await;
+        let first = JobId::new();
+        let second = JobId::new();
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicBool::new(false));
+        let changed = Arc::new(tokio::sync::Notify::new());
+        let runner = Arc::new(WorkerRunner::new(
+            Arc::new(TwoJobRepository {
+                leased: Mutex::new(Some(vec![leased(first), leased(second)])),
+                failing_job: JobId::new(),
+            }),
+            Arc::new(BlockingDispatcher {
+                active: Arc::clone(&active),
+                max_active: Arc::clone(&max_active),
+                released: Arc::clone(&released),
+                changed: Arc::clone(&changed),
+            }),
+            "draining-worker".to_owned(),
+            RunnerConfig::new(1).expect("one slot"),
+        ));
+        let reports = Arc::new(AtomicUsize::new(0));
+        let reporter = spawn_periodic_reporter(StdDuration::from_secs(15), {
+            let reports = Arc::clone(&reports);
+            move || {
+                reports.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(())
+            }
+        });
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            await_iteration_or_drain(runner.run_once(), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+        });
+
+        while active.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        for _ in 0..3 {
+            tokio::time::advance(StdDuration::from_secs(16)).await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+        assert!(reports.load(Ordering::SeqCst) >= 4);
+
+        shutdown_tx.send(()).expect("signal shutdown");
+        tokio::task::yield_now().await;
+        assert!(
+            !worker.is_finished(),
+            "shutdown must retain and drain the in-flight batch"
+        );
+
+        released.store(true, Ordering::SeqCst);
+        changed.notify_waiters();
+        let outcome = worker.await.expect("worker join");
+        assert!(outcome.shutdown_requested());
+        assert_eq!(
+            outcome
+                .into_inner()
+                .expect("iteration started")
+                .expect("batch succeeds"),
+            2
+        );
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+        reporter.abort();
+        let _ = reporter.await;
+    }
+
     #[tokio::test]
     async fn leased_job_span_is_a_child_of_the_persisted_api_context()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _test_guard = RUNNER_TEST_LOCK.lock().await;
         let exporter = InMemorySpanExporter::default();
         let provider = SdkTracerProvider::builder()
             .with_simple_exporter(exporter.clone())
             .build();
-        let subscriber = tracing_subscriber::registry().with(
-            tracing_opentelemetry::layer().with_tracer(provider.tracer("worker-runner-test")),
-        );
+        let subscriber =
+            build_observability_subscriber(provider.tracer("worker-runner-test"), "warn")?;
         let mut job = leased(JobId::new());
         let origin_request_id = RequestId::new();
         job.origin_request_id = Some(origin_request_id);

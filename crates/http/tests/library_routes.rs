@@ -396,6 +396,7 @@ async fn unavailable_invitation_delivery_returns_correlated_503_without_persiste
 }
 
 #[tokio::test]
+#[allow(clippy::items_after_statements)]
 async fn invitation_acceptance_reports_safe_states_and_keeps_the_personal_library()
 -> anyhow::Result<()> {
     let database = TestPostgres::provision().await?;

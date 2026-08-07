@@ -10,6 +10,9 @@ use crate::ports::{BlobStore, BlobStoreError};
 pub struct BlobInventoryEntry {
     pub storage_key: StorageKey,
     pub location_is_canonical: bool,
+    /// Ready locations require byte-for-byte verification. Other returned
+    /// lifecycle states still own their physical key but do not require I/O.
+    pub integrity_required: bool,
     pub expected_sha256: [u8; 32],
     pub expected_byte_size: u64,
 }
@@ -20,9 +23,7 @@ pub struct ConsistencyRepositoryError;
 
 #[async_trait]
 pub trait ConsistencyRepository: Send + Sync {
-    async fn ready_blob_inventory(
-        &self,
-    ) -> Result<Vec<BlobInventoryEntry>, ConsistencyRepositoryError>;
+    async fn blob_inventory(&self) -> Result<Vec<BlobInventoryEntry>, ConsistencyRepositoryError>;
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -57,7 +58,8 @@ impl<'a, R, B> ConsistencyCheck<'a, R, B> {
 }
 
 impl<R: ConsistencyRepository, B: BlobStore> ConsistencyCheck<'_, R, B> {
-    /// Compares every ready database location with the bytes in Blob storage.
+    /// Compares ready database locations with their bytes while recognizing
+    /// every non-purged lifecycle location that still owns a physical key.
     ///
     /// # Errors
     ///
@@ -65,7 +67,7 @@ impl<R: ConsistencyRepository, B: BlobStore> ConsistencyCheck<'_, R, B> {
     pub async fn execute(&self) -> Result<ConsistencyReport, ConsistencyCheckError> {
         let inventory = self
             .repository
-            .ready_blob_inventory()
+            .blob_inventory()
             .await
             .map_err(|_| ConsistencyCheckError)?;
         let storage_inventory = self
@@ -79,12 +81,17 @@ impl<R: ConsistencyRepository, B: BlobStore> ConsistencyCheck<'_, R, B> {
         };
         let mut expected_keys = HashSet::with_capacity(inventory.len());
         for entry in inventory {
-            report.checked = report.checked.saturating_add(1);
+            if entry.integrity_required {
+                report.checked = report.checked.saturating_add(1);
+            }
             if !entry.location_is_canonical {
                 report.orphan_locations = report.orphan_locations.saturating_add(1);
                 continue;
             }
             expected_keys.insert(entry.storage_key.clone());
+            if !entry.integrity_required {
+                continue;
+            }
             let mut source = match self.blobs.open_publication(&entry.storage_key).await {
                 Ok(source) => source,
                 Err(BlobStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
