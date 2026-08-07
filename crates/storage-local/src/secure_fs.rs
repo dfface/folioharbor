@@ -1,6 +1,6 @@
 use std::{
     ffi::OsString,
-    io,
+    fs, io,
     path::{Component, Path},
 };
 
@@ -78,6 +78,18 @@ impl SecureRoot {
     pub(crate) fn sync(&self) -> io::Result<()> {
         sync_dir(&self.dir)
     }
+
+    pub(crate) fn lock_shared(&self) -> io::Result<fs::File> {
+        let lock = self.dir.try_clone()?.into_std_file();
+        fs2::FileExt::lock_shared(&lock)?;
+        Ok(lock)
+    }
+
+    pub(crate) fn lock_exclusive(&self) -> io::Result<fs::File> {
+        let lock = self.dir.try_clone()?.into_std_file();
+        fs2::FileExt::lock_exclusive(&lock)?;
+        Ok(lock)
+    }
 }
 
 pub(crate) fn verify_private_dir(dir: &Dir) -> io::Result<()> {
@@ -96,6 +108,27 @@ pub(crate) fn verify_private_dir(dir: &Dir) -> io::Result<()> {
 
 pub(crate) fn sync_dir(dir: &Dir) -> io::Result<()> {
     dir.try_clone()?.into_std_file().sync_all()
+}
+
+pub(crate) fn create_private_dir(parent: &Dir, name: &Path) -> io::Result<Dir> {
+    let mut builder = DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use cap_std::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    parent.create_dir_with(name, &builder)?;
+    let result = (|| {
+        sync_dir(parent)?;
+        let directory = parent.open_dir_nofollow(name)?;
+        verify_private_dir(&directory)?;
+        Ok(directory)
+    })();
+    if result.is_err() {
+        let _ = parent.remove_dir(name);
+        let _ = sync_dir(parent);
+    }
+    result
 }
 
 fn open_or_create_private(parent: &Dir, name: &Path) -> io::Result<Dir> {

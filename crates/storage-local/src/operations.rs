@@ -20,7 +20,7 @@ use super::{
         remove_named_file_if_present, verify_file,
     },
     paths,
-    secure_fs::{SecureRoot, sync_dir, verify_private_dir},
+    secure_fs::{SecureRoot, create_private_dir, sync_dir, verify_private_dir},
 };
 
 #[cfg(test)]
@@ -195,27 +195,39 @@ impl<P: CapacityProbe> LocalBlobStore<P> {
     pub(super) fn probe_write_sync(&self) -> Result<(), BlobStoreError> {
         let root = self.secure_root()?;
         root.verify_private()?;
+        let _probe_guard = root.lock_exclusive()?;
         let staging = root.open_dir(Path::new("staging"), true)?;
         verify_private_dir(&staging)?;
-        let staging_health = root.open_dir(Path::new("staging/.health"), true)?;
-        verify_private_dir(&staging_health)?;
         let objects = root.open_dir(Path::new("objects"), true)?;
         verify_private_dir(&objects)?;
-        let object_health = root.open_dir(Path::new("objects/.health"), true)?;
-        verify_private_dir(&object_health)?;
-        let name = format!("{}.probe", RequestId::new().as_ulid());
+        let probe_directory_name = format!(".health-{}", RequestId::new().as_ulid());
+        let probe_directory_path = Path::new(&probe_directory_name);
+        let staging_health = create_private_dir(&staging, probe_directory_path)?;
+        let object_health = match create_private_dir(&objects, probe_directory_path) {
+            Ok(directory) => directory,
+            Err(error) => {
+                drop(staging_health);
+                let _ = staging.remove_dir(probe_directory_path);
+                let _ = sync_dir(&staging);
+                return Err(error.into());
+            }
+        };
+        let name = "probe";
         let mut source_created = false;
         let mut destination_created = false;
         let result = (|| {
-            let mut file = staging_health.open_with(&name, &private_create_options())?;
+            let mut file = staging_health.open_with(name, &private_create_options())?;
             source_created = true;
             file.write_all(b"ready")?;
             file.sync_all()?;
             drop(file);
+            sync_dir(&staging_health)?;
 
-            staging_health.hard_link(&name, &object_health, &name)?;
+            #[cfg(test)]
+            self.run_test_hook(HookPoint::ProbeBeforeInstall);
+            staging_health.hard_link(name, &object_health, name)?;
             destination_created = true;
-            let mut installed = object_health.open_with(&name, &read_options())?;
+            let mut installed = object_health.open_with(name, &read_options())?;
             if read_up_to(&mut installed, b"ready".len())? != b"ready" {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -225,31 +237,54 @@ impl<P: CapacityProbe> LocalBlobStore<P> {
             installed.sync_all()?;
             drop(installed);
             sync_dir(&object_health)?;
-
-            object_health.remove_file(&name)?;
-            destination_created = false;
-            sync_dir(&object_health)?;
-            staging_health.remove_file(&name)?;
-            source_created = false;
-            sync_dir(&staging_health)?;
+            #[cfg(test)]
+            self.run_test_hook(HookPoint::ProbeObjectInstalled);
             Ok::<(), std::io::Error>(())
         })();
-        if destination_created {
-            let _ = object_health.remove_file(&name);
-            let _ = sync_dir(&object_health);
-        }
-        if source_created {
-            let _ = staging_health.remove_file(&name);
-            let _ = sync_dir(&staging_health);
-        }
+        let destination_cleanup = (|| {
+            if destination_created {
+                object_health.remove_file(name)?;
+                sync_dir(&object_health)?;
+            }
+            Ok::<(), std::io::Error>(())
+        })();
+        let source_cleanup = (|| {
+            if source_created {
+                staging_health.remove_file(name)?;
+                sync_dir(&staging_health)?;
+            }
+            Ok::<(), std::io::Error>(())
+        })();
         drop(object_health);
-        let _ = objects.remove_dir(".health");
-        let _ = sync_dir(&objects);
-        result.map_err(Into::into)
+        drop(staging_health);
+        let object_directory_cleanup = (|| {
+            objects.remove_dir(probe_directory_path)?;
+            sync_dir(&objects)?;
+            Ok::<(), std::io::Error>(())
+        })();
+        let staging_directory_cleanup = (|| {
+            staging.remove_dir(probe_directory_path)?;
+            sync_dir(&staging)?;
+            Ok::<(), std::io::Error>(())
+        })();
+        let cleanup = destination_cleanup
+            .and(source_cleanup)
+            .and(object_directory_cleanup)
+            .and(staging_directory_cleanup);
+        match result {
+            Ok(()) => cleanup.map_err(Into::into),
+            Err(error) => {
+                let _ = cleanup;
+                Err(error.into())
+            }
+        }
     }
 
     pub(super) fn inventory_sync(&self) -> Result<BlobStoreInventory, BlobStoreError> {
         let root = self.secure_root()?;
+        #[cfg(test)]
+        self.run_test_hook(HookPoint::InventoryBeforeLock);
+        let _inventory_guard = root.lock_shared()?;
         let objects = match root.open_dir(Path::new("objects"), false) {
             Ok(directory) => directory,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

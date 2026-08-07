@@ -4,9 +4,10 @@ use std::{
     fs,
     path::Path,
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use folioharbor_application::ports::{BlobStore, BlobStoreError};
@@ -18,11 +19,32 @@ use folioharbor_domain::{
 };
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tokio::sync::Notify;
 
 use super::{CapacityProbe, HookPoint, LocalBlobStore, paths};
 
 #[derive(Clone, Copy, Debug)]
 struct UnlimitedCapacity;
+
+#[derive(Default)]
+struct TestGate {
+    open: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl TestGate {
+    fn wait(&self) {
+        let mut open = self.open.lock().expect("gate lock");
+        while !*open {
+            open = self.changed.wait(open).expect("gate wait");
+        }
+    }
+
+    fn open(&self) {
+        *self.open.lock().expect("gate lock") = true;
+        self.changed.notify_all();
+    }
+}
 
 impl CapacityProbe for UnlimitedCapacity {
     fn free_bytes(&self, _: &Path) -> std::io::Result<u64> {
@@ -199,4 +221,114 @@ async fn concurrent_destination_creation_never_gets_overwritten_during_install()
 
     assert!(matches!(result, Err(BlobStoreError::IdentityMismatch)));
     assert_eq!(fs::read(destination).expect("collision remains"), b"evil");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inventory_overlapping_an_installed_readiness_probe_stays_clean() {
+    let root = TempDir::new().expect("root");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("private root");
+    }
+    let installed = Arc::new(Notify::new());
+    let installed_hook = Arc::clone(&installed);
+    let inventory_started = Arc::new(Notify::new());
+    let inventory_hook = Arc::clone(&inventory_started);
+    let release = Arc::new(TestGate::default());
+    let release_hook = Arc::clone(&release);
+    let store = LocalBlobStore::with_capacity(root.path(), UnlimitedCapacity).with_test_hook(
+        Arc::new(move |point| match point {
+            HookPoint::ProbeObjectInstalled => {
+                installed_hook.notify_one();
+                release_hook.wait();
+            }
+            HookPoint::InventoryBeforeLock => inventory_hook.notify_one(),
+            _ => {}
+        }),
+    );
+
+    let probe_store = store.clone();
+    let probe = tokio::spawn(async move { probe_store.probe_write().await });
+    tokio::time::timeout(Duration::from_secs(5), installed.notified())
+        .await
+        .expect("probe reaches installed object");
+    let inventory_store = store.clone();
+    let inventory = tokio::spawn(async move { inventory_store.inventory().await });
+    tokio::time::timeout(Duration::from_secs(5), inventory_started.notified())
+        .await
+        .expect("inventory reaches the probe lock");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    release.open();
+
+    probe
+        .await
+        .expect("probe task")
+        .expect("readiness probe succeeds");
+    let inventory = inventory
+        .await
+        .expect("inventory task")
+        .expect("inventory succeeds");
+    assert!(inventory.keys.is_empty());
+    assert_eq!(inventory.invalid_locations, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_readiness_probes_serialize_their_transient_install_directories() {
+    let root = TempDir::new().expect("root");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("private root");
+    }
+    let before_install = Arc::new(Notify::new());
+    let first_hook = Arc::clone(&before_install);
+    let second_before_install = Arc::new(Notify::new());
+    let second_hook = Arc::clone(&second_before_install);
+    let release = Arc::new(TestGate::default());
+    let release_hook = Arc::clone(&release);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_hook = Arc::clone(&calls);
+    let store = LocalBlobStore::with_capacity(root.path(), UnlimitedCapacity).with_test_hook(
+        Arc::new(move |point| {
+            if point != HookPoint::ProbeBeforeInstall {
+                return;
+            }
+            if calls_hook.fetch_add(1, Ordering::SeqCst) == 0 {
+                first_hook.notify_one();
+                release_hook.wait();
+            } else {
+                second_hook.notify_one();
+            }
+        }),
+    );
+
+    let first_store = store.clone();
+    let first = tokio::spawn(async move { first_store.probe_write().await });
+    tokio::time::timeout(Duration::from_secs(5), before_install.notified())
+        .await
+        .expect("first probe reaches install boundary");
+    let second_store = store.clone();
+    let second = tokio::spawn(async move { second_store.probe_write().await });
+    let second_crossed_install_boundary =
+        tokio::time::timeout(Duration::from_millis(100), second_before_install.notified())
+            .await
+            .is_ok();
+    release.open();
+
+    first
+        .await
+        .expect("first probe task")
+        .expect("first readiness probe succeeds");
+    second
+        .await
+        .expect("second probe task")
+        .expect("second readiness probe succeeds");
+    assert!(
+        !second_crossed_install_boundary,
+        "readiness probes must not concurrently mutate a shared transient install namespace"
+    );
+    let inventory = store.inventory().await.expect("inventory succeeds");
+    assert!(inventory.keys.is_empty());
+    assert_eq!(inventory.invalid_locations, 0);
 }

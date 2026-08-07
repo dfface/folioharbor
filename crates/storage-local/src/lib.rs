@@ -55,6 +55,9 @@ enum HookPoint {
     PromoteInstall,
     PromoteRecoveryDestinationSynced,
     PromoteRecoveryParentSynced,
+    ProbeBeforeInstall,
+    ProbeObjectInstalled,
+    InventoryBeforeLock,
     Delete,
 }
 

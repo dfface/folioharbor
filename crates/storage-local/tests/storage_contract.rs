@@ -299,18 +299,17 @@ async fn readiness_probe_rejects_unwritable_or_unsafe_staging_and_leaves_no_file
     std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700))
         .expect("private staging");
     store.probe_write().await.expect("writable private probe");
-    let health = staging.join(".health");
     assert_eq!(
-        std::fs::read_dir(&health)
-            .expect("health directory")
+        std::fs::read_dir(&staging)
+            .expect("staging directory")
             .count(),
         0,
-        "successful probes remove their private files"
+        "successful probes remove their private directories and files"
     );
 
-    std::fs::remove_dir(&health).expect("empty health directory");
+    std::fs::remove_dir(&staging).expect("empty staging directory");
     let outside = TempDir::new().expect("outside directory");
-    symlink(outside.path(), &health).expect("unsafe health link");
+    symlink(outside.path(), &staging).expect("unsafe staging link");
     assert!(store.probe_write().await.is_err());
     assert_eq!(
         std::fs::read_dir(outside.path())
@@ -339,12 +338,12 @@ async fn readiness_probe_rejects_an_unsafe_object_install_directory() {
         "readiness must prove the worker can install a staged file into objects"
     );
     assert!(
-        !root.path().join("staging/.health").exists()
-            || std::fs::read_dir(root.path().join("staging/.health"))
-                .expect("staging health listing")
+        !root.path().join("staging").exists()
+            || std::fs::read_dir(root.path().join("staging"))
+                .expect("staging listing")
                 .next()
                 .is_none(),
-        "failed readiness probes must remove their source file"
+        "failed readiness probes must not leave a transient directory or source file"
     );
 }
 
@@ -386,6 +385,22 @@ async fn inventory_lists_only_canonical_objects_and_counts_unsafe_entries() {
         0,
         "inventory never follows links"
     );
+}
+
+#[tokio::test]
+async fn inventory_does_not_hide_probe_shaped_attacker_entries() {
+    let root = TempDir::new().expect("temporary root");
+    let probe = root
+        .path()
+        .join("objects/.health-01K20Y6JZ8N7G5M4K3H2F1D0C9");
+    std::fs::create_dir_all(&probe).expect("probe-shaped directory");
+    std::fs::write(probe.join("probe"), b"ready").expect("probe-shaped file");
+    let store = LocalBlobStore::with_capacity(root.path(), FakeCapacity::new(u64::MAX));
+
+    let inventory = store.inventory().await.expect("safe inventory");
+
+    assert!(inventory.keys.is_empty());
+    assert_eq!(inventory.invalid_locations, 1);
 }
 
 #[test]
