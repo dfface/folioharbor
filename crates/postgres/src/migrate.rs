@@ -1,6 +1,7 @@
 use sqlx::{PgPool, migrate::Migrator};
 use thiserror::Error;
 
+// The release binary embeds the reviewed migration set as a compile-time dependency.
 static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 const MIGRATION_LOCK_ID: i64 = 5_066_353_826_641_225_812;
 

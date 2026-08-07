@@ -80,13 +80,13 @@ impl SecureRoot {
     }
 
     pub(crate) fn lock_shared(&self) -> io::Result<fs::File> {
-        let lock = self.dir.try_clone()?.into_std_file();
+        let lock = reopen_directory(&self.dir)?;
         fs2::FileExt::lock_shared(&lock)?;
         Ok(lock)
     }
 
     pub(crate) fn lock_exclusive(&self) -> io::Result<fs::File> {
-        let lock = self.dir.try_clone()?.into_std_file();
+        let lock = reopen_directory(&self.dir)?;
         fs2::FileExt::lock_exclusive(&lock)?;
         Ok(lock)
     }
@@ -107,7 +107,11 @@ pub(crate) fn verify_private_dir(dir: &Dir) -> io::Result<()> {
 }
 
 pub(crate) fn sync_dir(dir: &Dir) -> io::Result<()> {
-    dir.try_clone()?.into_std_file().sync_all()
+    reopen_directory(dir)?.sync_all()
+}
+
+fn reopen_directory(dir: &Dir) -> io::Result<fs::File> {
+    dir.open(Path::new(".")).map(cap_std::fs::File::into_std)
 }
 
 pub(crate) fn create_private_dir(parent: &Dir, name: &Path) -> io::Result<Dir> {
@@ -161,4 +165,27 @@ fn normal_component(component: Component<'_>) -> io::Result<OsString> {
 
 fn invalid_path() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, "invalid capability path")
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn root_descriptor_supports_sync_and_inventory_locks() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = TempDir::new()?;
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))?;
+        let root = SecureRoot::open(root.path())?;
+
+        root.sync()?;
+        let shared = root.lock_shared()?;
+        fs2::FileExt::unlock(&shared)?;
+        let exclusive = root.lock_exclusive()?;
+        fs2::FileExt::unlock(&exclusive)?;
+        Ok(())
+    }
 }

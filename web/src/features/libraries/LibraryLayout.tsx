@@ -1,6 +1,6 @@
 import { createContext, useContext } from "react";
 import { useTranslation } from "react-i18next";
-import { Link, Navigate, Outlet, useNavigate, useParams } from "react-router-dom";
+import { Link, Navigate, Outlet, useNavigate, useParams } from "react-router";
 
 import { requestErrorMessage } from "../auth/form";
 import type { Library } from "./api";

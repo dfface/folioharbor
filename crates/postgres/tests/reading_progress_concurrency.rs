@@ -184,9 +184,7 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
     let manifestation = seed_item(&pools.owner, library, alice, now, 42).await?;
     let device_a = DeviceId::new();
     let device_b = DeviceId::new();
-    for (device, name) in [(device_a, "A"), (device_b, "B")] {
-        sqlx::query("INSERT INTO folioharbor.user_devices(device_id,user_id,display_name,created_at,last_seen_at) VALUES($1,$2,$3,$4,$4)").bind(device.as_uuid()).bind(alice.as_uuid()).bind(name).bind(now).execute(&pools.owner).await?;
-    }
+    sqlx::query("INSERT INTO folioharbor.user_devices(device_id,user_id,display_name,created_at,last_seen_at) VALUES($1,$2,'A',$3,$3)").bind(device_a.as_uuid()).bind(alice.as_uuid()).bind(now).execute(&pools.owner).await?;
     let repository = Arc::new(PgReadingRepository::new(pools.api.clone()));
     let first_mutation = Uuid::now_v7();
     let first = repository
@@ -357,6 +355,17 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
     assert!(matches!(stale, ReadingUpdateOutcome::Conflict { .. }));
     assert_eq!(global(&stale).locator.locations().progression(), Some(0.1));
     assert_eq!(device(&stale).locator.locations().progression(), Some(0.95));
+    let enrolled: String = sqlx::query_scalar(
+        "SELECT display_name FROM folioharbor.user_devices WHERE user_id=$1 AND device_id=$2",
+    )
+    .bind(alice.as_uuid())
+    .bind(device_b.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_eq!(
+        enrolled, "Web reader",
+        "first progress write enrolls the Web device"
+    );
 
     let barrier = Arc::new(tokio::sync::Barrier::new(3));
     let mut tasks = Vec::new();
@@ -854,6 +863,29 @@ async fn atomic_progress_sync_is_idempotent_conflict_safe_private_and_retained()
             .await?;
     assert_eq!(bob_usage_count, 0, "usage counters are user-private");
     bob_tx.rollback().await?;
+
+    sqlx::query(
+        "UPDATE folioharbor.user_devices SET revoked_at=$3 WHERE user_id=$1 AND device_id=$2",
+    )
+    .bind(alice.as_uuid())
+    .bind(device_b.as_uuid())
+    .bind(now)
+    .execute(&pools.owner)
+    .await?;
+    assert_eq!(
+        repository
+            .update_progress(command(
+                alice,
+                manifestation_b,
+                device_b,
+                Uuid::now_v7(),
+                0,
+                0.2,
+            ))
+            .await,
+        Err(ReadingRepositoryError::NotFound),
+        "a revoked device cannot silently enroll itself again"
+    );
 
     sqlx::query("UPDATE folioharbor.library_memberships SET status='removed',removed_at=$3 WHERE library_id=$1 AND user_id=$2").bind(library.as_uuid()).bind(alice.as_uuid()).bind(now).execute(&pools.owner).await?;
     assert_eq!(

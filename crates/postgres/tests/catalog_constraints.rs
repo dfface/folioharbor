@@ -175,6 +175,58 @@ async fn similar_metadata_on_distinct_blobs_never_auto_merges() -> anyhow::Resul
 }
 
 #[tokio::test]
+async fn successful_catalog_completion_releases_temporary_reachability_candidate()
+-> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let now = OffsetDateTime::now_utc();
+    let actor = UserId::new();
+    let library = LibraryId::new();
+    seed_user(&pools, actor, now).await?;
+    seed_library(&pools, library, actor, now).await?;
+    let blob = seed_blob(&pools, 23, now).await?;
+    let upload = seed_upload(&pools, library, actor, blob, 23, now).await?;
+    sqlx::query(
+        "INSERT INTO folioharbor.blob_reachability_candidates(storage_key,source_upload_id,namespace,sha256,byte_size,state,created_at,updated_at) SELECT storage_key,upload_id,'instance-v1',sha256,received_bytes,'installed_shared',$2,$2 FROM folioharbor.upload_sessions WHERE upload_id=$1",
+    )
+    .bind(upload.as_uuid())
+    .bind(now)
+    .execute(&pools.owner)
+    .await?;
+
+    let result = ImportPublicationCatalog::new(&PgCatalogRepository::new(pools.worker.clone()))
+        .execute(command(
+            library,
+            upload,
+            actor,
+            blob,
+            23,
+            "Reachability handoff",
+        ))
+        .await?;
+    assert!(matches!(result, ImportCatalogResult::Created { .. }));
+    let candidates: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM folioharbor.blob_reachability_candidates WHERE source_upload_id=$1",
+    )
+    .bind(upload.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_eq!(
+        candidates, 0,
+        "catalog references must replace the temporary promotion guard"
+    );
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn toc_fragment_locator_is_persisted_without_weakening_resource_paths() -> anyhow::Result<()>
 {
     let database = TestPostgres::provision().await?;

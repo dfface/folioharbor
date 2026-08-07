@@ -271,6 +271,8 @@ BEGIN
     UPDATE folioharbor.upload_sessions SET
       state=CASE WHEN completion_outcome='duplicate' THEN 'duplicate' ELSE 'ready' END,
       updated_at=p_now WHERE upload_id=p_upload;
+    DELETE FROM folioharbor.blob_reachability_candidates
+      WHERE source_upload_id=p_upload;
     INSERT INTO folioharbor.audit_events(
       audit_event_id,actor_id,effective_actor_id,library_id,action_code,resource_type,
       resource_id,decision,reason_code,request_id,source,occurred_at,network_hmac

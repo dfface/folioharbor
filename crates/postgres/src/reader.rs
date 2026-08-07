@@ -74,11 +74,11 @@ impl ReadingRepository for PgReadingRepository {
         require_readable(&mut tx, command.actor, command.manifestation_id).await?;
         lock_progress_update(&mut tx, &command).await?;
 
-        require_active_device(&mut tx, command.actor, command.device_id).await?;
         let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *tx)
             .await
             .map_err(persistence)?;
+        ensure_active_device(&mut tx, command.actor, command.device_id, now).await?;
         prune_expired_mutations(&mut tx, command.actor, now).await?;
         let fingerprint = command_fingerprint(&command);
         if let Some(outcome) = replay(&mut tx, &command, &fingerprint).await? {
@@ -183,14 +183,19 @@ fn update_outcome(
     }
 }
 
-async fn require_active_device(
+async fn ensure_active_device(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     actor: UserId,
     device: DeviceId,
+    now: OffsetDateTime,
 ) -> Result<(), ReadingRepositoryError> {
+    sqlx::query("INSERT INTO folioharbor.user_devices(device_id,user_id,display_name,created_at,last_seen_at) VALUES($1,$2,'Web reader',$3,$3) ON CONFLICT DO NOTHING")
+        .bind(device.as_uuid()).bind(actor.as_uuid()).bind(now).execute(&mut **tx).await.map_err(persistence)?;
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM folioharbor.user_devices WHERE user_id=$1 AND device_id=$2 AND revoked_at IS NULL)")
         .bind(actor.as_uuid()).bind(device.as_uuid()).fetch_one(&mut **tx).await.map_err(persistence)?;
     if exists {
+        sqlx::query("UPDATE folioharbor.user_devices SET last_seen_at=$3,version=version+1 WHERE user_id=$1 AND device_id=$2 AND revoked_at IS NULL")
+            .bind(actor.as_uuid()).bind(device.as_uuid()).bind(now).execute(&mut **tx).await.map_err(persistence)?;
         Ok(())
     } else {
         Err(ReadingRepositoryError::NotFound)

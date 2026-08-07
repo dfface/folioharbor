@@ -1,0 +1,207 @@
+name: folioharbor-e2e
+
+services:
+  postgres:
+    image: postgres:18.0-alpine
+    environment:
+      POSTGRES_DB: folioharbor
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_HOST_AUTH_METHOD: trust
+      FOLIOHARBOR_OWNER_PASSWORD_FILE: /run/secrets/owner_password
+      FOLIOHARBOR_API_PASSWORD_FILE: /run/secrets/api_password
+      FOLIOHARBOR_WORKER_PASSWORD_FILE: /run/secrets/worker_password
+    secrets:
+      - postgres_password
+      - owner_password
+      - api_password
+      - worker_password
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ../../deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d folioharbor"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mail-tls-init:
+    image: folioharbor-e2e-app:local
+    pull_policy: never
+    user: "0:0"
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        umask 077
+        if [ -s /tls/ca.crt ] && [ -s /tls/ca.key ] \
+          && [ -s /tls/mailpit.crt ] && [ -s /tls/mailpit.key ]; then
+          exit 0
+        fi
+        openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+          -subj '/CN=FolioHarbor E2E CA' -keyout /tls/ca.key -out /tls/ca.crt >/dev/null 2>&1
+        openssl req -newkey rsa:2048 -nodes \
+          -subj '/CN=mailpit' -keyout /tls/mailpit.key -out /tls/mailpit.csr >/dev/null 2>&1
+        printf '%s\n' 'subjectAltName=DNS:mailpit' 'extendedKeyUsage=serverAuth' > /tls/mailpit.ext
+        openssl x509 -req -days 1 -in /tls/mailpit.csr -CA /tls/ca.crt -CAkey /tls/ca.key \
+          -CAcreateserial -extfile /tls/mailpit.ext -out /tls/mailpit.crt >/dev/null 2>&1
+        chmod 0444 /tls/ca.crt /tls/mailpit.crt
+        chmod 0400 /tls/mailpit.key
+    volumes:
+      - mail_tls:/tls
+
+  mailpit:
+    image: axllent/mailpit:v1.27
+    command:
+      - --smtp-tls-cert
+      - /tls/mailpit.crt
+      - --smtp-tls-key
+      - /tls/mailpit.key
+      - --smtp-require-starttls
+      - --disable-version-check
+    ports:
+      - "127.0.0.1:8025:8025"
+    depends_on:
+      mail-tls-init:
+        condition: service_completed_successfully
+    volumes:
+      - mail_tls:/tls:ro
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  storage-init:
+    image: alpine:3.22
+    user: "0:0"
+    command: ["/bin/sh", "-ec", "install -d -m 0700 -o 10001 -g 10001 /data"]
+    volumes:
+      - blob_data:/data
+
+  migration:
+    image: folioharbor-e2e-app:local
+    pull_policy: never
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+    command: ["folioharbor", "migrate"]
+    environment:
+      FOLIOHARBOR_DATABASE_URL: postgres://folioharbor_owner@postgres/folioharbor
+      FOLIOHARBOR_AUTH_APPLICATION_SECRET_KEY_ID: e2e-current
+      FOLIOHARBOR_AUTH_APPLICATION_SECRET_FILE: /run/secrets/application_secret
+      FOLIOHARBOR_MAIL_SMTP_URL: smtp://mailpit:1025
+      FOLIOHARBOR_STORAGE_ROOT: /var/lib/folioharbor
+    secrets:
+      - application_secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+    volumes:
+      - blob_data:/var/lib/folioharbor
+
+  bootstrap-admin:
+    image: folioharbor-e2e-app:local
+    pull_policy: never
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        password="$$(cat /run/secrets/admin_password)"
+        printf '%s\n%s\n' "$$password" "$$password" \
+          | script -q -e -c 'folioharbor admin create --email admin@e2e.invalid' /dev/null \
+          >/dev/null 2>&1
+    environment:
+      FOLIOHARBOR_DATABASE_URL: postgres://folioharbor_owner@postgres/folioharbor
+      FOLIOHARBOR_AUTH_APPLICATION_SECRET_KEY_ID: e2e-current
+      FOLIOHARBOR_AUTH_APPLICATION_SECRET_FILE: /run/secrets/application_secret
+      FOLIOHARBOR_MAIL_SMTP_URL: smtp://mailpit:1025
+      FOLIOHARBOR_STORAGE_ROOT: /var/lib/folioharbor
+    secrets:
+      - admin_password
+      - application_secret
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+    volumes:
+      - blob_data:/var/lib/folioharbor
+
+  api:
+    image: folioharbor-e2e-app:local
+    pull_policy: never
+    command: ["folioharbor-api"]
+    environment: &runtime_environment
+      FOLIOHARBOR_SERVER_BIND_ADDRESS: 0.0.0.0:3000
+      FOLIOHARBOR_SERVER_PUBLIC_BASE_URL: http://127.0.0.1:4173/
+      FOLIOHARBOR_DATABASE_URL: postgres://folioharbor_api@postgres/folioharbor
+      FOLIOHARBOR_AUTH_APPLICATION_SECRET_KEY_ID: e2e-current
+      FOLIOHARBOR_AUTH_APPLICATION_SECRET_FILE: /run/secrets/application_secret
+      FOLIOHARBOR_STORAGE_ROOT: /var/lib/folioharbor
+      FOLIOHARBOR_STORAGE_FREE_RESERVE_BYTES: 1
+      FOLIOHARBOR_STORAGE_LIBRARY_QUOTA_BYTES: 104857600
+      FOLIOHARBOR_MAIL_SMTP_URL: smtp://mailpit:1025
+      FOLIOHARBOR_MAIL_FROM_ADDRESS: noreply@e2e.invalid
+      FOLIOHARBOR_OBSERVABILITY_LOG_FILTER: info
+      SSL_CERT_FILE: /run/mail-tls/ca.crt
+    secrets:
+      - application_secret
+    depends_on:
+      bootstrap-admin:
+        condition: service_completed_successfully
+      mailpit:
+        condition: service_healthy
+    volumes:
+      - blob_data:/var/lib/folioharbor
+      - mail_tls:/run/mail-tls:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3000/health/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 45
+
+  worker:
+    image: folioharbor-e2e-app:local
+    pull_policy: never
+    command: ["folioharbor-worker"]
+    environment:
+      <<: *runtime_environment
+      FOLIOHARBOR_DATABASE_URL: postgres://folioharbor_worker@postgres/folioharbor
+      FOLIOHARBOR_WORKER_CONCURRENCY: 1
+    secrets:
+      - application_secret
+    depends_on:
+      bootstrap-admin:
+        condition: service_completed_successfully
+      mailpit:
+        condition: service_healthy
+    volumes:
+      - blob_data:/var/lib/folioharbor
+      - mail_tls:/run/mail-tls:ro
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  postgres_data:
+  blob_data:
+  mail_tls:
+
+secrets:
+  postgres_password:
+    environment: FOLIOHARBOR_E2E_POSTGRES_PASSWORD
+  owner_password:
+    environment: FOLIOHARBOR_E2E_OWNER_PASSWORD
+  api_password:
+    environment: FOLIOHARBOR_E2E_API_PASSWORD
+  worker_password:
+    environment: FOLIOHARBOR_E2E_WORKER_PASSWORD
+  application_secret:
+    environment: FOLIOHARBOR_E2E_APPLICATION_SECRET
+  admin_password:
+    environment: FOLIOHARBOR_E2E_ADMIN_PASSWORD

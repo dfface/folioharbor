@@ -5,7 +5,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use folioharbor_application::{
     catalog::garbage_collect::CollectGarbage,
     config::MailSettings,
-    imports::{CleanupImports, JobFailure, ProcessImportJob},
+    imports::{CleanupImports, JobFailure, ProcessImportJob, UploadRecoveryService},
     mail::RenderedMail,
     ports::{MailError, Mailer},
 };
@@ -200,6 +200,7 @@ fn classify_smtp_error(error: &lettre::transport::smtp::Error) -> MailError {
 
 pub struct WorkerHandlers {
     imports: Arc<ProcessImportJob>,
+    upload_recovery: Option<Arc<UploadRecoveryService>>,
     cleanup: Option<Arc<CleanupImports>>,
     garbage: Option<Arc<CollectGarbage>>,
 }
@@ -209,6 +210,7 @@ impl WorkerHandlers {
     pub const fn new(imports: Arc<ProcessImportJob>) -> Self {
         Self {
             imports,
+            upload_recovery: None,
             cleanup: None,
             garbage: None,
         }
@@ -218,6 +220,7 @@ impl WorkerHandlers {
     pub fn with_cleanup(imports: Arc<ProcessImportJob>, cleanup: Arc<CleanupImports>) -> Self {
         Self {
             imports,
+            upload_recovery: None,
             cleanup: Some(cleanup),
             garbage: None,
         }
@@ -231,6 +234,22 @@ impl WorkerHandlers {
     ) -> Self {
         Self {
             imports,
+            upload_recovery: None,
+            cleanup: Some(cleanup),
+            garbage: Some(garbage),
+        }
+    }
+
+    #[must_use]
+    pub fn with_recovery_cleanup_and_garbage(
+        imports: Arc<ProcessImportJob>,
+        upload_recovery: Arc<UploadRecoveryService>,
+        cleanup: Arc<CleanupImports>,
+        garbage: Arc<CollectGarbage>,
+    ) -> Self {
+        Self {
+            imports,
+            upload_recovery: Some(upload_recovery),
             cleanup: Some(cleanup),
             garbage: Some(garbage),
         }
@@ -243,6 +262,21 @@ impl JobDispatcher for WorkerHandlers {
         match job.kind {
             JobKind::ImportEpub => self.imports.execute(job).await.map(|_| ()),
             kind @ (JobKind::ExpireUploadsAndReservations | JobKind::PurgeFailedUploads) => {
+                if kind == JobKind::ExpireUploadsAndReservations
+                    && let Some(recovery) = &self.upload_recovery
+                {
+                    recovery
+                        .reconcile(
+                            &format!("receipt-cleanup-{}", job.job_id.as_uuid()),
+                            OffsetDateTime::now_utc(),
+                            100,
+                        )
+                        .await
+                        .map_err(|_| JobFailure::Transient {
+                            code: "cleanup_unavailable",
+                            retry_at: OffsetDateTime::now_utc() + Duration::minutes(1),
+                        })?;
+                }
                 let cleanup =
                     self.cleanup
                         .as_ref()

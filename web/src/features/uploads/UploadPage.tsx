@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Navigate, useSearchParams } from "react-router-dom";
+import { Navigate, useSearchParams } from "react-router";
 
 import { isAbortError } from "../../api/problem";
 import { requestErrorMessage, useRequestController } from "../auth/form";

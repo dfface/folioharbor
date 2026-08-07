@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import { Navigate, Outlet, Route, Routes } from "react-router-dom";
+import { Navigate, Outlet, Route, Routes } from "react-router";
 
 import { ForgotPasswordPage } from "../features/auth/ForgotPasswordPage";
 import { requestErrorMessage } from "../features/auth/form";

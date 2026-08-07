@@ -12,6 +12,7 @@
 | `decisions/` | 已作出的架构决策记录（ADR） | 持续维护 |
 | `research/` | 旧系统、真实数据、协议和竞品调研 | 持续维护 |
 | `migration/` | 旧数据治理、去重、验证和迁移方案 | 尚未展开 |
+| `operations/` | 部署、验证、发布与恢复操作 | 首个发布检查表已形成 |
 | `superpowers/specs/` | 经过逐段确认和审阅的正式设计规格 | 首份规格已批准 |
 | `superpowers/plans/` | 从批准规格生成的可执行 TDD 实施计划 | 首份计划已形成 |
 
@@ -33,3 +34,4 @@
 6. [标准应用规范草案](standards/application-profile.md)
 7. [旧系统数据调研摘要](research/legacy-ebooks-audit.md)
 8. `decisions/` 中的架构决策记录
+9. [首个 EPUB 切片发布检查表](operations/release-checklist.md)

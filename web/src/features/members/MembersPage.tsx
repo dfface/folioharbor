@@ -1,7 +1,7 @@
 import { useState, type SyntheticEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Navigate } from "react-router-dom";
+import { Navigate } from "react-router";
 
 import { formText, requestErrorMessage, useRequestController } from "../auth/form";
 import { useCurrentLibrary } from "../libraries/LibraryLayout";

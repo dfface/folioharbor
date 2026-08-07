@@ -6,14 +6,14 @@ use folioharbor_application::ports::JobRepository;
 use folioharbor_application::{
     catalog::garbage_collect::CollectGarbage,
     config::{ConfigSources, Settings},
-    imports::{CleanupImports, ProcessImportJob, RetrySchedule},
+    imports::{CleanupImports, ProcessImportJob, RetrySchedule, UploadRecoveryService},
     mail::DeliverMailJob,
 };
 use folioharbor_epub::{EpubPublicationParser, ParserLimits};
 use folioharbor_http::middleware::telemetry::{OperationalMetrics, init_observability};
 use folioharbor_postgres::{
     PgCatalogRepository, PgGarbageCollectionRepository, PgImportCleanupRepository,
-    PgImportRepository, PgJobRepository, PgMailRepository, connect_worker,
+    PgImportRepository, PgJobRepository, PgMailRepository, PgUploadRepository, connect_worker,
 };
 use folioharbor_storage_local::LocalBlobStore;
 use folioharbor_worker::{
@@ -43,6 +43,45 @@ fn spawn_metrics_reporter(
     })
 }
 
+fn build_handlers(
+    pool: &sqlx::PgPool,
+    blobs: Arc<LocalBlobStore>,
+    worker_id: &str,
+) -> anyhow::Result<WorkerHandlers> {
+    let process = Arc::new(ProcessImportJob::new(
+        Arc::new(PgImportRepository::new(pool.clone())),
+        Arc::new(EpubPublicationParser::new(
+            blobs.clone(),
+            ParserLimits::default(),
+        )),
+        Arc::new(PgCatalogRepository::new(pool.clone())),
+        RetrySchedule::default(),
+    ));
+    let cleanup = Arc::new(CleanupImports::new(
+        Arc::new(PgImportCleanupRepository::new(pool.clone())),
+        blobs.clone(),
+    ));
+    let upload_recovery = Arc::new(UploadRecoveryService::new(
+        Arc::new(PgUploadRepository::new(pool.clone())),
+        blobs.clone(),
+    ));
+    let garbage = Arc::new(
+        CollectGarbage::new(
+            Arc::new(PgGarbageCollectionRepository::new(pool.clone())),
+            blobs,
+            worker_id.to_owned(),
+            100,
+        )
+        .ok_or_else(|| anyhow::anyhow!("garbage collection configuration is invalid"))?,
+    );
+    Ok(WorkerHandlers::with_recovery_cleanup_and_garbage(
+        process,
+        upload_recovery,
+        cleanup,
+        garbage,
+    ))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let settings = Settings::load(ConfigSources {
@@ -63,30 +102,9 @@ async fn main() -> anyhow::Result<()> {
     let blobs = Arc::new(LocalBlobStore::new(storage_root));
     let metrics_blobs = blobs.clone();
     let metrics_pool = pool.clone();
-    let process = Arc::new(ProcessImportJob::new(
-        Arc::new(PgImportRepository::new(pool.clone())),
-        Arc::new(EpubPublicationParser::new(
-            blobs.clone(),
-            ParserLimits::default(),
-        )),
-        Arc::new(PgCatalogRepository::new(pool.clone())),
-        RetrySchedule::default(),
-    ));
     let worker_id = format!("worker-{}", std::process::id());
     let jobs = Arc::new(PgJobRepository::new(pool.clone()));
-    let cleanup = Arc::new(CleanupImports::new(
-        Arc::new(PgImportCleanupRepository::new(pool.clone())),
-        blobs.clone(),
-    ));
-    let garbage = Arc::new(
-        CollectGarbage::new(
-            Arc::new(PgGarbageCollectionRepository::new(pool.clone())),
-            blobs,
-            worker_id.clone(),
-            100,
-        )
-        .ok_or_else(|| anyhow::anyhow!("garbage collection configuration is invalid"))?,
-    );
+    let handlers = build_handlers(&pool, blobs, &worker_id)?;
     let mail_repository = PgMailRepository::new(pool);
     let application_secrets = Arc::new(settings.auth.application_secrets);
     let public_base_url = settings.server.public_base_url;
@@ -99,14 +117,7 @@ async fn main() -> anyhow::Result<()> {
             worker_id.clone(),
         )
     });
-    let runner = WorkerRunner::new(
-        jobs.clone(),
-        Arc::new(WorkerHandlers::with_cleanup_and_garbage(
-            process, cleanup, garbage,
-        )),
-        worker_id.clone(),
-        config,
-    );
+    let runner = WorkerRunner::new(jobs.clone(), Arc::new(handlers), worker_id.clone(), config);
     let metrics_reporter = spawn_metrics_reporter(
         metrics_pool,
         metrics_blobs,

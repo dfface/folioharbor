@@ -8,7 +8,36 @@ permissions:
   contents: read
 
 jobs:
-  web-contract:
+  rust:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.0-alpine
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      FOLIOHARBOR_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Run Rust tests
+        run: cargo test --workspace --all-features
+
+  web:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,36 +50,133 @@ jobs:
           cache: pnpm
       - name: Install Web dependencies
         run: pnpm install --frozen-lockfile
+      - name: Lint Web sources
+        run: pnpm --dir web lint
+      - name: Type-check Web sources
+        run: pnpm --dir web typecheck
+      - name: Run Web tests
+        run: pnpm --dir web test -- --run
       - name: Verify generated API types are current
         run: pnpm web:check-generated-api
 
-  rust:
+  postgres:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_DB: folioharbor_test
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_USER: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d folioharbor_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - uses: actions/checkout@v4
-      - name: Verify pinned Rust toolchain
-        run: rustup show active-toolchain
+      - name: Check migrations, PostgreSQL 18 runtime roles, and persistence
+        run: scripts/check-migrations.sh
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install locked JavaScript dependencies
+        run: pnpm install --frozen-lockfile
       - name: Install cargo-deny
         run: cargo install cargo-deny --version 0.20.2 --locked
-      - name: Check formatting
-        run: cargo fmt --all --check
-      - name: Run Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - name: Run tests
-        run: cargo test --workspace --all-features
-      - name: Check dependencies
+      - name: Check Rust advisories, licenses, sources, and bans
         run: cargo deny check
+      - name: Audit production JavaScript dependencies
+        run: pnpm audit --prod --audit-level high
+      - name: Scan repository history for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  e2e:
+    needs: [rust, web, postgres]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install Web dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install Chromium and system dependencies
+        run: pnpm --dir web exec playwright install --with-deps chromium
+      - name: Run clean Compose Playwright journeys
+        run: pnpm --dir web exec playwright test
+      - name: Ensure an allowlisted Compose status exists
+        if: always()
+        run: test -f tests/e2e/compose-status.txt || printf '%s\n' 'Compose lifecycle did not start' > tests/e2e/compose-status.txt
+      - name: Upload secret-free E2E status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-compose-status
+          path: tests/e2e/compose-status.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  container-smoke:
+    needs: [e2e, supply-chain]
+    runs-on: ubuntu-latest
+    env:
+      FOLIOHARBOR_IMAGE: folioharbor-e2e-app:local
+      FOLIOHARBOR_PUBLIC_BASE_URL: http://127.0.0.1:8080/
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build application image
+        run: DOCKER_BUILDKIT=1 docker build --tag "$FOLIOHARBOR_IMAGE" --file tests/e2e/Dockerfile .
+      - name: Create ephemeral smoke secrets
+        run: |
+          set -eu
+          install -d -m 0700 deploy/secrets
+          postgres_password="$(openssl rand -hex 24)"
+          owner_password="$(openssl rand -hex 24)"
+          api_password="$(openssl rand -hex 24)"
+          worker_password="$(openssl rand -hex 24)"
+          printf '%s' "$postgres_password" > deploy/secrets/postgres-password
+          printf '%s' "$owner_password" > deploy/secrets/owner-password
+          printf '%s' "$api_password" > deploy/secrets/api-password
+          printf '%s' "$worker_password" > deploy/secrets/worker-password
+          printf '%s' "postgres://folioharbor_owner:${owner_password}@postgres/folioharbor" > deploy/secrets/owner-database-url
+          printf '%s' "postgres://folioharbor_api:${api_password}@postgres/folioharbor" > deploy/secrets/api-database-url
+          printf '%s' "postgres://folioharbor_worker:${worker_password}@postgres/folioharbor" > deploy/secrets/worker-database-url
+          openssl rand -hex 32 > deploy/secrets/application-secret
+          openssl rand -base64 24 > deploy/secrets/admin-password
+          chmod 0600 deploy/secrets/*
+      - name: Validate official Compose topology
+        run: docker compose -f deploy/compose.yaml config --quiet
+      - name: Start official Compose topology from empty volumes
+        run: |
+          set -eu
+          cleanup() { docker compose -f deploy/compose.yaml down -v --remove-orphans >/dev/null 2>&1 || true; }
+          trap cleanup EXIT INT TERM
+          docker compose -f deploy/compose.yaml down -v --remove-orphans >/dev/null 2>&1 || true
+          docker compose -f deploy/compose.yaml up --detach --wait postgres storage-init migration
+          admin_password="$(cat deploy/secrets/admin-password)A1!"
+          printf '%s\n%s\n' "$admin_password" "$admin_password" \
+            | docker compose -f deploy/compose.yaml run --rm -T migration \
+              sh -ec "script -q -e -c 'folioharbor admin create --email admin@smoke.invalid' /dev/null" \
+              >/dev/null 2>&1
+          docker compose -f deploy/compose.yaml up --detach --wait api worker
+          curl --fail --silent http://127.0.0.1:8080/health/ready >/dev/null
+          docker compose -f deploy/compose.yaml ps --all \
+            --format 'table {{.Service}}\t{{.State}}\t{{.Health}}\t{{.ExitCode}}' \
+            > container-smoke-status.txt
+      - name: Ensure an allowlisted smoke status exists
+        if: always()
+        run: test -f container-smoke-status.txt || printf '%s\n' 'Compose startup did not reach status capture' > container-smoke-status.txt
+      - name: Upload secret-free container status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-smoke-status
+          path: container-smoke-status.txt
+          if-no-files-found: error
+          retention-days: 7

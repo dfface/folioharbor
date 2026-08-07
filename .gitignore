@@ -3,6 +3,7 @@ web/dist/
 web/.vite/
 web/playwright-report/
 web/test-results/
+tests/e2e/compose-status.txt
 *.tsbuildinfo
 deploy/.env
 deploy/secrets/

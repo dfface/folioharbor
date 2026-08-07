@@ -1,7 +1,7 @@
 import { useState, type SyntheticEvent } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router";
 
 import { verifyEmail, type VerifyEmailRequest } from "./api";
 import {
