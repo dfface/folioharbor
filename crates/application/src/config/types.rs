@@ -29,9 +29,18 @@ impl ByteSize {
 pub struct Duration(u64);
 
 impl Duration {
+    // PostgreSQL intervals store their time component as signed 64-bit microseconds.
+    const MAX_POSTGRES_INTERVAL_SECONDS: u64 = i64::MAX as u64 / 1_000_000;
+
     fn new(key: &'static str, seconds: u64) -> Result<Self, ConfigError> {
         if seconds == 0 {
             return Err(ConfigError::invalid(key, "must be greater than zero"));
+        }
+        if seconds > Self::MAX_POSTGRES_INTERVAL_SECONDS {
+            return Err(ConfigError::invalid(
+                key,
+                "must fit in PostgreSQL's signed 64-bit microsecond interval range",
+            ));
         }
         Ok(Self(seconds))
     }
@@ -234,15 +243,6 @@ impl StorageSettings {
         for (key, value) in [
             ("storage.library_quota_bytes", raw.library_quota_bytes),
             ("storage.upload_limit_bytes", raw.upload_limit_bytes),
-            (
-                "storage.failed_retention_seconds",
-                raw.failed_retention_seconds,
-            ),
-            ("storage.gc_delay_seconds", raw.gc_delay_seconds),
-            (
-                "storage.recovery_period_seconds",
-                raw.recovery_period_seconds,
-            ),
         ] {
             if value > i64::MAX as u64 {
                 return Err(ConfigError::invalid(

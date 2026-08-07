@@ -242,6 +242,59 @@ test("an offline retry reuses the exact mutation command and clears persistence 
   expect(storage.length).toBe(0);
 });
 
+test("a legacy pending command keeps its exact device identity across an account switch and reuses the committed result", async () => {
+  const clock = new FakeClock();
+  const storage = new MemoryStorage();
+  const accountAReplacement = "018f47b5-58b4-7ba6-9a3a-d9f41f17e003";
+  const committedRequest: ProgressUpdateRequest = {
+    accountId: accountA,
+    baseVersion: 0,
+    clientMutationId: "018f47b5-0000-4000-8000-000000000099",
+    deviceId: deviceA,
+    locator: locator(0.3),
+  };
+  const committedProgress = progress(1, committedRequest.locator);
+  storage.setItem("folioharbor.reader.device-id.v1", deviceA);
+  storage.setItem(
+    `folioharbor.reader.progress.v1:${accountA}:${manifestationId}:${deviceA}`,
+    JSON.stringify({
+      accountId: accountA,
+      deviceId: deviceA,
+      pending: [{
+        baseVersion: committedRequest.baseVersion,
+        clientMutationId: committedRequest.clientMutationId,
+        createdAt: 1_700_000_000_000,
+        locator: committedRequest.locator,
+      }],
+      version: 0,
+    }),
+  );
+  const requests: ProgressUpdateRequest[] = [];
+  const api: ProgressApi = {
+    get: () => Promise.resolve(structuredClone(committedProgress)),
+    update: (_manifestation, request) => {
+      requests.push(structuredClone(request));
+      if (JSON.stringify(request) !== JSON.stringify(committedRequest)) {
+        return Promise.reject(new ProgressApiError("offline"));
+      }
+      return Promise.resolve({ kind: "updated", progress: structuredClone(committedProgress) });
+    },
+  };
+
+  const accountBDevice = getOrCreateDeviceId(storage, accountB, () => deviceB);
+  const accountADevice = getOrCreateDeviceId(storage, accountA, () => accountAReplacement);
+  const sync = createSync(api, clock, { accountId: accountA, deviceId: accountADevice, storage });
+  await sync.start();
+
+  expect(accountBDevice).toBe(deviceB);
+  expect(accountADevice).toBe(deviceA);
+  expect(requests).toEqual([committedRequest]);
+  expect(sync.snapshot()).toMatchObject({ status: "synced", version: 1, locator: committedRequest.locator });
+  expect(storage.getItem(
+    `folioharbor.reader.progress.v1:${accountA}:${manifestationId}:${deviceA}`,
+  )).toBeNull();
+});
+
 test("a bounded lifecycle flush duplicates an in-flight command with the same mutation id for safe delivery", async () => {
   const clock = new FakeClock();
   const calls: { bounded: boolean; request: ProgressUpdateRequest }[] = [];

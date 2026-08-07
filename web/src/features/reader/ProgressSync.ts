@@ -154,6 +154,21 @@ function readPersisted(
   }
 }
 
+function hasPendingProgress(storage: Storage, accountId: string, deviceId: string): boolean {
+  const accountPrefix = `${progressKeyPrefix}${accountId}:`;
+  const deviceSuffix = `:${deviceId}`;
+  return Array.from({ length: storage.length }, (_, index) => storage.key(index))
+    .filter((key): key is string => key?.startsWith(accountPrefix) === true && key.endsWith(deviceSuffix))
+    .some((key) => (readPersisted(storage, key, accountId, deviceId)?.pending.length ?? 0) > 0);
+}
+
+function deviceIdIsClaimedByAnotherAccount(storage: Storage, accountId: string, deviceId: string): boolean {
+  const accountKey = `${deviceIdKeyPrefix}${accountId}`;
+  return Array.from({ length: storage.length }, (_, index) => storage.key(index))
+    .filter((key): key is string => key?.startsWith(deviceIdKeyPrefix) === true && key !== accountKey)
+    .some((key) => storage.getItem(key) === deviceId);
+}
+
 function migratePendingProgress(
   storage: Storage,
   accountId: string,
@@ -196,9 +211,14 @@ export function getOrCreateDeviceId(
   if (existing !== null && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(existing)) {
     return existing;
   }
-  const deviceId = createId();
+  const legacyDeviceId = storage.getItem(legacyDeviceIdKey);
+  const canPreserveLegacyIdentity = legacyDeviceId !== null &&
+    /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(legacyDeviceId) &&
+    hasPendingProgress(storage, accountId, legacyDeviceId) &&
+    !deviceIdIsClaimedByAnotherAccount(storage, accountId, legacyDeviceId);
+  const deviceId = canPreserveLegacyIdentity ? legacyDeviceId : createId();
   storage.setItem(accountKey, deviceId);
-  migratePendingProgress(storage, accountId, storage.getItem(legacyDeviceIdKey), deviceId);
+  migratePendingProgress(storage, accountId, legacyDeviceId, deviceId);
   return deviceId;
 }
 

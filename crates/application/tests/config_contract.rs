@@ -108,21 +108,49 @@ fn environment_overrides_toml_and_cli_overrides_environment() {
 }
 
 #[test]
-fn database_backed_storage_policy_values_must_fit_postgres_bigint() {
-    let mut environment = minimum_environment();
-    environment.insert(
-        "FOLIOHARBOR_STORAGE_RECOVERY_PERIOD_SECONDS".to_owned(),
-        u64::MAX.to_string(),
-    );
-    let error = Settings::load(ConfigSources {
-        environment,
-        ..ConfigSources::default()
-    })
-    .expect_err("oversized lifecycle duration");
-    assert!(matches!(
-        error,
-        ConfigError::Invalid { key, .. } if key == "storage.recovery_period_seconds"
-    ));
+fn database_backed_storage_policy_durations_fit_postgres_interval_seconds() {
+    const GREATEST_POSTGRES_INTERVAL_SECONDS: u64 = 9_223_372_036_854;
+
+    for (environment_key, config_key) in [
+        (
+            "FOLIOHARBOR_STORAGE_FAILED_RETENTION_SECONDS",
+            "storage.failed_retention_seconds",
+        ),
+        (
+            "FOLIOHARBOR_STORAGE_GC_DELAY_SECONDS",
+            "storage.gc_delay_seconds",
+        ),
+        (
+            "FOLIOHARBOR_STORAGE_RECOVERY_PERIOD_SECONDS",
+            "storage.recovery_period_seconds",
+        ),
+    ] {
+        let mut greatest_environment = minimum_environment();
+        greatest_environment.insert(
+            environment_key.to_owned(),
+            GREATEST_POSTGRES_INTERVAL_SECONDS.to_string(),
+        );
+        Settings::load(ConfigSources {
+            environment: greatest_environment,
+            ..ConfigSources::default()
+        })
+        .expect("greatest PostgreSQL interval duration");
+
+        let mut rejected_environment = minimum_environment();
+        rejected_environment.insert(
+            environment_key.to_owned(),
+            (GREATEST_POSTGRES_INTERVAL_SECONDS + 1).to_string(),
+        );
+        let error = Settings::load(ConfigSources {
+            environment: rejected_environment,
+            ..ConfigSources::default()
+        })
+        .expect_err("first duration beyond PostgreSQL's interval range");
+        assert!(matches!(
+            error,
+            ConfigError::Invalid { key, .. } if key == config_key
+        ));
+    }
 }
 
 #[test]
