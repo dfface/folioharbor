@@ -131,7 +131,7 @@ export function ReaderPage() {
       accountId,
       api: readerProgressApi,
       clock: browserProgressClock,
-      deviceId: getOrCreateDeviceId(localStorage),
+      deviceId: getOrCreateDeviceId(localStorage, accountId),
       manifestationId: manifest.manifestationId,
       mutationId: () => crypto.randomUUID(),
       storage: localStorage,

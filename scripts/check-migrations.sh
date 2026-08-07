@@ -72,6 +72,16 @@ cargo test --locked -p folioharbor-postgres --test migration_from_zero \
 cargo test --locked -p folioharbor-postgres --test migration_from_zero \
   runtime_roles_reject_other_role_credentials -- --exact
 cargo test --locked -p folioharbor-postgres --test rls_matrix
+cargo test --locked -p folioharbor-postgres --test library_repository \
+  personal_library_repository_retry_returns_the_same_library -- --exact
+cargo test --locked -p folioharbor-postgres --test import_cleanup \
+  received_expiry_releases_quota_and_honors_configured_failed_retention -- --exact
+cargo test --locked -p folioharbor-postgres --test import_cleanup \
+  failed_transition_and_purge_schedule_are_atomic_and_reconciliation_repairs_legacy_rows -- --exact
+cargo test --locked -p folioharbor-postgres --test blob_gc \
+  delete_restore_honors_configured_recovery_period_and_audit_is_atomic -- --exact
+cargo test --locked -p folioharbor-postgres --test blob_gc \
+  purge_releases_quota_removes_cache_derivatives_and_preserves_progress_and_audit -- --exact
 cargo test --locked -p folioharbor-postgres --test identity_repository \
   session_listing_and_revocation_apply_the_authenticated_user_rls_context -- --exact
 cargo test --locked -p folioharbor-api --test upload_composition \

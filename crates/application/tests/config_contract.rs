@@ -108,6 +108,24 @@ fn environment_overrides_toml_and_cli_overrides_environment() {
 }
 
 #[test]
+fn database_backed_storage_policy_values_must_fit_postgres_bigint() {
+    let mut environment = minimum_environment();
+    environment.insert(
+        "FOLIOHARBOR_STORAGE_RECOVERY_PERIOD_SECONDS".to_owned(),
+        u64::MAX.to_string(),
+    );
+    let error = Settings::load(ConfigSources {
+        environment,
+        ..ConfigSources::default()
+    })
+    .expect_err("oversized lifecycle duration");
+    assert!(matches!(
+        error,
+        ConfigError::Invalid { key, .. } if key == "storage.recovery_period_seconds"
+    ));
+}
+
+#[test]
 fn typed_toml_errors_name_the_key_without_echoing_source_values() {
     let error = Settings::load(ConfigSources {
         toml: Some("[worker]\nconcurrency = \"sentinel-source-value\"\n".to_owned()),

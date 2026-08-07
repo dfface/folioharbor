@@ -448,16 +448,32 @@ test("permission loss moves pending progress to inaccessible without discarding 
   expect(storage.length).toBe(1);
 });
 
-test("device identity is stable per install, resettable, and never coupled to authentication", () => {
+test("device identity is stable per account on one install and reset preserves every other account", () => {
   const storage = new MemoryStorage();
-  const generated = [deviceA, deviceB];
+  const accountAReplacement = "018f47b5-58b4-7ba6-9a3a-d9f41f17e003";
+  const generated = [deviceA, deviceB, accountAReplacement];
   const createId = () => generated.shift() ?? "unexpected";
 
-  expect(getOrCreateDeviceId(storage, createId)).toBe(deviceA);
-  expect(getOrCreateDeviceId(storage, createId)).toBe(deviceA);
-  resetDeviceId(storage);
-  expect(getOrCreateDeviceId(storage, createId)).toBe(deviceB);
-  expect(Array.from({ length: storage.length }, (_, index) => storage.key(index))).toEqual([
-    "folioharbor.reader.device-id.v1",
-  ]);
+  expect(getOrCreateDeviceId(storage, accountA, createId)).toBe(deviceA);
+  expect(getOrCreateDeviceId(storage, accountA, createId)).toBe(deviceA);
+  expect(getOrCreateDeviceId(storage, accountB, createId)).toBe(deviceB);
+  storage.setItem(
+    `folioharbor.reader.progress.v1:${accountA}:${manifestationId}:${deviceA}`,
+    "account-a-pending",
+  );
+  storage.setItem(
+    `folioharbor.reader.progress.v1:${accountB}:${manifestationId}:${deviceB}`,
+    "account-b-pending",
+  );
+
+  resetDeviceId(storage, accountA);
+
+  expect(getOrCreateDeviceId(storage, accountA, createId)).toBe(accountAReplacement);
+  expect(getOrCreateDeviceId(storage, accountB, createId)).toBe(deviceB);
+  expect(storage.getItem(
+    `folioharbor.reader.progress.v1:${accountA}:${manifestationId}:${deviceA}`,
+  )).toBeNull();
+  expect(storage.getItem(
+    `folioharbor.reader.progress.v1:${accountB}:${manifestationId}:${deviceB}`,
+  )).toBe("account-b-pending");
 });

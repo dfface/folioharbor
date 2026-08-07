@@ -21,6 +21,7 @@ pub const MAX_RANGE_READ_BYTES: usize = 8 * 1024 * 1024;
 pub struct LocalBlobStore<P = SystemCapacityProbe> {
     root: PathBuf,
     capacity: Arc<P>,
+    free_reserve_bytes: u64,
     #[cfg(test)]
     hook: Option<Arc<dyn Fn(HookPoint) + Send + Sync>>,
 }
@@ -30,6 +31,7 @@ impl<P> Clone for LocalBlobStore<P> {
         Self {
             root: self.root.clone(),
             capacity: Arc::clone(&self.capacity),
+            free_reserve_bytes: self.free_reserve_bytes,
             #[cfg(test)]
             hook: self.hook.clone(),
         }
@@ -42,6 +44,7 @@ impl<P: fmt::Debug> fmt::Debug for LocalBlobStore<P> {
             .debug_struct("LocalBlobStore")
             .field("root", &self.root)
             .field("capacity", &self.capacity)
+            .field("free_reserve_bytes", &self.free_reserve_bytes)
             .finish_non_exhaustive()
     }
 }
@@ -66,14 +69,29 @@ impl LocalBlobStore<SystemCapacityProbe> {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self::with_capacity(root, SystemCapacityProbe)
     }
+
+    #[must_use]
+    pub fn configured(root: impl Into<PathBuf>, free_reserve_bytes: u64) -> Self {
+        Self::with_capacity_and_reserve(root, SystemCapacityProbe, free_reserve_bytes)
+    }
 }
 
 impl<P> LocalBlobStore<P> {
     #[must_use]
     pub fn with_capacity(root: impl Into<PathBuf>, capacity: P) -> Self {
+        Self::with_capacity_and_reserve(root, capacity, MIN_FREE_BYTES)
+    }
+
+    #[must_use]
+    pub fn with_capacity_and_reserve(
+        root: impl Into<PathBuf>,
+        capacity: P,
+        free_reserve_bytes: u64,
+    ) -> Self {
         Self {
             root: root.into(),
             capacity: Arc::new(capacity),
+            free_reserve_bytes,
             #[cfg(test)]
             hook: None,
         }

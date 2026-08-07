@@ -113,10 +113,10 @@ impl BlobStore for FakeBlobStore {
 #[tokio::test]
 async fn readiness_requires_exact_schema_admin_configuration_and_storage_reserve() {
     let cases = [
-        (28, true, true, Ok(1_000), Ok(()), HealthStatus::Ready),
-        (27, true, true, Ok(1_000), Ok(()), HealthStatus::Unavailable),
+        (29, true, true, Ok(1_000), Ok(()), HealthStatus::Ready),
+        (28, true, true, Ok(1_000), Ok(()), HealthStatus::Unavailable),
         (
-            28,
+            29,
             false,
             true,
             Ok(1_000),
@@ -124,17 +124,17 @@ async fn readiness_requires_exact_schema_admin_configuration_and_storage_reserve
             HealthStatus::BootstrapRequired,
         ),
         (
-            28,
+            29,
             true,
             false,
             Ok(1_000),
             Ok(()),
             HealthStatus::Unavailable,
         ),
-        (28, true, true, Ok(99), Ok(()), HealthStatus::Unavailable),
-        (28, true, true, Err(()), Ok(()), HealthStatus::Unavailable),
+        (29, true, true, Ok(99), Ok(()), HealthStatus::Unavailable),
+        (29, true, true, Err(()), Ok(()), HealthStatus::Unavailable),
         (
-            28,
+            29,
             true,
             true,
             Ok(1_000),

@@ -231,6 +231,26 @@ pub struct StorageSettings {
 
 impl StorageSettings {
     pub(super) fn from_raw(raw: RawStorage) -> Result<Self, ConfigError> {
+        for (key, value) in [
+            ("storage.library_quota_bytes", raw.library_quota_bytes),
+            ("storage.upload_limit_bytes", raw.upload_limit_bytes),
+            (
+                "storage.failed_retention_seconds",
+                raw.failed_retention_seconds,
+            ),
+            ("storage.gc_delay_seconds", raw.gc_delay_seconds),
+            (
+                "storage.recovery_period_seconds",
+                raw.recovery_period_seconds,
+            ),
+        ] {
+            if value > i64::MAX as u64 {
+                return Err(ConfigError::invalid(
+                    key,
+                    "must fit in a signed 64-bit integer",
+                ));
+            }
+        }
         Ok(Self {
             root: raw.root,
             library_quota: ByteSize::new("storage.library_quota_bytes", raw.library_quota_bytes)?,

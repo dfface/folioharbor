@@ -53,13 +53,63 @@ async fn assert_cannot_disable_rls(pool: &PgPool, table: &str) -> anyhow::Result
 
 async fn assert_no_execute(pool: &PgPool, signatures: &[&str]) -> anyhow::Result<()> {
     for signature in signatures {
-        let allowed: bool =
-            sqlx::query_scalar("SELECT has_function_privilege(current_user,$1,'EXECUTE')")
+        let allowed: bool = sqlx::query_scalar(
+            "SELECT CASE WHEN to_regprocedure($1) IS NULL THEN false ELSE has_function_privilege(current_user,to_regprocedure($1),'EXECUTE') END",
+        )
                 .bind(signature)
                 .fetch_one(pool)
                 .await?;
         assert!(!allowed, "runtime role can execute {signature}");
     }
+    Ok(())
+}
+
+async fn assert_obsolete_library_helpers_cannot_execute(
+    pool: &PgPool,
+    context: &DatabaseContext,
+    bob: UserId,
+    bob_library: LibraryId,
+    bob_version: i64,
+    invitation_hash: &TokenHash,
+    now: OffsetDateTime,
+) -> anyhow::Result<()> {
+    for (statement, arguments) in [
+        (
+            "SELECT * FROM folioharbor.library_get_visible($1,$2,$3)",
+            (bob.as_uuid(), bob_library.as_uuid(), Some(bob_version)),
+        ),
+        (
+            "SELECT * FROM folioharbor.library_members_visible($1,$2,$3)",
+            (bob.as_uuid(), bob_library.as_uuid(), Some(bob_version)),
+        ),
+    ] {
+        let mut tx = pool.begin().await?;
+        PgTransactionContext::apply(&mut tx, context).await?;
+        let result = sqlx::query(statement)
+            .bind(arguments.0)
+            .bind(arguments.1)
+            .bind(arguments.2)
+            .fetch_all(&mut *tx)
+            .await;
+        assert!(
+            result.is_err(),
+            "obsolete helper unexpectedly remained API-executable: {statement}"
+        );
+        tx.rollback().await?;
+    }
+    let mut tx = pool.begin().await?;
+    PgTransactionContext::apply(&mut tx, context).await?;
+    let invitation = sqlx::query("SELECT folioharbor.library_accept_invitation($1,$2,$3)")
+        .bind(bob.as_uuid())
+        .bind(invitation_hash.as_bytes().as_slice())
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await;
+    assert!(
+        invitation.is_err(),
+        "obsolete invitation helper unexpectedly remained API-executable"
+    );
+    tx.rollback().await?;
     Ok(())
 }
 
@@ -121,6 +171,8 @@ async fn matrix(reverse: bool) -> anyhow::Result<()> {
     )
     .await?;
     seed_invitation(&pools.owner, bob_library, bob, "bob-invite@test", 8, now).await?;
+    let stale_invitation_hash = TokenHash::from_bytes([9; 32]);
+    seed_invitation(&pools.owner, bob_library, bob, "bob@test", 9, now).await?;
 
     let api_correct = DatabaseContext::api(alice, alice_library, RequestId::new());
     let api_wrong = DatabaseContext::api(alice, bob_library, RequestId::new());
@@ -148,6 +200,23 @@ async fn matrix(reverse: bool) -> anyhow::Result<()> {
         0,
         "API database role impersonated worker RLS context"
     );
+    let bob_version: i64 = sqlx::query_scalar(
+        "SELECT version FROM folioharbor.library_memberships WHERE library_id=$1 AND user_id=$2 AND status='active'",
+    )
+    .bind(bob_library.as_uuid())
+    .bind(bob.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_obsolete_library_helpers_cannot_execute(
+        &pools.api,
+        &api_correct,
+        bob,
+        bob_library,
+        bob_version,
+        &stale_invitation_hash,
+        now,
+    )
+    .await?;
 
     for pool in [&pools.api, &pools.worker] {
         for table in TABLES {

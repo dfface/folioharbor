@@ -8,6 +8,7 @@ use folioharbor_application::{
     actor::Actor,
     catalog::PageRequest,
     config::{ConfigSources, Settings},
+    error::AppError,
     imports::{CreateUploadRequest, ReceiveUploadRequest},
     ports::{JobRepository as _, LeaseJobs},
 };
@@ -17,7 +18,7 @@ use folioharbor_postgres::{PgJobRepository, PgPools, run_migrations};
 use folioharbor_test_support::postgres::TestPostgres;
 use std::{collections::BTreeMap, fs, path::Path};
 
-fn composition_settings(storage_root: &Path) -> anyhow::Result<Settings> {
+fn composition_settings(storage_root: &Path, upload_limit_bytes: u64) -> anyhow::Result<Settings> {
     Ok(Settings::load(ConfigSources {
         environment: BTreeMap::from([
             (
@@ -36,6 +37,11 @@ fn composition_settings(storage_root: &Path) -> anyhow::Result<Settings> {
                 "FOLIOHARBOR_STORAGE_ROOT".into(),
                 storage_root.to_string_lossy().into_owned(),
             ),
+            (
+                "FOLIOHARBOR_STORAGE_UPLOAD_LIMIT_BYTES".into(),
+                upload_limit_bytes.to_string(),
+            ),
+            ("FOLIOHARBOR_STORAGE_FREE_RESERVE_BYTES".into(), "1".into()),
         ]),
         ..ConfigSources::default()
     })?)
@@ -55,13 +61,27 @@ async fn production_upload_composition_uses_postgres_and_local_blob_storage() ->
     let directory = tempfile::tempdir()?;
     let storage_root = directory.path().join("storage");
     fs::create_dir_all(&storage_root)?;
-    let settings = composition_settings(&storage_root)?;
+    let settings = composition_settings(&storage_root, 4)?;
     let now = OffsetDateTime::now_utc();
     let actor = UserId::new();
     let library = LibraryId::new();
     sqlx::query("INSERT INTO folioharbor.user_accounts(user_id,normalized_email,display_email,status,created_at,verified_at) VALUES($1,$2,$2,'verified',$3,$3)").bind(actor.as_uuid()).bind("composition@test.invalid").bind(now).execute(&pools.owner).await?;
     sqlx::query("INSERT INTO folioharbor.libraries(library_id,name,created_at,updated_at) VALUES($1,'Composition',$2,$2)").bind(library.as_uuid()).bind(now).execute(&pools.owner).await?;
     sqlx::query("INSERT INTO folioharbor.library_memberships(library_id,user_id,role_code,status,joined_at) VALUES($1,$2,'editor','active',$3)").bind(library.as_uuid()).bind(actor.as_uuid()).bind(now).execute(&pools.owner).await?;
+    let lower_limit = composition_settings(&storage_root, 3)?;
+    assert!(matches!(
+        build_upload_api(&lower_limit, pools.api.clone())
+            .create_upload(CreateUploadRequest {
+                actor,
+                request_id: RequestId::new(),
+                library_id: library,
+                file_name: "too-large.epub".into(),
+                media_type: "application/epub+zip".into(),
+                declared_bytes: 4,
+            })
+            .await,
+        Err(AppError::PayloadTooLarge)
+    ));
     let api = build_upload_api(&settings, pools.api.clone());
     let upload = api
         .create_upload(CreateUploadRequest {

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 use crate::ports::BlobStore;
 
-pub const COMPATIBLE_SCHEMA_VERSION: i64 = 28;
+pub const COMPATIBLE_SCHEMA_VERSION: i64 = 29;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HealthStatus {

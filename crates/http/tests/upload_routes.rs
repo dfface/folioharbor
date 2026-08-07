@@ -134,10 +134,14 @@ impl AuthenticateSessionUseCase for Services {
 
 struct FakeUploads {
     upload: UploadSession,
+    upload_limit_bytes: u64,
 }
 #[async_trait]
 impl UploadApi for FakeUploads {
-    async fn create_upload(&self, _: CreateUploadRequest) -> Result<UploadSession, AppError> {
+    async fn create_upload(&self, request: CreateUploadRequest) -> Result<UploadSession, AppError> {
+        if request.declared_bytes > self.upload_limit_bytes {
+            return Err(AppError::PayloadTooLarge);
+        }
         Ok(self.upload.clone())
     }
     async fn receive_upload(
@@ -174,6 +178,7 @@ fn app_with_state(state: UploadState) -> (axum::Router, LibraryId, UploadId, Ite
         sessions: HashMap::from([("actor".to_owned(), actor)]),
     });
     let uploads = Arc::new(FakeUploads {
+        upload_limit_bytes: 4,
         upload: UploadSession {
             upload_id: upload,
             library_id: library,
@@ -300,7 +305,7 @@ async fn duplicate_upload_status_exposes_the_existing_item_target() {
 }
 
 #[test]
-fn openapi_documents_upload_limits_states_media_and_retry_contract() {
+fn openapi_documents_deployment_configured_upload_limit_states_media_and_retry_contract() {
     let document: Value =
         serde_yaml::from_str(include_str!("../../../openapi/folioharbor-v1.yaml"))
             .expect("valid OpenAPI YAML");
@@ -311,7 +316,12 @@ fn openapi_documents_upload_limits_states_media_and_retry_contract() {
     ] {
         assert!(document["paths"].get(path).is_some(), "missing {path}");
     }
-    assert_eq!(document["components"]["schemas"]["CreateUploadRequest"]["properties"]["declared_bytes"]["maximum"].as_u64(),Some(1_073_741_824));
+    assert_eq!(
+        document["components"]["schemas"]["CreateUploadRequest"]["properties"]
+            ["declared_bytes"]["description"]
+            .as_str(),
+        Some("Maximum is deployment-configured.")
+    );
     let states = document["components"]["schemas"]["UploadStatus"]["properties"]["state"]["enum"]
         .as_sequence()
         .expect("states");

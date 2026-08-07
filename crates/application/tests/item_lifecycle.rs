@@ -28,7 +28,9 @@ use uuid::Uuid;
 #[test]
 fn recovery_window_and_blob_delay_have_exact_boundaries() {
     let deleted_at = OffsetDateTime::from_unix_timestamp(1_800_000_000).expect("fixture time");
-    let deleted = ItemLifecycle::Active.delete(deleted_at);
+    let recovery_period = Duration::hours(2);
+    let gc_delay = Duration::minutes(30);
+    let deleted = ItemLifecycle::Active.delete(deleted_at, recovery_period);
 
     assert!(
         !deleted.is_accessible(),
@@ -37,25 +39,25 @@ fn recovery_window_and_blob_delay_have_exact_boundaries() {
     assert_eq!(
         deleted
             .clone()
-            .restore(deleted_at + Duration::days(7) - Duration::nanoseconds(1)),
+            .restore(deleted_at + recovery_period - Duration::nanoseconds(1)),
         Some(ItemLifecycle::Active),
         "restore remains available immediately before seven days"
     );
     assert_eq!(
-        deleted.clone().restore(deleted_at + Duration::days(7)),
+        deleted.clone().restore(deleted_at + recovery_period),
         None,
         "purge eligibility starts exactly seven days after deletion"
     );
 
-    let eligible = deleted.advance(deleted_at + Duration::days(7));
+    let eligible = deleted.advance(deleted_at + recovery_period);
     assert!(matches!(eligible, ItemLifecycle::PurgeEligible { .. }));
     let purged = eligible
-        .purge(deleted_at + Duration::days(7))
+        .purge(deleted_at + recovery_period)
         .expect("eligible item purges");
     assert_eq!(
-        purged.blob_purge_after(),
-        Some(deleted_at + Duration::days(8)),
-        "physical Blob deletion waits a further 24 hours"
+        purged.blob_purge_after(gc_delay),
+        Some(deleted_at + recovery_period + gc_delay),
+        "physical Blob deletion waits for the configured delay"
     );
 }
 
@@ -89,6 +91,7 @@ impl AuthorizationRepository for AllowHoldingEdit {
 struct LifecycleMemory {
     state: Mutex<ItemLifecycle>,
     mutations: Mutex<Vec<ItemLifecycleMutation>>,
+    recovery_period: Duration,
 }
 
 #[async_trait]
@@ -102,7 +105,7 @@ impl ItemLifecycleRepository for LifecycleMemory {
             .expect("lifecycle observations")
             .push(mutation.clone());
         let mut state = self.state.lock().expect("lifecycle state");
-        *state = state.clone().delete(mutation.now);
+        *state = state.clone().delete(mutation.now, self.recovery_period);
         Ok(state.clone())
     }
 
@@ -138,6 +141,7 @@ async fn delete_and_restore_require_holding_edit_and_carry_allowed_audit() {
     let repository = LifecycleMemory {
         state: Mutex::new(ItemLifecycle::Active),
         mutations: Mutex::new(Vec::new()),
+        recovery_period: Duration::days(7),
     };
 
     let deleted = DeleteItem::new(&repository, &authorization)

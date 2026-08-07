@@ -356,9 +356,11 @@ test("two isolated browser contexts sharing one account surface and explicitly r
     expect(pageB.getByText("No reading progress is saved yet.")).toBeVisible(),
   ]);
   const [deviceA, deviceB] = await Promise.all([
-    pageA.evaluate(() => localStorage.getItem("folioharbor.reader.device-id.v1")),
-    pageB.evaluate(() => localStorage.getItem("folioharbor.reader.device-id.v1")),
+    pageA.evaluate((accountId) => localStorage.getItem(`folioharbor.reader.device-id.v2:${accountId}`), accountA),
+    pageB.evaluate((accountId) => localStorage.getItem(`folioharbor.reader.device-id.v2:${accountId}`), accountA),
   ]);
+  expect(deviceA).not.toBeNull();
+  expect(deviceB).not.toBeNull();
   expect(deviceA).not.toBe(deviceB);
 
   await chooseChapter(pageA, 2);
@@ -378,7 +380,7 @@ test("two isolated browser contexts sharing one account surface and explicitly r
   await Promise.all([contextA.close(), contextB.close()]);
 });
 
-test("same-install account replacement cannot replay the prior account's pending Locator", async ({ browser }) => {
+test("same-install account switching preserves isolated device identities and pending queues", async ({ browser }) => {
   const state = account({ failProgressWrites: true });
   const context = await browser.newContext();
   await installReaderApi(context, state);
@@ -387,6 +389,11 @@ test("same-install account replacement cannot replay the prior account's pending
   await chooseChapter(page, 2);
   await expect(page.getByText(/Offline/)).toBeVisible();
   expect(state.writes).toHaveLength(1);
+  const accountADevice = await page.evaluate(
+    (accountId) => localStorage.getItem(`folioharbor.reader.device-id.v2:${accountId}`),
+    accountA,
+  );
+  expect(accountADevice).not.toBeNull();
 
   state.userId = accountB;
   state.failProgressWrites = false;
@@ -395,9 +402,33 @@ test("same-install account replacement cannot replay the prior account's pending
   await expect(page.getByText("No reading progress is saved yet.")).toBeVisible();
   await expect(page.locator("iframe")).toBeVisible();
   expect(state.writes).toHaveLength(1);
-  const keys = await page.evaluate(() => Object.keys(localStorage));
-  expect(keys.some((key) => key.includes(accountA))).toBe(true);
-  expect(keys.some((key) => key.includes(accountB) && key.includes("progress"))).toBe(false);
+  const accountBDevice = await page.evaluate(
+    (accountId) => localStorage.getItem(`folioharbor.reader.device-id.v2:${accountId}`),
+    accountB,
+  );
+  expect(accountBDevice).not.toBeNull();
+  expect(accountBDevice).not.toBe(accountADevice);
+  await chooseChapter(page, 3);
+  await expect(page.getByText("Progress saved on this account.")).toBeVisible();
+  expect(state.writes.at(-1)).toMatchObject({ accountId: accountB, deviceId: accountBDevice });
+
+  state.userId = accountA;
+  state.global = null;
+  await page.reload();
+  await expect(page.getByText("Progress saved on this account.")).toBeVisible();
+  expect(state.writes.at(-1)).toMatchObject({ accountId: accountA, deviceId: accountADevice });
+  const preserved = await page.evaluate(
+    ({ firstAccount, secondAccount }) => ({
+      first: localStorage.getItem(`folioharbor.reader.device-id.v2:${firstAccount}`),
+      keys: Object.keys(localStorage),
+      second: localStorage.getItem(`folioharbor.reader.device-id.v2:${secondAccount}`),
+    }),
+    { firstAccount: accountA, secondAccount: accountB },
+  );
+  expect(preserved.first).toBe(accountADevice);
+  expect(preserved.second).toBe(accountBDevice);
+  expect(preserved.keys.some((key) => key.includes(accountA))).toBe(true);
+  expect(preserved.keys.some((key) => key.includes(accountB))).toBe(true);
   await context.close();
 });
 

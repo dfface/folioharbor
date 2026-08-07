@@ -24,6 +24,7 @@ const problemKeys: Readonly<Record<string, string>> = {
   invalid_registration: "problems.invalidRegistration",
   library_requires_owner: "problems.libraryRequiresOwner",
   malformed_json: "problems.invalidRequest",
+  payload_too_large: "uploads.tooLarge",
   rate_limited: "problems.rateLimited",
   session_not_found: "problems.sessionNotFound",
   unauthenticated: "problems.unauthenticated",

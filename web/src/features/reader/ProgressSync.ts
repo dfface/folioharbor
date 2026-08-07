@@ -78,7 +78,8 @@ interface ProgressSyncOptions {
 type Listener = (state: ProgressState) => void;
 type ConflictChoice = "device" | "global";
 
-const deviceIdKey = "folioharbor.reader.device-id.v1";
+const legacyDeviceIdKey = "folioharbor.reader.device-id.v1";
+const deviceIdKeyPrefix = "folioharbor.reader.device-id.v2:";
 const progressKeyPrefix = "folioharbor.reader.progress.v1:";
 const maximumPersistedBytes = 64 * 1024;
 const maximumPendingPositions = 32;
@@ -153,20 +154,59 @@ function readPersisted(
   }
 }
 
-export function getOrCreateDeviceId(storage: Storage, createId: () => string = () => crypto.randomUUID()): string {
-  const existing = storage.getItem(deviceIdKey);
+function migratePendingProgress(
+  storage: Storage,
+  accountId: string,
+  previousDeviceId: string | null,
+  deviceId: string,
+): void {
+  if (previousDeviceId === null || previousDeviceId === deviceId) {
+    return;
+  }
+  const accountPrefix = `${progressKeyPrefix}${accountId}:`;
+  const previousSuffix = `:${previousDeviceId}`;
+  const pendingKeys = Array.from({ length: storage.length }, (_, index) => storage.key(index))
+    .filter((key): key is string => key?.startsWith(accountPrefix) === true && key.endsWith(previousSuffix));
+  for (const previousKey of pendingKeys) {
+    const raw = storage.getItem(previousKey);
+    if (raw === null) {
+      continue;
+    }
+    try {
+      const persisted: unknown = JSON.parse(raw);
+      if (!isObject(persisted) || persisted.accountId !== accountId || persisted.deviceId !== previousDeviceId) {
+        continue;
+      }
+      const nextKey = `${previousKey.slice(0, -previousSuffix.length)}:${deviceId}`;
+      storage.setItem(nextKey, JSON.stringify({ ...persisted, deviceId }));
+      storage.removeItem(previousKey);
+    } catch {
+      // Corrupt records remain ignored and cannot be attributed to another account.
+    }
+  }
+}
+
+export function getOrCreateDeviceId(
+  storage: Storage,
+  accountId: string,
+  createId: () => string = () => crypto.randomUUID(),
+): string {
+  const accountKey = `${deviceIdKeyPrefix}${accountId}`;
+  const existing = storage.getItem(accountKey);
   if (existing !== null && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(existing)) {
     return existing;
   }
   const deviceId = createId();
-  storage.setItem(deviceIdKey, deviceId);
+  storage.setItem(accountKey, deviceId);
+  migratePendingProgress(storage, accountId, storage.getItem(legacyDeviceIdKey), deviceId);
   return deviceId;
 }
 
-export function resetDeviceId(storage: Storage): void {
-  storage.removeItem(deviceIdKey);
+export function resetDeviceId(storage: Storage, accountId: string): void {
+  storage.removeItem(`${deviceIdKeyPrefix}${accountId}`);
+  const accountPrefix = `${progressKeyPrefix}${accountId}:`;
   const pendingKeys = Array.from({ length: storage.length }, (_, index) => storage.key(index))
-    .filter((key): key is string => key?.startsWith(progressKeyPrefix) === true);
+    .filter((key): key is string => key?.startsWith(accountPrefix) === true);
   for (const key of pendingKeys) {
     storage.removeItem(key);
   }

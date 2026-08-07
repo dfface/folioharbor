@@ -162,6 +162,7 @@ async fn process_restart_recovers_promoted_receipt_with_same_upload_id() -> anyh
         blobs.clone(),
         Arc::new(FixedClock(now)),
         folioharbor_domain::imports::blob::DedupScope::Instance,
+        u64::MAX,
     );
     failing
         .receive_upload(request(actor, library, upload))
@@ -182,6 +183,7 @@ async fn process_restart_recovers_promoted_receipt_with_same_upload_id() -> anyh
         blobs,
         Arc::new(FixedClock(now + Duration::seconds(1))),
         folioharbor_domain::imports::blob::DedupScope::Instance,
+        u64::MAX,
     );
     let recovered = restarted
         .receive_upload(request(actor, library, upload))
@@ -235,6 +237,7 @@ async fn concurrent_receipt_loser_never_creates_a_staging_file() -> anyhow::Resu
         Arc::new(LocalBlobStore::new(directory.path())),
         Arc::new(FixedClock(now)),
         folioharbor_domain::imports::blob::DedupScope::Instance,
+        u64::MAX,
     ));
     let first = tokio::spawn({
         let service = service.clone();

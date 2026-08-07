@@ -130,7 +130,7 @@
     "file": "EPUB file",
     "submit": "Upload EPUB",
     "fileRequired": "Select an EPUB file.",
-    "tooLarge": "EPUB files must be 1 GiB or smaller.",
+    "tooLarge": "This EPUB exceeds the server's configured upload limit.",
     "progress": "Upload progress",
     "bytes": "{{sent}} B of {{total}} B transmitted ({{percentage}}%)",
     "cancel": "Cancel transfer",

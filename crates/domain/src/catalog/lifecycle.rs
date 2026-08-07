@@ -1,9 +1,6 @@
 use crate::time::OffsetDateTime;
 use time::Duration;
 
-pub const ITEM_RECOVERY_WINDOW: Duration = Duration::days(7);
-pub const BLOB_PURGE_DELAY: Duration = Duration::hours(24);
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ItemLifecycle {
     Active,
@@ -29,11 +26,11 @@ impl ItemLifecycle {
     }
 
     #[must_use]
-    pub fn delete(self, now: OffsetDateTime) -> Self {
+    pub fn delete(self, now: OffsetDateTime, recovery_period: Duration) -> Self {
         match self {
             Self::Active => Self::Deleted {
                 deleted_at: now,
-                purge_eligible_at: now + ITEM_RECOVERY_WINDOW,
+                purge_eligible_at: now + recovery_period,
             },
             state => state,
         }
@@ -81,9 +78,9 @@ impl ItemLifecycle {
     }
 
     #[must_use]
-    pub fn blob_purge_after(&self) -> Option<OffsetDateTime> {
+    pub fn blob_purge_after(&self, gc_delay: Duration) -> Option<OffsetDateTime> {
         match self {
-            Self::Purged { purged_at, .. } => Some(*purged_at + BLOB_PURGE_DELAY),
+            Self::Purged { purged_at, .. } => Some(*purged_at + gc_delay),
             Self::Active | Self::Deleted { .. } | Self::PurgeEligible { .. } => None,
         }
     }

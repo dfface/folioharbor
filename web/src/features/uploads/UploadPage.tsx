@@ -10,7 +10,6 @@ import { createUpload, transferUploadContent, type UploadProgress } from "./api"
 import { uploadStatusQueryKey, useUploadStatus } from "./queries";
 import { UploadStatus } from "./UploadStatus";
 
-const MAX_UPLOAD_BYTES = 1_073_741_824;
 type TransferPhase = "idle" | "transferring" | "processing" | "canceled";
 
 export function UploadPage() {
@@ -75,10 +74,6 @@ export function UploadPage() {
     setLocalError(null);
     if (file === null) {
       setLocalError(t("uploads.fileRequired"));
-      return;
-    }
-    if (file.size > MAX_UPLOAD_BYTES) {
-      setLocalError(t("uploads.tooLarge"));
       return;
     }
     setProgress({ sentBytes: 0, totalBytes: file.size });

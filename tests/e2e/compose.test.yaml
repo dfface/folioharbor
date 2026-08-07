@@ -138,7 +138,7 @@ services:
     pull_policy: never
     build:
       context: ../..
-      dockerfile: tests/e2e/Dockerfile
+      dockerfile: deploy/Dockerfile
     command: ["folioharbor", "migrate"]
     environment:
       FOLIOHARBOR_DATABASE_URL_FILE: /run/database-urls/owner
@@ -193,7 +193,7 @@ services:
     pull_policy: never
     command: ["folioharbor-api"]
     environment: &runtime_environment
-      FOLIOHARBOR_SERVER_BIND_ADDRESS: 0.0.0.0:3000
+      FOLIOHARBOR_SERVER_BIND_ADDRESS: 0.0.0.0:8080
       FOLIOHARBOR_SERVER_PUBLIC_BASE_URL: http://127.0.0.1:4173/
       FOLIOHARBOR_DATABASE_URL_FILE: /run/database-urls/api
       FOLIOHARBOR_AUTH_APPLICATION_SECRET_KEY_ID: e2e-current
@@ -201,6 +201,10 @@ services:
       FOLIOHARBOR_STORAGE_ROOT: /var/lib/folioharbor
       FOLIOHARBOR_STORAGE_FREE_RESERVE_BYTES: 1
       FOLIOHARBOR_STORAGE_LIBRARY_QUOTA_BYTES: 104857600
+      FOLIOHARBOR_STORAGE_UPLOAD_LIMIT_BYTES: 104857600
+      FOLIOHARBOR_STORAGE_FAILED_RETENTION_SECONDS: 3600
+      FOLIOHARBOR_STORAGE_GC_DELAY_SECONDS: 3600
+      FOLIOHARBOR_STORAGE_RECOVERY_PERIOD_SECONDS: 3600
       FOLIOHARBOR_MAIL_SMTP_URL: smtp://mailpit:1025
       FOLIOHARBOR_MAIL_FROM_ADDRESS: noreply@e2e.invalid
       FOLIOHARBOR_OBSERVABILITY_LOG_FILTER: info
@@ -217,9 +221,9 @@ services:
       - mail_tls:/run/mail-tls:ro
       - database_urls:/run/database-urls:ro
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3000:8080"
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3000/health/ready"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/health/ready"]
       interval: 2s
       timeout: 3s
       retries: 45
@@ -245,6 +249,24 @@ services:
       - database_urls:/run/database-urls:ro
     healthcheck:
       test: ["CMD-SHELL", "kill -0 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  web:
+    image: folioharbor-e2e-app:local
+    pull_policy: never
+    command: ["nginx", "-c", "/etc/folioharbor/nginx.conf", "-g", "daemon off;"]
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:4173:8080"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/"]
       interval: 2s
       timeout: 3s
       retries: 30

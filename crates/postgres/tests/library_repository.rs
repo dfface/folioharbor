@@ -360,10 +360,17 @@ async fn personal_library_repository_retry_returns_the_same_library() -> anyhow:
     let user_id = UserId::new();
     sqlx::query("INSERT INTO folioharbor.user_accounts(user_id, normalized_email, display_email, status, created_at) VALUES ($1, 'personal@example.com', 'personal@example.com', 'verified', $2)").bind(user_id.as_uuid()).bind(now).execute(&owner).await?;
     let api = PgPool::connect(&database.api_url()?).await?;
-    let repository = PgLibraryRepository::new(api.clone());
+    let repository = PgLibraryRepository::new(api.clone()).with_library_quota_bytes(123);
     let first = repository.provision_personal_library(user_id, now).await?;
     let second = repository.provision_personal_library(user_id, now).await?;
     assert_eq!(first, second);
+    let quota: i64 = sqlx::query_scalar(
+        "SELECT quota_limit_bytes FROM folioharbor.libraries WHERE library_id=$1",
+    )
+    .bind(first.library_id.as_uuid())
+    .fetch_one(&owner)
+    .await?;
+    assert_eq!(quota, 123, "configured quota is stored at provisioning");
     api.close().await;
     owner.close().await;
     database.cleanup().await?;

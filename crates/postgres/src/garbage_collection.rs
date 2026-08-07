@@ -21,12 +21,22 @@ use crate::{DatabaseContext, PgCatalogRepository, PgTransactionContext};
 #[derive(Clone, Debug)]
 pub struct PgItemLifecycleRepository {
     pool: PgPool,
+    recovery_period_seconds: u64,
 }
 
 impl PgItemLifecycleRepository {
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            recovery_period_seconds: 7 * 24 * 60 * 60,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_recovery_period_seconds(mut self, seconds: u64) -> Self {
+        self.recovery_period_seconds = seconds;
+        self
     }
 
     async fn mutate(
@@ -66,6 +76,8 @@ impl PgItemLifecycleRepository {
         )
         .await
         .map_err(|_| ItemLifecycleRepositoryError::Persistence)?;
+        let recovery_period = i64::try_from(self.recovery_period_seconds)
+            .map_err(|_| ItemLifecycleRepositoryError::Persistence)?;
         let row: (
             String,
             Option<String>,
@@ -73,7 +85,7 @@ impl PgItemLifecycleRepository {
             Option<OffsetDateTime>,
             Option<OffsetDateTime>,
         ) = sqlx::query_as(
-            "SELECT outcome,item_state,item_deleted_at,item_purge_eligible_at,item_purged_at FROM folioharbor.item_lifecycle_mutate_authorized($1,$2,$3,$4,$5,$6,$7)",
+            "SELECT outcome,item_state,item_deleted_at,item_purge_eligible_at,item_purged_at FROM folioharbor.item_lifecycle_mutate_authorized($1,$2,$3,$4,$5,$6,$7,$8)",
         )
         .bind(mutation.grant.actor().as_uuid())
         .bind(mutation.grant.library_id().as_uuid())
@@ -82,6 +94,7 @@ impl PgItemLifecycleRepository {
         .bind(mutation.now)
         .bind(mutation.grant.membership_version())
         .bind(mutation.audit.request_id.as_ulid().to_string())
+        .bind(recovery_period)
         .fetch_one(&mut *transaction)
         .await
         .map_err(|_| ItemLifecycleRepositoryError::Persistence)?;
@@ -156,6 +169,7 @@ impl ItemLifecycleRepository for PgCatalogRepository {
         mutation: ItemLifecycleMutation,
     ) -> Result<ItemLifecycle, ItemLifecycleRepositoryError> {
         PgItemLifecycleRepository::new(self.pool.clone())
+            .with_recovery_period_seconds(self.recovery_period_seconds)
             .delete(mutation)
             .await
     }
@@ -165,6 +179,7 @@ impl ItemLifecycleRepository for PgCatalogRepository {
         mutation: ItemLifecycleMutation,
     ) -> Result<ItemLifecycle, ItemLifecycleRepositoryError> {
         PgItemLifecycleRepository::new(self.pool.clone())
+            .with_recovery_period_seconds(self.recovery_period_seconds)
             .restore(mutation)
             .await
     }
@@ -173,12 +188,22 @@ impl ItemLifecycleRepository for PgCatalogRepository {
 #[derive(Clone, Debug)]
 pub struct PgGarbageCollectionRepository {
     pool: PgPool,
+    gc_delay_seconds: u64,
 }
 
 impl PgGarbageCollectionRepository {
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            gc_delay_seconds: 24 * 60 * 60,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_gc_delay_seconds(mut self, seconds: u64) -> Self {
+        self.gc_delay_seconds = seconds;
+        self
     }
 
     async fn worker_transaction(
@@ -207,11 +232,14 @@ impl GarbageCollectionRepository for PgGarbageCollectionRepository {
         limit: u32,
     ) -> Result<u64, GarbageCollectionRepositoryError> {
         let mut processed = 0_u64;
+        let gc_delay =
+            i64::try_from(self.gc_delay_seconds).map_err(|_| GarbageCollectionRepositoryError)?;
         for _ in 0..limit {
             let mut transaction = self.worker_transaction().await?;
             let advanced: i64 =
-                sqlx::query_scalar("SELECT folioharbor.gc_prepare_items_worker($1,1)")
+                sqlx::query_scalar("SELECT folioharbor.gc_prepare_items_worker($1,1,$2)")
                     .bind(now)
+                    .bind(gc_delay)
                     .fetch_one(&mut *transaction)
                     .await
                     .map_err(|_| GarbageCollectionRepositoryError)?;

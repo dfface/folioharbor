@@ -130,7 +130,7 @@
     "file": "EPUB 文件",
     "submit": "上传 EPUB",
     "fileRequired": "请选择 EPUB 文件。",
-    "tooLarge": "EPUB 文件必须不超过 1 GiB。",
+    "tooLarge": "此 EPUB 超过服务器配置的上传大小限制。",
     "progress": "上传进度",
     "bytes": "已传输 {{sent}} B / {{total}} B（{{percentage}}%）",
     "cancel": "取消传输",

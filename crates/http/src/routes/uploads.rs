@@ -14,10 +14,7 @@ use axum::{
 };
 use folioharbor_application::{
     error::{AppError, FieldViolation},
-    imports::{
-        CreateUploadRequest, GetUploadRequest, MAX_UPLOAD_BYTES, ReceiveUploadRequest,
-        UploadStreamError,
-    },
+    imports::{CreateUploadRequest, GetUploadRequest, ReceiveUploadRequest, UploadStreamError},
 };
 use folioharbor_domain::{
     id::{LibraryId, RequestId, UploadId},
@@ -89,9 +86,6 @@ async fn create_upload(
         Ok(value) => value,
         Err(error) => return problem_response(&error, &context),
     };
-    if body.declared_bytes == 0 || body.declared_bytes > MAX_UPLOAD_BYTES {
-        return problem_response(&AppError::PayloadTooLarge, &context);
-    }
     match state
         .upload_api
         .create_upload(CreateUploadRequest {

@@ -521,6 +521,7 @@ export interface components {
             file_name: string;
             /** @enum {string} */
             media_type: "application/epub+zip" | "application/octet-stream";
+            /** @description Maximum is deployment-configured. */
             declared_bytes: number;
         };
         UploadStatus: {
@@ -1469,7 +1470,7 @@ export interface operations {
             401: components["responses"]["Problem"];
             403: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
-            /** @description Declared upload size exceeds 1 GiB */
+            /** @description Declared upload size exceeds the deployment-configured limit; content must not be sent */
             413: {
                 headers: {
                     [name: string]: unknown;

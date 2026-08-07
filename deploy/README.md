@@ -1,6 +1,6 @@
 # Official Compose deployment
 
-`compose.yaml` is the supported single-host topology: PostgreSQL 18, one-shot storage initialization, one-shot schema migration, API, Worker, one shared storage volume (with managed `objects/` and `staging/` subdirectories), and an optional Mailpit development profile. It intentionally does not bundle an HTTPS reverse proxy.
+`compose.yaml` is the supported single-host topology: PostgreSQL 18, one-shot storage initialization, one-shot schema migration, API, Worker, the production Web SPA, one shared storage volume (with managed `objects/` and `staging/` subdirectories), and an optional Mailpit development profile. The Web service serves fingerprinted assets with immutable caching, falls back to `index.html` for application deep links, applies browser security headers, and proxies same-origin `/api/` and `/health/` requests to the API. It intentionally does not bundle HTTPS termination.
 
 ## First start
 
@@ -13,7 +13,7 @@ docker compose --env-file .env -f compose.yaml config --quiet
 docker compose --env-file .env -f compose.yaml up -d postgres storage-init migration
 docker compose --env-file .env -f compose.yaml run --rm migration \
   folioharbor admin create --email admin@example.com
-docker compose --env-file .env -f compose.yaml up -d api worker
+docker compose --env-file .env -f compose.yaml up -d api worker web
 ```
 
 The bootstrap command requires an interactive TTY and prompts twice; it rejects password arguments and administrator-password environment variables. Re-running it for the same administrator is safe. Public registration remains `503 bootstrap_required` until this succeeds.
@@ -26,6 +26,6 @@ API and Worker never receive the owner URL. Migration and explicit operator comm
 
 The active limits are starting examples, not sizing guarantees. Worker concurrency defaults to `1`. API and Worker handle `SIGTERM`; Compose allows 30 seconds for graceful shutdown. PostgreSQL gets 60 seconds. Health checks distinguish process liveness from readiness, and migration must complete successfully before either runtime starts.
 
-Terminate HTTPS at a separately managed reverse proxy. Forward only trusted client metadata, preserve `traceparent`, impose upload/time limits consistent with FolioHarbor, and proxy to the loopback-bound API port. Do not publish PostgreSQL or the Blob volume.
+Terminate HTTPS at a separately managed reverse proxy in front of the loopback-bound Web port. Forward only trusted client metadata, preserve `traceparent`, and impose upload/time limits consistent with FolioHarbor. The API is internal to the Compose network; do not publish it, PostgreSQL, or the Blob volume directly.
 
 Secrets may be supplied directly with the documented `FOLIOHARBOR_*` environment names or with the matching `_FILE` names. Prefer Compose secrets. Never commit `.env`, `deploy/secrets/`, database URLs, cookies, tokens, or SMTP passwords.

@@ -63,6 +63,7 @@ pub struct UploadService {
     pub(crate) blobs: Arc<dyn BlobStore>,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) dedup_scope: DedupScope,
+    pub(crate) upload_limit_bytes: u64,
     pub(crate) receipt_heartbeat_interval: std::time::Duration,
 }
 
@@ -74,6 +75,7 @@ impl UploadService {
         blobs: Arc<dyn BlobStore>,
         clock: Arc<dyn Clock>,
         dedup_scope: DedupScope,
+        upload_limit_bytes: u64,
     ) -> Self {
         Self {
             uploads,
@@ -81,6 +83,7 @@ impl UploadService {
             blobs,
             clock,
             dedup_scope,
+            upload_limit_bytes,
             receipt_heartbeat_interval: std::time::Duration::from_secs(60),
         }
     }
@@ -113,7 +116,7 @@ impl UploadService {
         ) {
             return Err(invalid("media_type", "unsupported_upload_media_type"));
         }
-        let bytes = declared_size(request.declared_bytes)?;
+        let bytes = declared_size(request.declared_bytes, self.upload_limit_bytes)?;
         Authorization::new(self.authorization.as_ref())
             .require(
                 request.actor,
@@ -181,9 +184,8 @@ fn unavailable<T>() -> Result<T, AppError> {
     })
 }
 
-pub const MAX_UPLOAD_BYTES: u64 = 1024 * 1024 * 1024;
-pub(crate) fn declared_size(value: u64) -> Result<ByteCount, AppError> {
-    if value == 0 || value > MAX_UPLOAD_BYTES {
+pub(crate) fn declared_size(value: u64, upload_limit_bytes: u64) -> Result<ByteCount, AppError> {
+    if value == 0 || value > upload_limit_bytes {
         return Err(AppError::PayloadTooLarge);
     }
     Ok(ByteCount::new(value))

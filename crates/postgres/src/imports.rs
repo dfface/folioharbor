@@ -16,17 +16,28 @@ use crate::{DatabaseContext, PgTransactionContext};
 #[derive(Clone, Debug)]
 pub struct PgImportRepository {
     pool: PgPool,
+    failed_retention_seconds: u64,
 }
 
 #[derive(Clone, Debug)]
 pub struct PgImportCleanupRepository {
     pool: PgPool,
+    failed_retention_seconds: u64,
 }
 
 impl PgImportCleanupRepository {
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            failed_retention_seconds: 24 * 60 * 60,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_failed_retention_seconds(mut self, seconds: u64) -> Self {
+        self.failed_retention_seconds = seconds;
+        self
     }
 }
 
@@ -97,14 +108,16 @@ impl ImportCleanupRepository for PgImportCleanupRepository {
         cursor: CleanupCursor,
     ) -> Result<u64, ImportCleanupRepositoryError> {
         let mut transaction = cleanup_transaction(&self.pool, RequestId::new()).await?;
-        let expired = sqlx::query_scalar!(
-            r#"SELECT folioharbor.import_expire_abandoned_worker($1,$2) AS "expired!""#,
-            cursor.not_after(),
-            i64::from(cursor.limit()),
-        )
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(cleanup_error)?;
+        let retention = i64::try_from(self.failed_retention_seconds)
+            .map_err(|_| ImportCleanupRepositoryError)?;
+        let expired: i64 =
+            sqlx::query_scalar("SELECT folioharbor.import_expire_abandoned_worker($1,$2,$3)")
+                .bind(cursor.not_after())
+                .bind(i64::from(cursor.limit()))
+                .bind(retention)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(cleanup_error)?;
         transaction.commit().await.map_err(cleanup_error)?;
         u64::try_from(expired).map_err(|_| ImportCleanupRepositoryError)
     }
@@ -196,7 +209,16 @@ fn cleanup_error(_: sqlx::Error) -> ImportCleanupRepositoryError {
 impl PgImportRepository {
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            failed_retention_seconds: 24 * 60 * 60,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_failed_retention_seconds(mut self, seconds: u64) -> Self {
+        self.failed_retention_seconds = seconds;
+        self
     }
 }
 
@@ -217,14 +239,17 @@ impl ImportRepository for PgImportRepository {
         .await
         .map_err(unavailable)?;
         let request = request_id.as_ulid().to_string();
-        let row = sqlx::query!(
-            r#"SELECT outcome AS "outcome!",actor_id AS "actor_id!",blob_id,logical_bytes AS "logical_bytes!",storage_key,upload_state AS "upload_state!",error_code FROM folioharbor.import_reconcile_worker($1,$2,$3,$4,$5)"#,
-            upload_id.as_uuid(),
-            library_id.as_uuid(),
-            BlobId::new().as_uuid(),
-            request,
-            now,
+        let retention = i64::try_from(self.failed_retention_seconds)
+            .map_err(|_| ImportRepositoryError::Schema)?;
+        let row: Option<(String, uuid::Uuid, Option<uuid::Uuid>, i64, Option<String>, String, Option<String>)> = sqlx::query_as(
+            "SELECT outcome,actor_id,blob_id,logical_bytes,storage_key,upload_state,error_code FROM folioharbor.import_reconcile_worker($1,$2,$3,$4,$5,$6)",
         )
+        .bind(upload_id.as_uuid())
+        .bind(library_id.as_uuid())
+        .bind(BlobId::new().as_uuid())
+        .bind(request)
+        .bind(now)
+        .bind(retention)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|error| classify(&error))?;
@@ -232,33 +257,29 @@ impl ImportRepository for PgImportRepository {
         let Some(row) = row else {
             return Err(ImportRepositoryError::InvalidState);
         };
-        if row.outcome == "complete" {
+        if row.0 == "complete" {
             return Ok(ImportReconciliation::Complete);
         }
-        if row.outcome == "failed" {
+        if row.0 == "failed" {
             return Ok(ImportReconciliation::TerminalFailure {
-                code: row.error_code.unwrap_or_else(|| "import_failed".to_owned()),
+                code: row.6.unwrap_or_else(|| "import_failed".to_owned()),
             });
         }
-        if row.outcome == "operator_required" {
+        if row.0 == "operator_required" {
             return Ok(ImportReconciliation::OperatorRequired {
-                code: row
-                    .error_code
-                    .unwrap_or_else(|| "schema_incompatible".to_owned()),
+                code: row.6.unwrap_or_else(|| "schema_incompatible".to_owned()),
             });
         }
         Ok(ImportReconciliation::Work(ImportWork {
             upload_id,
             library_id,
-            actor_id: UserId::from_uuid(row.actor_id),
-            blob_id: BlobId::from_uuid(row.blob_id.ok_or(ImportRepositoryError::InvalidState)?),
+            actor_id: UserId::from_uuid(row.1),
+            blob_id: BlobId::from_uuid(row.2.ok_or(ImportRepositoryError::InvalidState)?),
             logical_bytes: ByteCount::new(
-                u64::try_from(row.logical_bytes).map_err(|_| ImportRepositoryError::Schema)?,
+                u64::try_from(row.3).map_err(|_| ImportRepositoryError::Schema)?,
             ),
-            storage_key: StorageKey::from_opaque(
-                row.storage_key.ok_or(ImportRepositoryError::InvalidState)?,
-            ),
-            state: UploadState::parse(&row.upload_state).ok_or(ImportRepositoryError::Schema)?,
+            storage_key: StorageKey::from_opaque(row.4.ok_or(ImportRepositoryError::InvalidState)?),
+            state: UploadState::parse(&row.5).ok_or(ImportRepositoryError::Schema)?,
         }))
     }
 
@@ -303,14 +324,17 @@ impl ImportRepository for PgImportRepository {
         )
         .await
         .map_err(unavailable)?;
-        let changed = sqlx::query_scalar!(
-            r#"SELECT folioharbor.import_record_failure_worker($1,$2,$3,$4,$5) AS "changed!""#,
-            work.upload_id.as_uuid(),
-            work.library_id.as_uuid(),
-            to.as_str(),
-            code,
-            now,
+        let retention = i64::try_from(self.failed_retention_seconds)
+            .map_err(|_| ImportRepositoryError::Schema)?;
+        let changed: bool = sqlx::query_scalar(
+            "SELECT folioharbor.import_record_failure_worker($1,$2,$3,$4,$5,$6)",
         )
+        .bind(work.upload_id.as_uuid())
+        .bind(work.library_id.as_uuid())
+        .bind(to.as_str())
+        .bind(code)
+        .bind(now)
+        .bind(retention)
         .fetch_one(&mut *transaction)
         .await
         .map_err(|error| classify(&error))?;

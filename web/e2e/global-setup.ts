@@ -59,7 +59,7 @@ export default function globalSetup(): () => void {
         "--tag",
         "folioharbor-e2e-app:local",
         "--file",
-        resolve(repositoryRoot, "tests/e2e/Dockerfile"),
+        resolve(repositoryRoot, "deploy/Dockerfile"),
         repositoryRoot,
       ]);
     }

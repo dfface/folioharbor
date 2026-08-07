@@ -23,6 +23,7 @@ use crate::{DatabaseContext, PgTransactionContext};
 #[derive(Clone, Debug)]
 pub struct PgLibraryRepository {
     pool: PgPool,
+    library_quota_bytes: u64,
 }
 
 #[async_trait]
@@ -118,22 +119,21 @@ impl LibraryQueryRepository for PgLibraryRepository {
         )
         .await
         .map_err(|_| LibraryQueryRepositoryError)?;
-        let rows = sqlx::query!(
-            r#"SELECT user_id AS "user_id!",role_code AS "role_code!"
-               FROM folioharbor.library_members_visible($1,$2,$3)"#,
-            grant.actor().as_uuid(),
-            library.as_uuid(),
-            grant.membership_version(),
+        let rows = sqlx::query_as::<_, (Uuid, String)>(
+            "SELECT user_id,role_code FROM folioharbor.library_members_web_visible($1,$2,$3)",
         )
+        .bind(grant.actor().as_uuid())
+        .bind(library.as_uuid())
+        .bind(grant.membership_version())
         .fetch_all(&mut *tx)
         .await
         .map_err(|_| LibraryQueryRepositoryError)?;
         tx.commit().await.map_err(|_| LibraryQueryRepositoryError)?;
         rows.into_iter()
             .map(|row| {
-                RoleCode::parse(&row.role_code)
+                RoleCode::parse(&row.1)
                     .map(|role| LibraryMemberView {
-                        user_id: UserId::from_uuid(row.user_id),
+                        user_id: UserId::from_uuid(row.0),
                         role,
                     })
                     .ok_or(LibraryQueryRepositoryError)
@@ -144,7 +144,16 @@ impl LibraryQueryRepository for PgLibraryRepository {
 impl PgLibraryRepository {
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            library_quota_bytes: 5 * 1024 * 1024 * 1024,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_library_quota_bytes(mut self, library_quota_bytes: u64) -> Self {
+        self.library_quota_bytes = library_quota_bytes;
+        self
     }
 }
 fn persistence_error(_: sqlx::Error) -> LibraryRepositoryError {
@@ -230,10 +239,31 @@ impl LibraryRepository for PgLibraryRepository {
         user_id: UserId,
         now: OffsetDateTime,
     ) -> Result<Library, LibraryRepositoryError> {
-        let row=sqlx::query!(r#"SELECT library_id AS "library_id!", name AS "name!" FROM folioharbor.library_provision_personal($1,$2,$3)"#,LibraryId::new().as_uuid(),user_id.as_uuid(),now).fetch_one(&self.pool).await.map_err(persistence_error)?;
+        let quota = i64::try_from(self.library_quota_bytes).map_err(|_| LibraryRepositoryError)?;
+        let mut tx = self.pool.begin().await.map_err(persistence_error)?;
+        PgTransactionContext::apply(
+            &mut tx,
+            &DatabaseContext::api_without_library(
+                user_id,
+                folioharbor_domain::id::RequestId::new(),
+            ),
+        )
+        .await
+        .map_err(persistence_error)?;
+        let row = sqlx::query_as::<_, (Uuid, String)>(
+            "SELECT library_id,name FROM folioharbor.library_provision_personal_configured($1,$2,$3,$4)",
+        )
+        .bind(LibraryId::new().as_uuid())
+        .bind(user_id.as_uuid())
+        .bind(now)
+        .bind(quota)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(persistence_error)?;
+        tx.commit().await.map_err(persistence_error)?;
         Ok(Library {
-            library_id: LibraryId::from_uuid(row.library_id),
-            name: row.name,
+            library_id: LibraryId::from_uuid(row.0),
+            name: row.1,
         })
     }
     async fn create_invitation(

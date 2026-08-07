@@ -252,7 +252,7 @@ paths:
         '401': {$ref: '#/components/responses/Problem'}
         '403': {$ref: '#/components/responses/Problem'}
         '404': {$ref: '#/components/responses/Problem'}
-        '413': {description: Declared upload size exceeds 1 GiB, content must not be sent, content: {application/problem+json: {schema: {$ref: '#/components/schemas/ProblemDetails'}}}}
+        '413': {description: Declared upload size exceeds the deployment-configured limit; content must not be sent, content: {application/problem+json: {schema: {$ref: '#/components/schemas/ProblemDetails'}}}}
         '422': {$ref: '#/components/responses/Problem'}
         '507': {$ref: '#/components/responses/Problem'}
   /api/v1/libraries/{library_id}/uploads/{upload_id}:
@@ -740,7 +740,7 @@ components:
       properties:
         file_name: {type: string, pattern: '(?i)\\.epub$', maxLength: 512}
         media_type: {type: string, enum: [application/epub+zip, application/octet-stream]}
-        declared_bytes: {type: integer, minimum: 1, maximum: 1073741824}
+        declared_bytes: {type: integer, minimum: 1, description: Maximum is deployment-configured.}
     UploadStatus:
       type: object
       additionalProperties: false
@@ -750,8 +750,8 @@ components:
         library_id: {type: string, format: uuid}
         file_name: {type: string}
         media_type: {type: string, enum: [application/epub+zip, application/octet-stream]}
-        declared_bytes: {type: integer, minimum: 1, maximum: 1073741824}
-        received_bytes: {type: integer, minimum: 0, maximum: 1073741824}
+        declared_bytes: {type: integer, minimum: 1}
+        received_bytes: {type: integer, minimum: 0}
         state: {type: string, enum: [created, receiving, received, queued, validating, importing, ready, duplicate, failed, expired, retry_wait]}
         status_url: {type: string}
         error_code: {type: [string, 'null'], description: Stable safe code; implementation or storage details are never exposed}

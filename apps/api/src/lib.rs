@@ -30,21 +30,26 @@ pub fn build_upload_api(settings: &Settings, pool: PgPool) -> Arc<dyn UploadApi>
     Arc::new(UploadService::new(
         Arc::new(PgUploadRepository::new(pool.clone())),
         Arc::new(PgAuthorizationRepository::new(pool)),
-        Arc::new(LocalBlobStore::new(settings.storage.root.clone())),
+        Arc::new(LocalBlobStore::configured(
+            settings.storage.root.clone(),
+            settings.storage.free_reserve.as_u64(),
+        )),
         Arc::new(SystemClock),
         match settings.storage.dedup_scope {
             folioharbor_application::config::DedupScope::Instance => DomainDedupScope::Instance,
             folioharbor_application::config::DedupScope::Library => DomainDedupScope::Library,
             folioharbor_application::config::DedupScope::Disabled => DomainDedupScope::Disabled,
         },
+        settings.storage.upload_limit.as_u64(),
     ))
 }
 
 #[must_use]
-pub fn build_catalog_api(_settings: &Settings, pool: PgPool) -> Arc<dyn CatalogApi> {
+pub fn build_catalog_api(settings: &Settings, pool: PgPool) -> Arc<dyn CatalogApi> {
     Arc::new(
         CatalogService::new(
-            PgCatalogRepository::new(pool.clone()),
+            PgCatalogRepository::new(pool.clone())
+                .with_recovery_period_seconds(settings.storage.recovery_period.as_seconds()),
             PgAuthorizationRepository::new(pool),
         )
         .with_lifecycle(),
@@ -53,7 +58,10 @@ pub fn build_catalog_api(_settings: &Settings, pool: PgPool) -> Arc<dyn CatalogA
 
 #[must_use]
 pub fn build_reader_api(settings: &Settings, pool: PgPool) -> Arc<dyn ReaderApi> {
-    let blobs = Arc::new(LocalBlobStore::new(settings.storage.root.clone()));
+    let blobs = Arc::new(LocalBlobStore::configured(
+        settings.storage.root.clone(),
+        settings.storage.free_reserve.as_u64(),
+    ));
     Arc::new(ReaderService::new(
         PgReaderCatalogRepository::new(pool),
         EpubResourceReader::new(blobs, ResourceCacheLimits::default()),
@@ -72,7 +80,10 @@ pub fn build_download(
     settings: &Settings,
     pool: PgPool,
 ) -> (Arc<dyn DownloadApi>, Arc<dyn BlobStore>) {
-    let blobs: Arc<dyn BlobStore> = Arc::new(LocalBlobStore::new(settings.storage.root.clone()));
+    let blobs: Arc<dyn BlobStore> = Arc::new(LocalBlobStore::configured(
+        settings.storage.root.clone(),
+        settings.storage.free_reserve.as_u64(),
+    ));
     (
         Arc::new(DownloadService::new(PgDownloadRepository::new(pool))),
         blobs,

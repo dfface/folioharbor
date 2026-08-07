@@ -122,6 +122,7 @@ async fn normal_upload_promotes_and_reconciles_a_purged_content_addressed_blob()
         blob_store.clone(),
         Arc::new(FixedClock(now)),
         DedupScope::Instance,
+        u64::MAX,
     );
     let promoted = service
         .receive_upload(ReceiveUploadRequest {
@@ -434,7 +435,7 @@ async fn cleanup_is_bounded_skip_locked_and_persists_its_time_boundary() -> anyh
 }
 
 #[tokio::test]
-async fn received_expiry_releases_quota_and_purge_waits_exactly_twenty_four_hours()
+async fn received_expiry_releases_quota_and_honors_configured_failed_retention()
 -> anyhow::Result<()> {
     let database = TestPostgres::provision().await?;
     let pools = PgPools::connect_for_tests(
@@ -455,7 +456,8 @@ async fn received_expiry_releases_quota_and_purge_waits_exactly_twenty_four_hour
         .bind(format!("blob:upload-{}:{}:12", upload.as_uuid().simple(), "11".repeat(32)))
         .bind(vec![0x11_u8;32]).bind(now-Duration::hours(1)).bind(now-Duration::hours(2)).execute(&pools.owner).await?;
     sqlx::query("INSERT INTO folioharbor.quota_reservations(upload_id,library_id,reserved_bytes,expires_at,state) VALUES($1,$2,12,$3,'active')").bind(upload.as_uuid()).bind(library.as_uuid()).bind(now-Duration::hours(1)).execute(&pools.owner).await?;
-    let repository = PgImportCleanupRepository::new(pools.worker.clone());
+    let repository = PgImportCleanupRepository::new(pools.worker.clone())
+        .with_failed_retention_seconds(2 * 60 * 60);
     assert_eq!(
         repository
             .expire_abandoned(CleanupCursor::new(now, 10).expect("cursor"))
@@ -469,9 +471,9 @@ async fn received_expiry_releases_quota_and_purge_waits_exactly_twenty_four_hour
         repository
             .claim_failed_purges(
                 "worker-a",
-                CleanupCursor::new(now + Duration::hours(24) - Duration::seconds(1), 10)
+                CleanupCursor::new(now + Duration::hours(2) - Duration::seconds(1), 10)
                     .expect("cursor"),
-                now + Duration::hours(24) - Duration::seconds(1),
+                now + Duration::hours(2) - Duration::seconds(1),
             )
             .await?
             .is_empty()
@@ -479,8 +481,8 @@ async fn received_expiry_releases_quota_and_purge_waits_exactly_twenty_four_hour
     let claims = repository
         .claim_failed_purges(
             "worker-a",
-            CleanupCursor::new(now + Duration::hours(24), 10).expect("cursor"),
-            now + Duration::hours(24),
+            CleanupCursor::new(now + Duration::hours(2), 10).expect("cursor"),
+            now + Duration::hours(2),
         )
         .await?;
     assert_eq!(claims.len(), 1);
@@ -496,7 +498,7 @@ async fn received_expiry_releases_quota_and_purge_waits_exactly_twenty_four_hour
             .complete_failed_purge(
                 upload,
                 "worker-a",
-                CleanupCursor::new(now + Duration::hours(24), 10).expect("cursor")
+                CleanupCursor::new(now + Duration::hours(2), 10).expect("cursor")
             )
             .await?
     );
@@ -596,7 +598,8 @@ async fn failed_transition_and_purge_schedule_are_atomic_and_reconciliation_repa
         .execute(&pools.owner).await?;
     sqlx::query("ALTER TABLE folioharbor.failed_upload_purges ADD CONSTRAINT injected_purge_failure CHECK(false) NOT VALID")
         .execute(&pools.owner).await?;
-    let repository = PgImportRepository::new(pools.worker.clone());
+    let repository =
+        PgImportRepository::new(pools.worker.clone()).with_failed_retention_seconds(2 * 60 * 60);
     let work = ImportWork {
         upload_id: upload,
         library_id: library,
@@ -640,6 +643,13 @@ async fn failed_transition_and_purge_schedule_are_atomic_and_reconciliation_repa
     let committed: (String, i64, i64, String) = sqlx::query_as("SELECT upload.state,(SELECT count(*) FROM folioharbor.failed_upload_purges WHERE upload_id=$1),library.quota_reserved_bytes,reservation.state FROM folioharbor.upload_sessions upload JOIN folioharbor.libraries library USING(library_id) JOIN folioharbor.quota_reservations reservation USING(upload_id) WHERE upload.upload_id=$1")
         .bind(upload.as_uuid()).fetch_one(&pools.owner).await?;
     assert_eq!(committed, ("failed".into(), 1, 0, "released".into()));
+    let eligible_at: OffsetDateTime = sqlx::query_scalar(
+        "SELECT eligible_at FROM folioharbor.failed_upload_purges WHERE upload_id=$1",
+    )
+    .bind(upload.as_uuid())
+    .fetch_one(&pools.owner)
+    .await?;
+    assert_eq!(eligible_at, now + Duration::hours(2));
 
     sqlx::query("DELETE FROM folioharbor.failed_upload_purges WHERE upload_id=$1")
         .bind(upload.as_uuid())

@@ -141,7 +141,7 @@ async fn migrations_from_zero_preserve_least_privilege_roles_and_are_idempotent(
     .await?;
     assert_eq!(metadata.len(), 1);
     assert!(metadata[0].0);
-    assert_eq!(metadata[0].1, 28);
+    assert_eq!(metadata[0].1, 29);
     assert!(metadata[0].2 >= migration_started_at);
     assert!(metadata[0].2 <= migrated_after);
 
@@ -169,7 +169,7 @@ async fn migrations_from_zero_preserve_least_privilege_roles_and_are_idempotent(
         first_versions,
         vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-            25, 26, 27, 28
+            25, 26, 27, 28, 29
         ]
     );
 
@@ -182,7 +182,7 @@ async fn migrations_from_zero_preserve_least_privilege_roles_and_are_idempotent(
         second_versions,
         vec![
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-            25, 26, 27, 28
+            25, 26, 27, 28, 29
         ]
     );
 
@@ -212,7 +212,7 @@ async fn committed_task_base_upgrades_without_sqlx_checksum_drift() -> anyhow::R
     assert_eq!(base_checksums.len(), 2);
 
     let report = run_migrations(&pools.owner).await?;
-    assert_eq!(report.versions.last(), Some(&28));
+    assert_eq!(report.versions.last(), Some(&29));
 
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
     let current = Migrator::new(source.as_path()).await?;
@@ -231,7 +231,7 @@ async fn committed_task_base_upgrades_without_sqlx_checksum_drift() -> anyhow::R
     )
     .fetch_one(&pools.owner)
     .await?;
-    assert_eq!(schema_version, 28);
+    assert_eq!(schema_version, 29);
 
     pools.close().await;
     database.cleanup().await?;

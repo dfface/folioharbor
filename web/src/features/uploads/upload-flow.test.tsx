@@ -142,13 +142,21 @@ test("upload progress uses transmitted bytes then switches to reload-safe backgr
   expect(statusRequests).toBeGreaterThan(0);
 });
 
-test("a selected file over 1 GiB is rejected before creating a server upload", async () => {
+test("the server-authoritative configured upload limit rejects before content transfer", async () => {
   authenticatedUploadHandlers();
   let createRequests = 0;
   server.use(
     http.post(`${apiOrigin}/api/v1/libraries/:libraryId/uploads`, () => {
       createRequests += 1;
-      return HttpResponse.json(uploadStatus("created"), { status: 202 });
+      return HttpResponse.json({
+        type: "https://folioharbor.test/problems/payload-too-large",
+        title: "Payload too large",
+        status: 413,
+        detail: "The request payload exceeds the configured limit.",
+        instance: "/problems/upload-limit",
+        code: "payload_too_large",
+        request_id: "upload-limit",
+      }, { status: 413 });
     }),
   );
 
@@ -159,8 +167,11 @@ test("a selected file over 1 GiB is rejected before creating a server upload", a
   await user.upload(await screen.findByLabelText("EPUB file"), oversized);
   await user.click(screen.getByRole("button", { name: "Upload EPUB" }));
 
-  expect(await screen.findByRole("alert")).toHaveTextContent("EPUB files must be 1 GiB or smaller.");
-  expect(createRequests).toBe(0);
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "This EPUB exceeds the server's configured upload limit.",
+  );
+  expect(createRequests).toBe(1);
+  expect(FakeXMLHttpRequest.latest).toBeNull();
 });
 
 test("an in-flight transfer can be canceled without leaving transport code in the page", async () => {

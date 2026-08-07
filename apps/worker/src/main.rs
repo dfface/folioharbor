@@ -47,9 +47,13 @@ fn build_handlers(
     pool: &sqlx::PgPool,
     blobs: Arc<LocalBlobStore>,
     worker_id: &str,
+    settings: &Settings,
 ) -> anyhow::Result<WorkerHandlers> {
     let process = Arc::new(ProcessImportJob::new(
-        Arc::new(PgImportRepository::new(pool.clone())),
+        Arc::new(
+            PgImportRepository::new(pool.clone())
+                .with_failed_retention_seconds(settings.storage.failed_retention.as_seconds()),
+        ),
         Arc::new(EpubPublicationParser::new(
             blobs.clone(),
             ParserLimits::default(),
@@ -58,7 +62,10 @@ fn build_handlers(
         RetrySchedule::default(),
     ));
     let cleanup = Arc::new(CleanupImports::new(
-        Arc::new(PgImportCleanupRepository::new(pool.clone())),
+        Arc::new(
+            PgImportCleanupRepository::new(pool.clone())
+                .with_failed_retention_seconds(settings.storage.failed_retention.as_seconds()),
+        ),
         blobs.clone(),
     ));
     let upload_recovery = Arc::new(UploadRecoveryService::new(
@@ -67,7 +74,10 @@ fn build_handlers(
     ));
     let garbage = Arc::new(
         CollectGarbage::new(
-            Arc::new(PgGarbageCollectionRepository::new(pool.clone())),
+            Arc::new(
+                PgGarbageCollectionRepository::new(pool.clone())
+                    .with_gc_delay_seconds(settings.storage.gc_delay.as_seconds()),
+            ),
             blobs,
             worker_id.to_owned(),
             100,
@@ -99,12 +109,15 @@ async fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("worker concurrency must be positive"))?;
     let pool = connect_worker(database_url).await?;
     let smtp = SmtpMailer::for_mode(&settings.mail)?;
-    let blobs = Arc::new(LocalBlobStore::new(storage_root));
+    let blobs = Arc::new(LocalBlobStore::configured(
+        storage_root,
+        settings.storage.free_reserve.as_u64(),
+    ));
     let metrics_blobs = blobs.clone();
     let metrics_pool = pool.clone();
     let worker_id = format!("worker-{}", std::process::id());
     let jobs = Arc::new(PgJobRepository::new(pool.clone()));
-    let handlers = build_handlers(&pool, blobs, &worker_id)?;
+    let handlers = build_handlers(&pool, blobs, &worker_id, &settings)?;
     let mail_repository = PgMailRepository::new(pool);
     let application_secrets = Arc::new(settings.auth.application_secrets);
     let public_base_url = settings.server.public_base_url;

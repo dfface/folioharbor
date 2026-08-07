@@ -61,6 +61,15 @@ fn spawn_metrics_reporter(
     })
 }
 
+fn configured_blob_store(
+    settings: &Settings,
+) -> Arc<dyn folioharbor_application::ports::BlobStore> {
+    Arc::new(folioharbor_storage_local::LocalBlobStore::configured(
+        settings.storage.root.clone(),
+        settings.storage.free_reserve.as_u64(),
+    ))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let settings = Settings::load(ConfigSources {
@@ -74,9 +83,7 @@ async fn main() -> anyhow::Result<()> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("FOLIOHARBOR_DATABASE_URL is required"))?;
     let pool = connect_api(database_url).await?;
-    let health_blobs: Arc<dyn folioharbor_application::ports::BlobStore> = Arc::new(
-        folioharbor_storage_local::LocalBlobStore::new(settings.storage.root.clone()),
-    );
+    let health_blobs = configured_blob_store(&settings);
     let metrics_reporter = spawn_metrics_reporter(
         pool.clone(),
         health_blobs.clone(),
@@ -93,7 +100,8 @@ async fn main() -> anyhow::Result<()> {
     let reader_api = build_reader_api(&settings, pool.clone());
     let progress_api = build_progress_api(pool.clone());
     let (download_api, download_blobs) = build_download(&settings, pool.clone());
-    let library_repository = PgLibraryRepository::new(pool.clone());
+    let library_repository = PgLibraryRepository::new(pool.clone())
+        .with_library_quota_bytes(settings.storage.library_quota.as_u64());
     let personal_library_enabled = settings.auth.personal_library_enabled;
     let auth_features = settings.auth.features();
     let secret = SecretString::from(

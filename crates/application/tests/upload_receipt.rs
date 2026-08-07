@@ -318,6 +318,7 @@ fn fixture_scope(
         blobs.clone(),
         Arc::new(FixedClock(OffsetDateTime::UNIX_EPOCH)),
         scope,
+        u64::MAX,
     );
     (service, uploads, blobs, actor, library, upload)
 }

@@ -11,11 +11,11 @@ use folioharbor_storage_local::LocalBlobStore;
 ///
 /// Returns an error for invalid configuration, unavailable dependencies, or any discrepancy.
 pub async fn run() -> anyhow::Result<()> {
-    let storage_root = storage_root_from_environment(std::env::vars().collect())?;
+    let storage = storage_settings_from_environment(std::env::vars().collect())?;
     let url = crate::migrate::owner_database_url()?;
     let pool = folioharbor_postgres::connect_owner(&url).await?;
     let repository = folioharbor_postgres::PgOperationsRepository::new(pool.clone());
-    let blobs = LocalBlobStore::new(storage_root);
+    let blobs = LocalBlobStore::configured(storage.root, storage.free_reserve.as_u64());
     let report = ConsistencyCheck::new(&repository, &blobs).execute().await?;
     println!(
         "checked={} missing_blobs={} orphan_locations={} hash_mismatches={}",
@@ -37,9 +37,14 @@ pub async fn run() -> anyhow::Result<()> {
 pub fn storage_root_from_environment(
     environment: BTreeMap<String, String>,
 ) -> anyhow::Result<std::path::PathBuf> {
+    Ok(storage_settings_from_environment(environment)?.root)
+}
+
+fn storage_settings_from_environment(
+    environment: BTreeMap<String, String>,
+) -> anyhow::Result<StorageSettings> {
     Ok(StorageSettings::load(ConfigSources {
         environment,
         ..ConfigSources::default()
-    })?
-    .root)
+    })?)
 }

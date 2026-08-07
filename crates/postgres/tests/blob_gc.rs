@@ -34,11 +34,13 @@ struct SeededItem {
 }
 
 #[tokio::test]
-async fn delete_revokes_visibility_restore_is_bounded_and_audit_is_atomic() -> anyhow::Result<()> {
+async fn delete_restore_honors_configured_recovery_period_and_audit_is_atomic() -> anyhow::Result<()>
+{
     let (database, pools) = database().await?;
     let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
     let seeded = seed_item(&pools, now, 37).await?;
-    let lifecycle = PgItemLifecycleRepository::new(pools.api.clone());
+    let lifecycle =
+        PgItemLifecycleRepository::new(pools.api.clone()).with_recovery_period_seconds(2 * 60 * 60);
     let authorization = PgAuthorizationRepository::new(pools.api.clone());
 
     let deleted = DeleteItem::new(&lifecycle, &authorization)
@@ -62,7 +64,7 @@ async fn delete_revokes_visibility_restore_is_bounded_and_audit_is_atomic() -> a
             library_id: seeded.library,
             item_id: seeded.item,
             request_id: RequestId::new(),
-            now: now + Duration::days(7) - Duration::nanoseconds(1),
+            now: now + Duration::hours(2) - Duration::nanoseconds(1),
         })
         .await?;
     assert_eq!(restored, ItemLifecycle::Active);
@@ -82,7 +84,7 @@ async fn delete_revokes_visibility_restore_is_bounded_and_audit_is_atomic() -> a
             library_id: seeded.library,
             item_id: seeded.item,
             request_id: RequestId::new(),
-            now: now + Duration::days(7),
+            now: now + Duration::hours(2),
         })
         .await;
     assert!(matches!(
@@ -169,7 +171,8 @@ async fn purge_releases_quota_removes_cache_derivatives_and_preserves_progress_a
         now: now - Duration::days(7),
     })
     .await?;
-    let garbage = PgGarbageCollectionRepository::new(pools.worker.clone());
+    let garbage =
+        PgGarbageCollectionRepository::new(pools.worker.clone()).with_gc_delay_seconds(30 * 60);
 
     assert_eq!(garbage.prepare(now, 10).await?, 1);
     let item: (String, Option<uuid::Uuid>, Option<OffsetDateTime>) =
@@ -218,20 +221,20 @@ async fn purge_releases_quota_removes_cache_derivatives_and_preserves_progress_a
         garbage
             .claim(
                 "worker-a",
-                now + Duration::hours(24) - Duration::nanoseconds(1),
+                now + Duration::minutes(30) - Duration::nanoseconds(1),
                 10
             )
             .await?
             .is_empty()
     );
     let claims = garbage
-        .claim("worker-a", now + Duration::hours(24), 10)
+        .claim("worker-a", now + Duration::minutes(30), 10)
         .await?;
     assert_eq!(claims.len(), 1);
     assert_eq!(claims[0].storage_key.as_str(), seeded.storage_key);
     assert!(
         garbage
-            .complete(&claims[0], "worker-a", now + Duration::hours(24))
+            .complete(&claims[0], "worker-a", now + Duration::minutes(30))
             .await?
     );
     let location: (String, Option<OffsetDateTime>) =
@@ -241,7 +244,7 @@ async fn purge_releases_quota_removes_cache_derivatives_and_preserves_progress_a
             .await?;
     assert_eq!(
         location,
-        ("purged".to_owned(), Some(now + Duration::hours(24)))
+        ("purged".to_owned(), Some(now + Duration::minutes(30)))
     );
 
     finish(database, pools).await
@@ -284,22 +287,26 @@ async fn shared_item_and_manifestation_asset_references_prevent_collection() -> 
 }
 
 #[tokio::test]
-async fn purged_blob_constraint_preserves_the_exact_twenty_four_hour_delay() -> anyhow::Result<()> {
+async fn purged_blob_constraint_accepts_the_runtime_configured_delay() -> anyhow::Result<()> {
     let (database, pools) = database().await?;
     let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)?;
     let seeded = seed_item(&pools, now, 45).await?;
+    let configured_purge_after = now + Duration::minutes(30);
 
-    let shortened = sqlx::query(
-        "UPDATE folioharbor.blob_locations SET state='purged',purge_pending_at=$2,purge_after=$2,purged_at=$2,updated_at=$2 WHERE blob_id=$1",
+    sqlx::query(
+        "UPDATE folioharbor.blob_locations SET state='purged',purge_pending_at=$2,purge_after=$3,purged_at=$3,updated_at=$3 WHERE blob_id=$1",
     )
     .bind(seeded.blob.as_uuid())
     .bind(now)
+    .bind(configured_purge_after)
     .execute(&pools.owner)
-    .await;
-    assert!(
-        shortened.is_err(),
-        "terminal Blob state must not shorten the independent 24-hour delay"
-    );
+    .await?;
+    let persisted: OffsetDateTime =
+        sqlx::query_scalar("SELECT purge_after FROM folioharbor.blob_locations WHERE blob_id=$1")
+            .bind(seeded.blob.as_uuid())
+            .fetch_one(&pools.owner)
+            .await?;
+    assert_eq!(persisted, configured_purge_after);
 
     finish(database, pools).await
 }

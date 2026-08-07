@@ -85,7 +85,12 @@ services:
       FOLIOHARBOR_AUTH_APPLICATION_SECRET_KEY_ID: ${FOLIOHARBOR_APPLICATION_SECRET_KEY_ID:-primary-2026}
       FOLIOHARBOR_AUTH_APPLICATION_SECRET_FILE: /run/secrets/application_secret
       FOLIOHARBOR_STORAGE_ROOT: /var/lib/folioharbor
+      FOLIOHARBOR_STORAGE_LIBRARY_QUOTA_BYTES: ${FOLIOHARBOR_STORAGE_LIBRARY_QUOTA_BYTES:-5368709120}
+      FOLIOHARBOR_STORAGE_UPLOAD_LIMIT_BYTES: ${FOLIOHARBOR_STORAGE_UPLOAD_LIMIT_BYTES:-1073741824}
       FOLIOHARBOR_STORAGE_FREE_RESERVE_BYTES: ${FOLIOHARBOR_STORAGE_FREE_RESERVE_BYTES:-1073741824}
+      FOLIOHARBOR_STORAGE_FAILED_RETENTION_SECONDS: ${FOLIOHARBOR_STORAGE_FAILED_RETENTION_SECONDS:-86400}
+      FOLIOHARBOR_STORAGE_GC_DELAY_SECONDS: ${FOLIOHARBOR_STORAGE_GC_DELAY_SECONDS:-86400}
+      FOLIOHARBOR_STORAGE_RECOVERY_PERIOD_SECONDS: ${FOLIOHARBOR_STORAGE_RECOVERY_PERIOD_SECONDS:-604800}
       FOLIOHARBOR_MAIL_SMTP_URL: ${FOLIOHARBOR_MAIL_SMTP_URL:-smtp://mailpit:1025}
       FOLIOHARBOR_MAIL_FROM_ADDRESS: ${FOLIOHARBOR_MAIL_FROM_ADDRESS:-noreply@library.example}
       FOLIOHARBOR_OBSERVABILITY_LOG_FILTER: ${FOLIOHARBOR_LOG_FILTER:-info}
@@ -106,8 +111,8 @@ services:
       timeout: 5s
       retries: 10
       start_period: 15s
-    ports:
-      - "${FOLIOHARBOR_HTTP_BIND:-127.0.0.1:8080}:8080"
+    expose:
+      - "8080"
     stop_signal: SIGTERM
     stop_grace_period: 30s
     read_only: true
@@ -157,6 +162,32 @@ services:
         limits:
           cpus: "1.0"
           memory: 1G
+
+  web:
+    image: ${FOLIOHARBOR_IMAGE:-ghcr.io/folioharbor/folioharbor:0.1.0}
+    restart: unless-stopped
+    command: ["nginx", "-c", "/etc/folioharbor/nginx.conf", "-g", "daemon off;"]
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${FOLIOHARBOR_HTTP_BIND:-127.0.0.1:8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
 
   mailpit:
     image: axllent/mailpit:v1.27

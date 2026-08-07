@@ -19,6 +19,7 @@ use crate::{DatabaseContext, PgTransactionContext};
 #[derive(Clone, Debug)]
 pub struct PgCatalogRepository {
     pub(crate) pool: PgPool,
+    pub(crate) recovery_period_seconds: u64,
 }
 
 struct CatalogProjectionRow {
@@ -54,7 +55,16 @@ impl From<CatalogProjectionRow> for VisibleCatalogItem {
 impl PgCatalogRepository {
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            recovery_period_seconds: 7 * 24 * 60 * 60,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_recovery_period_seconds(mut self, seconds: u64) -> Self {
+        self.recovery_period_seconds = seconds;
+        self
     }
 
     async fn finalize_in_transaction(

@@ -14,7 +14,7 @@ use folioharbor_domain::{
 };
 
 use super::{
-    CapacityProbe, LocalBlobStore, MAX_RANGE_READ_BYTES, MIN_FREE_BYTES,
+    CapacityProbe, LocalBlobStore, MAX_RANGE_READ_BYTES,
     file_ops::{
         append_options, open_optional, private_create_options, read_options, read_up_to,
         remove_named_file_if_present, verify_file,
@@ -33,7 +33,7 @@ impl<P: CapacityProbe> LocalBlobStore<P> {
 
     fn require_capacity(&self, additional: u64) -> Result<(), BlobStoreError> {
         let free = self.capacity.free_bytes(&self.root)?;
-        if free < MIN_FREE_BYTES.saturating_add(additional) {
+        if free < self.free_reserve_bytes.saturating_add(additional) {
             Err(BlobStoreError::InsufficientCapacity)
         } else {
             Ok(())

@@ -6,7 +6,6 @@ node_modules
 openapi
 target
 tests
-web
 web/dist
 web/node_modules
 web/playwright-report

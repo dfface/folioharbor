@@ -28,6 +28,8 @@ jobs:
       FOLIOHARBOR_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Verify pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Check formatting
@@ -63,6 +65,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Check migrations, PostgreSQL 18 runtime roles, and persistence
         run: scripts/check-migrations.sh
 
@@ -131,7 +135,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build application image
-        run: DOCKER_BUILDKIT=1 docker build --tag "$FOLIOHARBOR_IMAGE" --file tests/e2e/Dockerfile .
+        run: DOCKER_BUILDKIT=1 docker build --tag "$FOLIOHARBOR_IMAGE" --file deploy/Dockerfile .
       - name: Create ephemeral smoke secrets
         run: |
           set -eu
@@ -164,8 +168,17 @@ jobs:
             | docker compose -f deploy/compose.yaml run --rm -T migration \
               sh -ec "script -q -e -c 'folioharbor admin create --email admin@smoke.invalid' /dev/null" \
               >/dev/null 2>&1
-          docker compose -f deploy/compose.yaml up --detach --wait api worker
+          docker compose -f deploy/compose.yaml up --detach --wait api worker web
           curl --fail --silent http://127.0.0.1:8080/health/ready >/dev/null
+          deep_link_headers="$(curl --fail --silent --show-error --dump-header - --output /tmp/folioharbor-index.html \
+            http://127.0.0.1:8080/libraries/smoke/items/smoke/read)"
+          printf '%s' "$deep_link_headers" | grep -qi '^cache-control:.*no-store'
+          printf '%s' "$deep_link_headers" | grep -qi '^content-security-policy:'
+          asset_path="$(sed -n 's/.*src="\([^"]*\/assets\/[^"]*\.js\)".*/\1/p' /tmp/folioharbor-index.html | head -n 1)"
+          test -n "$asset_path"
+          asset_headers="$(curl --fail --silent --show-error --dump-header - --output /dev/null \
+            "http://127.0.0.1:8080${asset_path}")"
+          printf '%s' "$asset_headers" | grep -qi '^cache-control:.*max-age=31536000.*immutable'
           docker compose -f deploy/compose.yaml ps --all \
             --format 'table {{.Service}}\t{{.State}}\t{{.Health}}\t{{.ExitCode}}' \
             > container-smoke-status.txt

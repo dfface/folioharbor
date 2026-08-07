@@ -212,6 +212,23 @@ async fn capacity_is_checked_before_staging_append_and_promotion() {
     );
 }
 
+#[tokio::test]
+async fn configured_free_reserve_is_the_write_floor() {
+    let root = TempDir::new().expect("temporary root");
+    let capacity = FakeCapacity::new(63);
+    let store = LocalBlobStore::with_capacity_and_reserve(root.path(), capacity.clone(), 64);
+    let staging = StorageKey::from_opaque(format!("staging:{}", "a".repeat(64)));
+
+    assert!(store.create_staging_for(&staging).await.is_err());
+    capacity.set(64);
+    store
+        .create_staging_for(&staging)
+        .await
+        .expect("the configured reserve permits an empty staging file");
+    capacity.set(67);
+    assert!(store.append(&staging, b"four").await.is_err());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn promotion_does_not_follow_an_internal_directory_symlink() {
