@@ -1,4 +1,6 @@
 node_modules/
 web/dist/
 web/.vite/
+web/playwright-report/
+web/test-results/
 *.tsbuildinfo

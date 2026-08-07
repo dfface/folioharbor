@@ -82,6 +82,7 @@ struct LoginResponse {
 }
 #[derive(Serialize)]
 struct SessionResponse {
+    user_id: String,
     session_id: String,
     is_current: bool,
     status: &'static str,
@@ -329,8 +330,9 @@ async fn current_session(
     Extension(problem): Extension<ProblemContext>,
     AuthenticatedActor(actor): AuthenticatedActor,
 ) -> Response {
+    let user_id = actor.user_id;
     match state.current_session.current_session(actor).await {
-        Ok(session) => Json(to_response(session)).into_response(),
+        Ok(session) => Json(to_response(user_id, session)).into_response(),
         Err(error) => problem_response(&error, &problem),
     }
 }
@@ -339,10 +341,15 @@ async fn list_sessions(
     Extension(problem): Extension<ProblemContext>,
     AuthenticatedActor(actor): AuthenticatedActor,
 ) -> Response {
+    let user_id = actor.user_id;
     match state.list_sessions.list_sessions(actor).await {
-        Ok(sessions) => {
-            Json(sessions.into_iter().map(to_response).collect::<Vec<_>>()).into_response()
-        }
+        Ok(sessions) => Json(
+            sessions
+                .into_iter()
+                .map(|session| to_response(user_id, session))
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
         Err(error) => problem_response(&error, &problem),
     }
 }
@@ -362,8 +369,9 @@ async fn revoke_session(
         Err(error) => problem_response(&error, &problem),
     }
 }
-fn to_response(session: SafeSession) -> SessionResponse {
+fn to_response(user_id: UserId, session: SafeSession) -> SessionResponse {
     SessionResponse {
+        user_id: user_id.as_uuid().to_string(),
         session_id: session.session_id.as_uuid().to_string(),
         is_current: session.is_current,
         status: match session.status {

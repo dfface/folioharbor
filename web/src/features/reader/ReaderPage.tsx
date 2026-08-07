@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams } from "react-router-dom";
 
 import { ApiProblem, isAbortError } from "../../api/problem";
+import { useSession } from "../auth/session";
 import {
   authorizedResourceHref,
   getPublicationManifest,
@@ -14,6 +15,7 @@ import {
   type PublicationManifest,
 } from "./api";
 import { createLocator, type Locator } from "./locator";
+import { containModalFocus } from "./modal";
 import {
   browserProgressClock,
   getOrCreateDeviceId,
@@ -72,6 +74,8 @@ function linkBase(href: string): string {
 export function ReaderPage() {
   const { t } = useTranslation();
   const { itemId = "" } = useParams();
+  const session = useSession();
+  const accountId = session.status === "authenticated" ? session.session.user_id : null;
   const [manifest, setManifest] = useState<PublicationManifest | null>(null);
   const [currentLink, setCurrentLink] = useState<PublicationLink | null>(null);
   const [resource, setResource] = useState<Blob | null>(null);
@@ -80,6 +84,7 @@ export function ReaderPage() {
   const [settings, setSettings] = useState(readSettings);
   const [progress, setProgress] = useState<ProgressState>({ status: "idle", version: 0 });
   const tocButtonRef = useRef<HTMLButtonElement>(null);
+  const restoreTocFocusRef = useRef(false);
   const frameRef = useRef<HTMLIFrameElement>(null);
   const progressRef = useRef<ProgressSync | null>(null);
   const reducedMotion = useMemo(
@@ -119,10 +124,11 @@ export function ReaderPage() {
   }, [currentLink, itemId]);
 
   useEffect(() => {
-    if (manifest === null) {
+    if (manifest === null || accountId === null) {
       return;
     }
     const sync = new ProgressSync({
+      accountId,
       api: readerProgressApi,
       clock: browserProgressClock,
       deviceId: getOrCreateDeviceId(localStorage),
@@ -177,7 +183,7 @@ export function ReaderPage() {
         progressRef.current = null;
       }
     };
-  }, [itemId, manifest]);
+  }, [accountId, itemId, manifest]);
 
   const changeSettings = useCallback((nextSettings: ReaderSettings) => {
     setSettings(nextSettings);
@@ -215,6 +221,18 @@ export function ReaderPage() {
       navigate(link);
     }
   }, [manifest, navigate]);
+  const closeToc = useCallback(() => {
+    restoreTocFocusRef.current = true;
+    setTocOpen(false);
+  }, []);
+  useLayoutEffect(() => {
+    if (!tocOpen && restoreTocFocusRef.current) {
+      restoreTocFocusRef.current = false;
+      tocButtonRef.current?.focus();
+    }
+  }, [tocOpen]);
+  const progressConflict = progress.status === "conflict";
+  const modalOpen = tocOpen || progressConflict;
 
   if (error !== null) {
     const message = error === "inaccessible"
@@ -230,6 +248,9 @@ export function ReaderPage() {
 
   return (
     <section aria-labelledby="reader-title" onKeyDown={(event) => {
+      if (modalOpen) {
+        return;
+      }
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) {
         return;
       }
@@ -239,44 +260,50 @@ export function ReaderPage() {
         navigateToIndex(currentIndex + 1);
       }
     }}>
-      <h3 id="reader-title">{manifest.metadata.title}</h3>
-      <div>
-        <button ref={tocButtonRef} type="button" onClick={() => { setTocOpen(true); }}>{t("reader.toc")}</button>{" "}
-        <button
-          type="button"
-          disabled={currentIndex <= 0}
-          onClick={() => { navigateToIndex(currentIndex - 1); }}
-        >
-          {t("reader.previous")}
-        </button>{" "}
-        <button
-          type="button"
-          disabled={currentIndex < 0 || currentIndex >= manifest.readingOrder.length - 1}
-          onClick={() => { navigateToIndex(currentIndex + 1); }}
-        >
-          {t("reader.next")}
-        </button>
+      <div inert={modalOpen ? true : undefined} aria-hidden={modalOpen ? true : undefined}>
+        <h3 id="reader-title">{manifest.metadata.title}</h3>
+        <div>
+          <button ref={tocButtonRef} type="button" onClick={() => { setTocOpen(true); }}>{t("reader.toc")}</button>{" "}
+          <button
+            type="button"
+            disabled={currentIndex <= 0}
+            onClick={() => { navigateToIndex(currentIndex - 1); }}
+          >
+            {t("reader.previous")}
+          </button>{" "}
+          <button
+            type="button"
+            disabled={currentIndex < 0 || currentIndex >= manifest.readingOrder.length - 1}
+            onClick={() => { navigateToIndex(currentIndex + 1); }}
+          >
+            {t("reader.next")}
+          </button>
+        </div>
+        <ReadingSettings {...settings} onChange={changeSettings} />
+        {progressConflict ? null : (
+          <ProgressStatus progress={progress} onResolve={(choice) => { void progressRef.current?.resolveConflict(choice); }} />
+        )}
+        {resource === null ? <p role="status" aria-live="polite">{t("reader.loadingResource")}</p> : (
+          <ReaderFrame
+            ref={frameRef}
+            blob={resource}
+            flow={settings.flow}
+            fontScale={settings.fontScale}
+            reducedMotion={reducedMotion}
+            title={t("reader.frameTitle", { title: manifest.metadata.title })}
+          />
+        )}
       </div>
       {tocOpen ? (
         <TableOfContents
           links={manifest.toc}
-          onClose={() => { setTocOpen(false); }}
+          onClose={closeToc}
           onNavigate={navigate}
-          returnFocusRef={tocButtonRef}
         />
       ) : null}
-      <ReadingSettings {...settings} onChange={changeSettings} />
-      <ProgressStatus progress={progress} onResolve={(choice) => { void progressRef.current?.resolveConflict(choice); }} />
-      {resource === null ? <p role="status" aria-live="polite">{t("reader.loadingResource")}</p> : (
-        <ReaderFrame
-          ref={frameRef}
-          blob={resource}
-          flow={settings.flow}
-          fontScale={settings.fontScale}
-          reducedMotion={reducedMotion}
-          title={t("reader.frameTitle", { title: manifest.metadata.title })}
-        />
-      )}
+      {progressConflict ? (
+        <ProgressStatus progress={progress} onResolve={(choice) => { void progressRef.current?.resolveConflict(choice); }} />
+      ) : null}
     </section>
   );
 }
@@ -304,7 +331,12 @@ function ProgressStatus({
   }, [progress.status]);
   if (progress.status === "conflict") {
     return (
-      <div role="dialog" aria-modal="true" aria-label={t("reader.progressConflict") }>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("reader.progressConflict")}
+        onKeyDown={containModalFocus}
+      >
         <p>{t("reader.globalPosition", { percentage: progressPercentage(progress.global.locator) })}</p>
         <p>{t("reader.devicePosition", { percentage: progressPercentage(progress.device.locator) })}</p>
         <button ref={firstChoiceRef} type="button" onClick={() => { onResolve("global"); }}>{t("reader.useGlobal")}</button>{" "}

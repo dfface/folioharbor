@@ -474,6 +474,8 @@ export interface components {
         };
         Session: {
             /** Format: uuid */
+            user_id: string;
+            /** Format: uuid */
             session_id: string;
             is_current: boolean;
             /** @enum {string} */
@@ -653,6 +655,11 @@ export interface components {
             updatedAt: string | null;
         };
         UpdateReadingProgressRequest: {
+            /**
+             * Format: uuid
+             * @description Stable authenticated user identifier; the server rejects the mutation if it differs from the current session actor
+             */
+            accountId: string;
             /** Format: uuid */
             deviceId: string;
             /** Format: uuid */
@@ -863,6 +870,7 @@ export interface components {
             content: {
                 /**
                  * @example {
+                 *       "user_id": "018f47b5-58b4-7ba6-9a3a-d9f41f17a26d",
                  *       "session_id": "018f47b5-58b4-7ba6-9a3a-d9f41f17a26e",
                  *       "is_current": true,
                  *       "status": "active"
@@ -880,6 +888,7 @@ export interface components {
                 /**
                  * @example [
                  *       {
+                 *         "user_id": "018f47b5-58b4-7ba6-9a3a-d9f41f17a26d",
                  *         "session_id": "018f47b5-58b4-7ba6-9a3a-d9f41f17a26e",
                  *         "is_current": true,
                  *         "status": "active"

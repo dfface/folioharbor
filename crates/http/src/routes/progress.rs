@@ -15,7 +15,7 @@ use folioharbor_application::{
     reader::UpdateReadingProgressCommand,
 };
 use folioharbor_domain::{
-    id::{ContentUnitId, DeviceId, ManifestationId, PublicationPackageId, RequestId},
+    id::{ContentUnitId, DeviceId, ManifestationId, PublicationPackageId, RequestId, UserId},
     reader::{
         DeviceReadingState, LocatorExtensionValue, LocatorExtensions, LocatorLocations,
         LocatorText, ReadingProgress, ReadingUpdateOutcome, ReadiumLocator,
@@ -42,6 +42,7 @@ pub fn router() -> Router<AppState> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateBody {
+    account_id: String,
     device_id: String,
     client_mutation_id: String,
     base_version: u64,
@@ -183,6 +184,18 @@ async fn put_progress(
         Ok(v) => v,
         Err(e) => return private_no_store(problem_response(&e, &context)),
     };
+    let account_id = match parse_uuid(&body.account_id, "account_id") {
+        Ok(value) => UserId::from_uuid(value),
+        Err(error) => return private_no_store(problem_response(&error, &context)),
+    };
+    if account_id != actor.user_id {
+        return private_no_store(problem_response(
+            &AppError::Forbidden {
+                code: "progress_account_mismatch",
+            },
+            &context,
+        ));
+    }
     let header_version = match parse_if_match(&headers) {
         Ok(v) => v,
         Err(e) => return private_no_store(problem_response(&e, &context)),

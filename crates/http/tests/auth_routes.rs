@@ -514,6 +514,10 @@ async fn unsafe_authenticated_route_requires_matching_csrf_but_safe_route_does_n
         .await
         .expect("response");
     assert_eq!(safe.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(safe).await["user_id"],
+        actor().user_id.as_uuid().to_string()
+    );
     let denied = app
         .clone()
         .oneshot(

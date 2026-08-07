@@ -2,49 +2,45 @@
 
 ## Status
 
-Implemented the Task 21 reader vertical slice. The Web application now opens an Item's Readium-style publication manifest, validates every publication link against that Item's opaque authorized resource route, renders fetched publication bytes only through a privilege-free sandboxed Blob iframe, and exposes keyboard-accessible navigation and reading preferences. Reading progress is handled by a React-independent state machine with stable device identity, ordered offline retry, idempotent mutation reuse, bounded lifecycle delivery, explicit conflict choices, and fail-closed access-loss behavior.
+Implemented the Task 21 reader vertical slice and closed every P1/P2 finding from the independent review. The Web application validates publication links against the selected Item's opaque resource route, renders publication bytes only in a privilege-free sandboxed Blob iframe, applies real continuous/paginated typography inside that isolated document, traps modal focus, and synchronizes account-scoped progress through explicit conflict choices.
 
-No server or OpenAPI extension was necessary: the Task 14/15 manifest, resource, Locator, progress, and conflict contracts already covered this slice. The only shared client extension is an optional Fetch `keepalive` flag for bounded visibility/pagehide delivery.
+The review repair extends the shared auth/progress contract. A current session now exposes its stable `user_id`; every progress mutation carries that value as `accountId`; and the server rejects a mutation whose account differs from the currently authenticated actor. This complements account-scoped client persistence and prevents a bounded unload request created under account A from being accepted with account B's later cookies.
 
 ## RED evidence
 
-Reader tests were introduced before the route and reader modules:
+The original reader and progress suites were introduced before their production modules. Their initial runs failed on the missing route, isolated frame, navigation, settings, resource states, security validation, state machine, and lifecycle behavior.
 
-- the first run failed because `locator.ts` did not exist;
-- after the minimal Locator helper, five of six reader scenarios failed because the reader route, isolated frame, navigation, settings, resource states, and security validation did not exist;
-- saved-progress and conflict-UI tests then failed until `ReaderPage` subscribed to the progress state machine;
-- the conflict dialog autofocus assertion failed until the first explicit choice received focus.
+The review repairs added regressions before implementation:
 
-Progress synchronization tests were also written before `ProgressSync.ts`:
+- five progress tests failed because pending data was not account-scoped, a delayed startup GET could overwrite newer accepted state, online recovery did not retry the initial GET, and conflict resolution discarded a newer queued Locator;
+- three reader tests failed because background shortcuts remained active behind the TOC, Shift+Tab could escape dialogs, and flow/font settings did not alter publication layout;
+- the HTTP account-mismatch test returned 422 instead of the required private 403, while the OpenAPI regression showed `accountId` was absent;
+- the first real Chromium run caught deferred focus restoration while the background was still inert; the first broad Vitest run also proved the Playwright and unit-test collection boundaries needed to be separated.
 
-- the first run failed because the state-machine module did not exist;
-- after the initial implementation, the stable-device-ID check exposed an overly restrictive UUID validator;
-- a lifecycle race regression first observed one ordinary request instead of the required bounded duplicate of the exact in-flight mutation, then passed after bounded lifecycle delivery reused that command and mutation ID.
-
-The RED/GREEN cycles covered two devices sharing one fake account, including the deliberately smaller device position winning after an explicit user choice. No implementation or assertion resolves a conflict using maximum percentage.
+Each of those failures was observed before its corresponding implementation change. Conflict tests continue to use a deliberately smaller device percentage so no implementation can pass by selecting the maximum percentage.
 
 ## Delivered behavior
 
-- Nested `/libraries/:libraryId/items/:itemId/read` route using the existing authenticated library shell.
-- Typed manifest/progress DTOs from `web/src/api/generated.ts`; no parallel hand-written server schema.
-- Same-origin, exact-Item resource allowlist with opaque resource IDs, no queries, and validation before any publication resource fetch.
-- Sanitized bytes fetched with credentials and loaded through revocable Blob URLs.
-- `<iframe sandbox="">` with no scripts, forms, popups, top-navigation, or same-origin privilege; publication HTML is never inserted into the parent DOM.
-- Opaque-link TOC and previous/next navigation, arrow-key navigation, Escape close, initial modal focus, and focus return.
-- Reduced-motion behavior plus persisted font scale and paginated/continuous-flow preferences.
-- Readium Locator reporting independent of locale and DOM selectors/identity.
-- Loading, resource failure, unsafe-publication, and access-revoked states with English and Simplified Chinese copy.
-- UI-independent `ProgressSync` states: `idle`, `dirty`, `saving`, `synced`, `offline`, `conflict`, and `inaccessible`.
-- Debounced writes, monotonically accepted versions, exact mutation/base-version retry, ordered offline replay, and online retry.
-- Visibility/pagehide bounded flush. If an ordinary write is already in flight, one bounded delivery reuses the exact command and mutation ID so the server's idempotency contract remains authoritative.
-- Stable, resettable per-install `device_id` stored only as client synchronization metadata and never treated as authentication.
-- Bounded persistence: at most 32 pending positions and at most 64 KiB per manifestation/device record; only device ID, version, and safe-retry mutation data are stored.
-- Explicit account/device conflict dialog showing both percentages. Choosing the account position performs no write; choosing the device position issues a new mutation against the current global version, even when its percentage is smaller.
-- Permission loss transitions to `inaccessible`, removes reader content, and preserves the pending retry record rather than silently dropping local progress.
+- Nested `/libraries/:libraryId/items/:itemId/read` route in the authenticated library shell.
+- Typed manifest, session, and progress DTOs generated from `openapi/folioharbor-v1.yaml`.
+- Same-origin exact-Item resource allowlist with opaque resource IDs, no query strings, and validation before any publication fetch.
+- Sanitized publication bytes loaded through revocable Blob URLs in `<iframe sandbox="">`; content is never inserted into the parent DOM.
+- Real isolated-document layout: continuous vertical overflow or paginated CSS columns/horizontal snap, plus actual body font scaling and reduced-motion scroll behavior.
+- Opaque-link TOC and previous/next navigation, arrow-key navigation, Escape close, focus containment in TOC/conflict dialogs, post-close focus restoration, and an inert/`aria-hidden` reader background while a modal is open.
+- Readium Locator reporting independent of locale and DOM identity.
+- Loading, resource-failure, unsafe-publication, and access-revoked states with English and Simplified Chinese copy.
+- React-independent progress states: `idle`, `dirty`, `saving`, `synced`, `offline`, `conflict`, and `inaccessible`.
+- Account-scoped persistence key and payload using authenticated `user_id`, manifestation ID, and install/device ID. Unscoped legacy records are ignored and removed.
+- Server-side account binding on progress PUT, with private/no-store `403 progress_account_mismatch` before any progress command is applied.
+- Debounced ordered writes, monotonically accepted versions, exact mutation/base retry, bounded lifecycle delivery, and online recovery that repeats a failed initial GET before replaying writes.
+- Startup-read revision gating: a late GET cannot regress a newer accepted PUT/conflict/access-loss state.
+- Conflict choices preserve and rebase a newer queued Locator for both global and device choices; choosing the device state still issues a fresh mutation against the authoritative version.
+- Bounded persistence: no more than 32 pending positions and 64 KiB per account/manifestation/device record.
+- Permission loss removes reader content while retaining the account-scoped retry record.
 
 ## GREEN evidence
 
-Focused Task 21 suite:
+Focused Task 21 unit/component suite:
 
 ```text
 pnpm --dir web exec vitest run \
@@ -52,21 +48,19 @@ pnpm --dir web exec vitest run \
   src/features/reader/progress-sync.test.ts
 EXIT 0
 Test Files 2 passed (2)
-Tests 16 passed (16)
+Tests 21 passed (21)
 ```
 
-All Web tests, run in isolation after an intentionally parallel gate run caused unrelated short UI timeouts:
+The component suite was repeated three times after hardening its asynchronous layout assertion; all three runs passed 8/8 reader tests.
+
+Complete Web suite and production checks:
 
 ```text
-pnpm --dir web test -- --run
+pnpm --dir web exec vitest run
 EXIT 0
 Test Files 6 passed (6)
-Tests 62 passed (62)
-```
+Tests 67 passed (67)
 
-Static and production checks:
-
-```text
 pnpm --dir web lint
 EXIT 0
 
@@ -75,28 +69,51 @@ EXIT 0
 
 pnpm --dir web build
 EXIT 0
-149 modules transformed
+151 modules transformed
+```
+
+Real-browser coverage:
+
+```text
+pnpm --dir web exec playwright test
+EXIT 0
+4 passed (10.1s)
+```
+
+The Chromium suite verifies computed layout and scroll metrics, empty-sandbox parent isolation, Blob revocation, modal focus containment/background shortcut blocking, access loss, a stale conflict across two isolated browser contexts sharing one account, same-install account replacement, and initial-GET online recovery.
+
+Changed HTTP contracts and routes:
+
+```text
+cargo test -p folioharbor-http \
+  --test reader_routes --test auth_routes --test openapi_contract
+EXIT 0
+reader_routes: 14 passed
+auth_routes: 12 passed
+openapi_contract: 4 passed
+
+cargo clippy -p folioharbor-http \
+  --lib --test auth_routes --test reader_routes --test openapi_contract \
+  --no-deps -- -D warnings -A clippy::struct_excessive_bools
+EXIT 0
+
+cargo fmt --all -- --check
+EXIT 0
+```
+
+Generated-client and whitespace checks:
+
+```text
+pnpm --dir web generate-api
+generated file SHA unchanged
 
 git diff --check
 EXIT 0
 ```
 
-Generated-client stability:
+## Verification boundaries
 
-```text
-pnpm --dir web generate-api
-git diff --exit-code -- web/src/api/generated.ts
-EXIT 0
-```
-
-Accessibility and security assertions in the reader component suite report zero axe violations and verify the empty iframe sandbox, prohibited sandbox privileges, Blob source, opaque authorized resource requests, parent-DOM isolation, modal focus, Escape handling, and focus return.
-
-## Browser-harness boundary
-
-The repository does not currently install Playwright or another multi-context browser-test dependency (`pnpm exec playwright --version` is unavailable). Per Task 23's ownership of the Playwright accessibility/security harness, Task 21 did not add a one-off browser dependency or duplicate that infrastructure. The shared-account/two-device protocol behavior is covered now by the production `ProgressSync` state machine against one shared fake API; the real two-isolated-browser-context scenario remains for the Task 23 harness.
-
-## Concerns and follow-up
-
-- axe-core passes its asserted zero-violation scan, but jsdom prints its existing `HTMLCanvasElement.getContext` not-implemented diagnostic while evaluating color contrast. A real-browser axe pass in Task 23 will remove that environment limitation.
-- React 19 prints a non-failing test-environment `act`/Suspense diagnostic while the native visibility event triggers an asynchronous conflict response. The test awaits the resulting dialog and passes; production behavior is covered by both the component assertion and the UI-independent bounded-flush tests.
-- The sandbox deliberately omits `allow-same-origin`. Reading-flow and font preferences therefore operate at the frame shell instead of mutating publication DOM, preserving the stronger isolation boundary.
+- `cargo test --workspace` reaches the existing `folioharbor-api/tests/upload_composition.rs` database integration test and stops because PostgreSQL test configuration is absent. `cargo test -p folioharbor-http` similarly reaches an existing catalog database integration case after its unit/auth tests pass. No database-backed code changed in Task 21; all affected route and contract suites pass.
+- Repository-wide pedantic Clippy is already blocked by pre-existing excessive-boolean capability DTOs and an unrelated `items_after_statements` finding. The changed HTTP library and three changed test targets pass Clippy with only the pre-existing capability-DTO lint allowed.
+- jsdom continues to print its known canvas diagnostic while axe evaluates color contrast, plus one React 19 async test-environment diagnostic. The assertions pass, and the security/layout/focus behaviors now also run in real Chromium.
+- During the account-replacement Playwright case, Chromium's unload keepalive bypasses Playwright routing and reaches the Vite proxy, which logs an expected connection refusal because no backend is running. The production defense for that exact race is covered at the real HTTP boundary: the mutation's `accountId` must equal the authenticated actor.

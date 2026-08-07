@@ -1,16 +1,16 @@
-import { useEffect, useRef, type RefObject } from "react";
+import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PublicationLink } from "./api";
+import { containModalFocus } from "./modal";
 
 interface TableOfContentsProps {
   links: PublicationLink[];
   onClose: () => void;
   onNavigate: (link: PublicationLink) => void;
-  returnFocusRef: RefObject<HTMLButtonElement | null>;
 }
 
-export function TableOfContents({ links, onClose, onNavigate, returnFocusRef }: TableOfContentsProps) {
+export function TableOfContents({ links, onClose, onNavigate }: TableOfContentsProps) {
   const { t } = useTranslation();
   const closeRef = useRef<HTMLButtonElement>(null);
 
@@ -20,7 +20,6 @@ export function TableOfContents({ links, onClose, onNavigate, returnFocusRef }: 
 
   function close() {
     onClose();
-    returnFocusRef.current?.focus();
   }
 
   return (
@@ -32,7 +31,9 @@ export function TableOfContents({ links, onClose, onNavigate, returnFocusRef }: 
         if (event.key === "Escape") {
           event.preventDefault();
           close();
+          return;
         }
+        containModalFocus(event);
       }}
     >
       <button ref={closeRef} type="button" onClick={close}>{t("reader.closeToc")}</button>

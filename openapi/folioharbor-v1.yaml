@@ -643,13 +643,13 @@ components:
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Session'}
-          example: {session_id: 018f47b5-58b4-7ba6-9a3a-d9f41f17a26e, is_current: true, status: active}
+          example: {user_id: 018f47b5-58b4-7ba6-9a3a-d9f41f17a26d, session_id: 018f47b5-58b4-7ba6-9a3a-d9f41f17a26e, is_current: true, status: active}
     SessionList:
       description: Safe metadata for sessions owned by the authenticated user
       content:
         application/json:
           schema: {type: array, items: {$ref: '#/components/schemas/Session'}}
-          example: [{session_id: 018f47b5-58b4-7ba6-9a3a-d9f41f17a26e, is_current: true, status: active}]
+          example: [{user_id: 018f47b5-58b4-7ba6-9a3a-d9f41f17a26d, session_id: 018f47b5-58b4-7ba6-9a3a-d9f41f17a26e, is_current: true, status: active}]
     UploadAccepted:
       description: Upload accepted; poll the Location status resource. Retrying content after failed/interrupted receipt reuses the same upload_id.
       headers:
@@ -693,8 +693,9 @@ components:
       properties: {user_id: {type: string, format: uuid}, session_id: {type: string, format: uuid}}
     Session:
       type: object
-      required: [session_id, is_current, status]
+      required: [user_id, session_id, is_current, status]
       properties:
+        user_id: {type: string, format: uuid}
         session_id: {type: string, format: uuid}
         is_current: {type: boolean}
         status: {type: string, enum: [active, idle_expired, absolute_expired, revoked]}
@@ -877,8 +878,9 @@ components:
     UpdateReadingProgressRequest:
       type: object
       additionalProperties: false
-      required: [deviceId, clientMutationId, baseVersion, locator]
+      required: [accountId, deviceId, clientMutationId, baseVersion, locator]
       properties:
+        accountId: {type: string, format: uuid, description: Stable authenticated user identifier; the server rejects the mutation if it differs from the current session actor}
         deviceId: {type: string, format: uuid}
         clientMutationId: {type: string, format: uuid}
         baseVersion: {type: integer, minimum: 0}

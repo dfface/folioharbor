@@ -398,8 +398,14 @@ impl ProgressApi for Reader {
     }
 }
 
+fn allowed_user() -> UserId {
+    UserId::from_uuid(
+        Uuid::parse_str("018f47b5-58b4-7ba6-9a3a-d9f41f17a101").expect("allowed user UUID"),
+    )
+}
+
 fn app() -> (axum::Router, ItemId, ManifestationId) {
-    let allowed = UserId::new();
+    let allowed = allowed_user();
     let item = ItemId::new();
     let manifestation = ManifestationId::new();
     let identity = Arc::new(Identity(HashMap::from([
@@ -837,6 +843,7 @@ async fn progress_routes_return_etag_and_correlated_safe_conflict_positions() {
     );
 
     let body = serde_json::json!({
+        "accountId":allowed_user().as_uuid().to_string(),
         "deviceId":DeviceId::new().as_uuid().to_string(),"clientMutationId":Uuid::now_v7().to_string(),"baseVersion":2,
         "locator":{"href":"OPS/chapter.xhtml","type":"application/xhtml+xml","locations":{"progression":0.9},"extensions":{"version":1,"values":{}}}
     });
@@ -913,6 +920,7 @@ async fn progress_empty_and_success_responses_are_private_and_not_stored() {
     );
 
     let body = serde_json::json!({
+        "accountId": allowed_user().as_uuid().to_string(),
         "deviceId":DeviceId::new().as_uuid().to_string(),
         "clientMutationId":Uuid::now_v7().to_string(),
         "baseVersion":2,
@@ -948,7 +956,7 @@ async fn progress_empty_and_success_responses_are_private_and_not_stored() {
 #[tokio::test]
 async fn progress_put_requires_if_match_to_equal_json_base_version() {
     let (app, _, manifestation) = app();
-    let body = serde_json::json!({"deviceId":DeviceId::new().as_uuid().to_string(),"clientMutationId":Uuid::now_v7().to_string(),"baseVersion":2,"locator":{"href":"OPS/chapter.xhtml","locations":{"progression":0.5},"extensions":{"version":1,"values":{}}}});
+    let body = serde_json::json!({"accountId":allowed_user().as_uuid().to_string(),"deviceId":DeviceId::new().as_uuid().to_string(),"clientMutationId":Uuid::now_v7().to_string(),"baseVersion":2,"locator":{"href":"OPS/chapter.xhtml","locations":{"progression":0.5},"extensions":{"version":1,"values":{}}}});
     let request = Request::builder()
         .method("PUT")
         .uri(format!(
@@ -978,9 +986,63 @@ async fn progress_put_requires_if_match_to_equal_json_base_version() {
 }
 
 #[tokio::test]
+async fn progress_put_rejects_an_account_that_differs_from_the_authenticated_actor() {
+    let (app, _, manifestation) = app();
+    let body = serde_json::json!({
+        "accountId": UserId::new().as_uuid().to_string(),
+        "deviceId": DeviceId::new().as_uuid().to_string(),
+        "clientMutationId": Uuid::now_v7().to_string(),
+        "baseVersion": 2,
+        "locator": {
+            "href": "OPS/chapter.xhtml",
+            "locations": {"progression": 0.5},
+            "extensions": {"version": 1, "values": {}}
+        }
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/api/v1/manifestations/{}/progress",
+                    manifestation.as_uuid()
+                ))
+                .header("Cookie", "folioharbor_session=allowed")
+                .header("X-CSRF-Token", "reader-csrf")
+                .header("If-Match", "\"progress-v2\"")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        response
+            .headers()
+            .get(CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("private, no-store")
+    );
+    let body: serde_json::Value = serde_json::from_slice(
+        &response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes(),
+    )
+    .expect("json");
+    assert_eq!(body["code"], "progress_account_mismatch");
+    assert!(!body.to_string().contains("OPS/chapter.xhtml"));
+}
+
+#[tokio::test]
 async fn progress_conflict_safely_represents_an_absent_global_position() {
     let (app, _, manifestation) = app();
     let body = serde_json::json!({
+        "accountId": allowed_user().as_uuid().to_string(),
         "deviceId":DeviceId::new().as_uuid().to_string(),
         "clientMutationId":Uuid::now_v7().to_string(),
         "baseVersion":9,
@@ -1031,6 +1093,7 @@ async fn progress_conflict_safely_represents_an_absent_global_position() {
 async fn progress_mutation_mismatch_returns_only_correlated_problem_details() {
     let (app, _, manifestation) = app();
     let body = serde_json::json!({
+        "accountId": allowed_user().as_uuid().to_string(),
         "deviceId":DeviceId::new().as_uuid().to_string(),
         "clientMutationId":Uuid::now_v7().to_string(),
         "baseVersion":2,
@@ -1081,6 +1144,7 @@ async fn progress_mutation_mismatch_returns_only_correlated_problem_details() {
 async fn progress_mutation_capacity_is_correlated_private_and_retryable() {
     let (app, _, manifestation) = app();
     let body = serde_json::json!({
+        "accountId": allowed_user().as_uuid().to_string(),
         "deviceId":DeviceId::new().as_uuid().to_string(),
         "clientMutationId":Uuid::now_v7().to_string(),
         "baseVersion":2,

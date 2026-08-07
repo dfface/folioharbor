@@ -1,6 +1,7 @@
 import { forwardRef, useEffect, useState } from "react";
 
 import type { ReadingFlow } from "./ReadingSettings";
+import { createLaidOutPublicationBlob } from "./publicationLayout";
 
 interface ReaderFrameProps {
   blob: Blob;
@@ -17,20 +18,30 @@ export const ReaderFrame = forwardRef<HTMLIFrameElement, ReaderFrameProps>(funct
   const [source, setSource] = useState<string | null>(null);
 
   useEffect(() => {
-    const objectUrl = URL.createObjectURL(blob);
-    setSource(objectUrl);
+    let active = true;
+    let objectUrl: string | null = null;
+    setSource(null);
+    void createLaidOutPublicationBlob(blob, { flow, fontScale, reducedMotion }).then((laidOut) => {
+      if (!active) {
+        return;
+      }
+      objectUrl = URL.createObjectURL(laidOut);
+      setSource(objectUrl);
+    });
     return () => {
-      URL.revokeObjectURL(objectUrl);
+      active = false;
+      if (objectUrl !== null) {
+        URL.revokeObjectURL(objectUrl);
+      }
     };
-  }, [blob]);
+  }, [blob, flow, fontScale, reducedMotion]);
 
   if (source === null) {
     return null;
   }
 
-  const scale = fontScale / 100;
   return (
-    <div style={{ maxWidth: "100%", overflow: flow === "continuous" ? "auto" : "hidden" }}>
+    <div style={{ maxWidth: "100%", overflow: "hidden" }}>
       <iframe
         ref={ref}
         data-font-scale={fontScale}
@@ -41,10 +52,8 @@ export const ReaderFrame = forwardRef<HTMLIFrameElement, ReaderFrameProps>(funct
         title={title}
         style={{
           border: 0,
-          height: `${String(Math.round(70 / scale))}vh`,
-          scrollBehavior: reducedMotion ? "auto" : "smooth",
-          width: `${String(100 / scale)}%`,
-          zoom: scale,
+          height: "70vh",
+          width: "100%",
         }}
       />
     </div>

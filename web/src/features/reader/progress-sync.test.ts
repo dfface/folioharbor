@@ -15,6 +15,8 @@ import {
 type ReadingProgress = components["schemas"]["ReadingProgress"];
 
 const manifestationId = "018f47b5-58b4-7ba6-9a3a-d9f41f17d001";
+const accountA = "018f47b5-58b4-7ba6-9a3a-d9f41f17a101";
+const accountB = "018f47b5-58b4-7ba6-9a3a-d9f41f17a102";
 const deviceA = "018f47b5-58b4-7ba6-9a3a-d9f41f17e001";
 const deviceB = "018f47b5-58b4-7ba6-9a3a-d9f41f17e002";
 
@@ -88,9 +90,10 @@ function mutationIds(prefix: string) {
 function createSync(
   api: ProgressApi,
   clock: ProgressClock,
-  options: { deviceId?: string; storage?: Storage; mutationPrefix?: string } = {},
+  options: { accountId?: string; deviceId?: string; storage?: Storage; mutationPrefix?: string } = {},
 ) {
   return new ProgressSync({
+    accountId: options.accountId ?? accountA,
     api,
     clock,
     debounceMs: 500,
@@ -100,6 +103,85 @@ function createSync(
     ...(options.storage === undefined ? {} : { storage: options.storage }),
   });
 }
+
+test("pending progress is partitioned by authenticated account on one installation", async () => {
+  const clock = new FakeClock();
+  const storage = new MemoryStorage();
+  const accountAApi: ProgressApi = {
+    get: () => Promise.resolve(null),
+    update: () => Promise.reject(new ProgressApiError("offline")),
+  };
+  const first = createSync(accountAApi, clock, { accountId: accountA, storage });
+  await first.start();
+  first.report(locator(0.2));
+  await first.flush();
+  expect(first.snapshot().status).toBe("offline");
+
+  const accountBRequests: ProgressUpdateRequest[] = [];
+  const accountBApi: ProgressApi = {
+    get: () => Promise.resolve(null),
+    update: (_manifestation, request) => {
+      accountBRequests.push(request);
+      return Promise.resolve({ kind: "updated", progress: progress(1, request.locator) });
+    },
+  };
+  const second = createSync(accountBApi, clock, { accountId: accountB, storage });
+  await second.start();
+
+  expect(accountBRequests).toEqual([]);
+  expect(second.snapshot()).toEqual({ status: "idle", version: 0 });
+  expect(Array.from({ length: storage.length }, (_, index) => storage.key(index))).toContain(
+    `folioharbor.reader.progress.v1:${accountA}:${manifestationId}:${deviceA}`,
+  );
+});
+
+test("a delayed initial read never regresses a newer accepted write", async () => {
+  const clock = new FakeClock();
+  let releaseGet: ((saved: ReadingProgress | null) => void) | undefined;
+  const delayedGet = new Promise<ReadingProgress | null>((resolve) => { releaseGet = resolve; });
+  const requests: ProgressUpdateRequest[] = [];
+  const api: ProgressApi = {
+    get: () => delayedGet,
+    update: (_manifestation, request) => {
+      requests.push(structuredClone(request));
+      return Promise.resolve({ kind: "updated", progress: progress(request.baseVersion + 1, request.locator) });
+    },
+  };
+  const sync = createSync(api, clock);
+  const starting = sync.start();
+  sync.report(locator(0.3));
+  await sync.flush();
+  expect(sync.snapshot()).toMatchObject({ status: "synced", version: 1, locator: locator(0.3) });
+
+  releaseGet?.(null);
+  await starting;
+  expect(sync.snapshot()).toMatchObject({ status: "synced", version: 1, locator: locator(0.3) });
+
+  sync.report(locator(0.4));
+  await sync.flush();
+  expect(requests.at(-1)).toMatchObject({ baseVersion: 1, locator: locator(0.4) });
+});
+
+test("online retry repeats a failed initial read before there is a local mutation", async () => {
+  const clock = new FakeClock();
+  let reads = 0;
+  const saved = progress(4, locator(0.7, "two"));
+  const api: ProgressApi = {
+    get: () => {
+      reads += 1;
+      return reads === 1 ? Promise.reject(new ProgressApiError("offline")) : Promise.resolve(saved);
+    },
+    update: () => Promise.reject(new Error("unexpected write")),
+  };
+  const sync = createSync(api, clock);
+  await sync.start();
+  expect(sync.snapshot()).toMatchObject({ status: "offline", version: 0 });
+
+  await sync.retry();
+
+  expect(reads).toBe(2);
+  expect(sync.snapshot()).toMatchObject({ status: "synced", version: 4, locator: saved.locator });
+});
 
 test("debounces dirty positions, advances accepted versions, and uses a bounded lifecycle flush", async () => {
   const clock = new FakeClock();
@@ -149,7 +231,7 @@ test("an offline retry reuses the exact mutation command and clears persistence 
   clock.advanceBy(500);
   await vi.waitFor(() => { expect(sync.snapshot().status).toBe("offline"); });
 
-  const persisted = storage.getItem(`folioharbor.reader.progress.v1:${manifestationId}:${deviceA}`);
+  const persisted = storage.getItem(`folioharbor.reader.progress.v1:${accountA}:${manifestationId}:${deviceA}`);
   expect(persisted).toContain(requests[0]?.clientMutationId);
   online = true;
   await sync.retry();
@@ -243,6 +325,60 @@ test("two devices expose stale global/device choices and choosing the smaller de
   expect(api.requests.at(-1)).toMatchObject({ baseVersion: 1, deviceId: deviceB, locator: locator(0.1) });
   expect(second.snapshot()).toMatchObject({ status: "synced", version: 2, locator: locator(0.1) });
 });
+
+test.each(["device", "global"] as const)(
+  "choosing %s after an in-flight conflict rebases the newer queued device position instead of dropping it",
+  async (choice) => {
+    const clock = new FakeClock();
+    const requests: ProgressUpdateRequest[] = [];
+    let releaseConflict: ((result: Awaited<ReturnType<ProgressApi["update"]>>) => void) | undefined;
+    const conflictResponse = new Promise<Awaited<ReturnType<ProgressApi["update"]>>>((resolve) => {
+      releaseConflict = resolve;
+    });
+    const api: ProgressApi = {
+      get: () => Promise.resolve(progress(1, locator(0.8))),
+      update: (_manifestation, request) => {
+        requests.push(structuredClone(request));
+        if (requests.length === 1) {
+          return conflictResponse;
+        }
+        return Promise.resolve({ kind: "updated", progress: progress(3, request.locator) });
+      },
+    };
+    const sync = createSync(api, clock);
+    await sync.start();
+    sync.report(locator(0.2));
+    const firstFlush = sync.flush();
+    await vi.waitFor(() => { expect(requests).toHaveLength(1); });
+    sync.report(locator(0.6, "two"));
+    releaseConflict?.({
+      kind: "conflict",
+      global: {
+        manifestationId,
+        locator: locator(0.8),
+        version: 2,
+        updatedAt: "2026-08-07T00:00:08Z",
+      },
+      device: {
+        deviceId: deviceA,
+        locator: locator(0.2),
+        updatedAt: "2026-08-07T00:00:09Z",
+      },
+    });
+    await firstFlush;
+
+    expect(sync.snapshot()).toMatchObject({
+      status: "conflict",
+      device: { locator: locator(0.6, "two") },
+      locator: locator(0.6, "two"),
+    });
+    await sync.resolveConflict(choice);
+
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toMatchObject({ baseVersion: 2, locator: locator(0.6, "two") });
+    expect(sync.snapshot()).toMatchObject({ status: "synced", version: 3, locator: locator(0.6, "two") });
+  },
+);
 
 test("choosing the global conflict position performs no write and updates the subscriber snapshot", async () => {
   const api = new SharedProgressApi();

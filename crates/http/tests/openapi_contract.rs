@@ -126,6 +126,46 @@ fn openapi_auth_operations_have_resolved_bodies_success_examples_and_actual_stat
 }
 
 #[test]
+fn session_contract_exposes_the_stable_authenticated_user_id() {
+    let source = fs::read_to_string(format!(
+        "{}/../../openapi/folioharbor-v1.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("OpenAPI document");
+    let document: Value = serde_yaml::from_str(&source).expect("valid OpenAPI YAML");
+
+    assert!(
+        document["components"]["schemas"]["Session"]["required"]
+            .as_sequence()
+            .expect("Session.required")
+            .contains(&Value::String("user_id".into()))
+    );
+    assert!(document["components"]["responses"]["CurrentSession"]["content"]
+        ["application/json"]["example"]["user_id"]
+        .as_str()
+        .is_some());
+}
+
+#[test]
+fn progress_mutations_require_the_stable_authenticated_account_id() {
+    let source = fs::read_to_string(format!(
+        "{}/../../openapi/folioharbor-v1.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("OpenAPI document");
+    let document: Value = serde_yaml::from_str(&source).expect("valid OpenAPI YAML");
+    let schema = &document["components"]["schemas"]["UpdateReadingProgressRequest"];
+
+    assert!(
+        schema["required"]
+            .as_sequence()
+            .expect("UpdateReadingProgressRequest.required")
+            .contains(&Value::String("accountId".into()))
+    );
+    assert_eq!(schema["properties"]["accountId"]["format"], "uuid");
+}
+
+#[test]
 fn openapi_uuid_path_parameters_document_correlated_malformed_value_problems() {
     let source = fs::read_to_string(format!(
         "{}/../../openapi/folioharbor-v1.yaml",

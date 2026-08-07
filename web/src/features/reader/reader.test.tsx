@@ -10,6 +10,7 @@ import { server } from "../../test/server";
 import { createLocator } from "./locator";
 
 const apiOrigin = "*";
+const userId = "018f47b5-58b4-7ba6-9a3a-d9f41f17a26d";
 const libraryId = "018f47b5-58b4-7ba6-9a3a-d9f41f17b001";
 const itemId = "018f47b5-58b4-7ba6-9a3a-d9f41f17c001";
 const manifestationId = "018f47b5-58b4-7ba6-9a3a-d9f41f17d001";
@@ -48,6 +49,24 @@ const manifest = {
 let createdObjectUrls: Blob[];
 let revokedObjectUrls: string[];
 
+function blobText(blob: Blob | undefined): Promise<string> {
+  if (blob === undefined) {
+    return Promise.reject(new Error("expected a reader Blob"));
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+      } else {
+        reject(new Error("Blob read failed"));
+      }
+    });
+    reader.addEventListener("error", () => { reject(reader.error ?? new Error("Blob read failed")); });
+    reader.readAsText(blob);
+  });
+}
+
 function problem(status: number, code: string) {
   return HttpResponse.json(
     {
@@ -66,7 +85,12 @@ function problem(status: number, code: string) {
 function installReaderHandlers(overrides: { manifest?: typeof manifest; resourceStatus?: number } = {}) {
   server.use(
     http.get(`${apiOrigin}/api/v1/auth/session`, () =>
-      HttpResponse.json({ session_id: "018f47b5-58b4-7ba6-9a3a-d9f41f17a26e", is_current: true, status: "active" }),
+      HttpResponse.json({
+        user_id: userId,
+        session_id: "018f47b5-58b4-7ba6-9a3a-d9f41f17a26e",
+        is_current: true,
+        status: "active",
+      }),
     ),
     http.get(`${apiOrigin}/api/v1/libraries`, () => HttpResponse.json([library])),
     http.get(`${apiOrigin}/api/v1/libraries/:libraryId`, () => HttpResponse.json(library)),
@@ -180,9 +204,21 @@ test("keyboard TOC navigation uses opaque links, revokes old object URLs, and re
   opener.focus();
   await user.keyboard("{Enter}");
   const dialog = screen.getByRole("dialog", { name: "Table of contents" });
-  expect(within(dialog).getByRole("button", { name: "Close table of contents" })).toHaveFocus();
+  const close = within(dialog).getByRole("button", { name: "Close table of contents" });
+  const chapterTwo = within(dialog).getByRole("button", { name: "Chapter two" });
+  expect(close).toHaveFocus();
 
-  within(dialog).getByRole("button", { name: "Chapter two" }).focus();
+  await user.keyboard("{ArrowRight}");
+  expect(screen.getByTitle("Safe Book reading content")).toHaveAttribute(
+    "src",
+    "blob:http://localhost/reader-1",
+  );
+  await user.keyboard("{Shift>}{Tab}{/Shift}");
+  expect(chapterTwo).toHaveFocus();
+  await user.keyboard("{Tab}");
+  expect(close).toHaveFocus();
+
+  chapterTwo.focus();
   await user.keyboard("{Enter}");
   await waitFor(() => { expect(screen.getByTitle("Safe Book reading content")).toHaveAttribute(
     "src",
@@ -206,12 +242,23 @@ test("reading settings honor reduced motion and persist font scaling and flow pr
   const frame = await screen.findByTitle("Safe Book reading content", {}, { timeout: 3_000 });
   expect(frame).toHaveAttribute("data-reduced-motion", "true");
   expect(frame).toHaveAttribute("data-reading-flow", "paginated");
+  expect(await blobText(createdObjectUrls[0])).toContain("column-width:");
+  expect(await blobText(createdObjectUrls[0])).toContain("overflow-x: auto");
 
   await user.selectOptions(screen.getByRole("combobox", { name: "Reading flow" }), "continuous");
   fireEvent.change(screen.getByRole("spinbutton", { name: "Font size" }), { target: { value: "150" } });
 
-  expect(frame).toHaveAttribute("data-reading-flow", "continuous");
-  expect(frame).toHaveAttribute("data-font-scale", "150");
+  let continuousMarkup = "";
+  await waitFor(async () => {
+    continuousMarkup = await blobText(createdObjectUrls.at(-1));
+    expect(continuousMarkup).toContain("font-size: 150%");
+  });
+  const updatedFrame = await screen.findByTitle("Safe Book reading content");
+
+  expect(updatedFrame).toHaveAttribute("data-reading-flow", "continuous");
+  expect(updatedFrame).toHaveAttribute("data-font-scale", "150");
+  expect(continuousMarkup).toContain("overflow-y: auto");
+  expect(continuousMarkup).not.toContain("column-width:");
   expect(JSON.parse(localStorage.getItem("folioharbor.reader.settings.v1") ?? "null")).toEqual({
     fontScale: 150,
     flow: "continuous",
@@ -362,10 +409,16 @@ test("stale progress displays explicit global/device choices and visibility flus
   const conflict = await screen.findByRole("dialog", { name: "Reading progress conflict" });
   expect(within(conflict).getByText("Account position: 80%")).toBeInTheDocument();
   expect(within(conflict).getByText("This device position: 50%")).toBeInTheDocument();
-  expect(within(conflict).getByRole("button", { name: "Use account position" })).toHaveFocus();
+  const accountChoice = within(conflict).getByRole("button", { name: "Use account position" });
+  const deviceChoice = within(conflict).getByRole("button", { name: "Use this device position" });
+  expect(accountChoice).toHaveFocus();
+  await user.keyboard("{Shift>}{Tab}{/Shift}");
+  expect(deviceChoice).toHaveFocus();
+  await user.keyboard("{Tab}");
+  expect(accountChoice).toHaveFocus();
   expect(requests[0]).toMatchObject({ keepalive: true, body: { baseVersion: 1 } });
 
-  await user.click(within(conflict).getByRole("button", { name: "Use this device position" }));
+  await user.click(deviceChoice);
   await screen.findByText("Progress saved on this account.");
   expect(requests).toHaveLength(2);
   expect(requests[1]?.body).toMatchObject({ baseVersion: 2, locator: { href: `${secondHref}#middle` } });

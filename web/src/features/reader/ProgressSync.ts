@@ -58,12 +58,14 @@ interface PendingPosition {
 }
 
 interface PersistedProgress {
+  accountId: string;
   deviceId: string;
   pending: PendingPosition[];
   version: number;
 }
 
 interface ProgressSyncOptions {
+  accountId: string;
   api: ProgressApi;
   clock: ProgressClock;
   debounceMs?: number;
@@ -81,8 +83,8 @@ const progressKeyPrefix = "folioharbor.reader.progress.v1:";
 const maximumPersistedBytes = 64 * 1024;
 const maximumPendingPositions = 32;
 
-function progressStorageKey(manifestationId: string, deviceId: string): string {
-  return `${progressKeyPrefix}${manifestationId}:${deviceId}`;
+function progressStorageKey(accountId: string, manifestationId: string, deviceId: string): string {
+  return `${progressKeyPrefix}${accountId}:${manifestationId}:${deviceId}`;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -114,7 +116,12 @@ function parsePending(value: unknown): PendingPosition | null {
   };
 }
 
-function readPersisted(storage: Storage | undefined, key: string, deviceId: string): PersistedProgress | null {
+function readPersisted(
+  storage: Storage | undefined,
+  key: string,
+  accountId: string,
+  deviceId: string,
+): PersistedProgress | null {
   if (storage === undefined) {
     return null;
   }
@@ -126,6 +133,7 @@ function readPersisted(storage: Storage | undefined, key: string, deviceId: stri
     const value: unknown = JSON.parse(raw);
     if (
       !isObject(value) ||
+      value.accountId !== accountId ||
       value.deviceId !== deviceId ||
       typeof value.version !== "number" ||
       !Number.isSafeInteger(value.version) ||
@@ -139,7 +147,7 @@ function readPersisted(storage: Storage | undefined, key: string, deviceId: stri
     if (pending.some((position) => position === null)) {
       return null;
     }
-    return { deviceId, pending: pending as PendingPosition[], version: value.version };
+    return { accountId, deviceId, pending: pending as PendingPosition[], version: value.version };
   } catch {
     return null;
   }
@@ -165,6 +173,7 @@ export function resetDeviceId(storage: Storage): void {
 }
 
 export class ProgressSync {
+  private readonly accountId: string;
   private readonly api: ProgressApi;
   private readonly clock: ProgressClock;
   private readonly debounceMs: number;
@@ -183,9 +192,13 @@ export class ProgressSync {
   private activeRequest: ProgressUpdateRequest | null = null;
   private boundedRetryMutationId: string | null = null;
   private conflict: { global: ConflictGlobalReadingProgress; device: DeviceReadingProgress } | null = null;
+  private initialRead: Promise<void> | null = null;
+  private initialReadStatus: "failed" | "loaded" | "loading" | "not_started" = "not_started";
+  private authoritativeRevision = 0;
   private disposed = false;
 
   constructor(options: ProgressSyncOptions) {
+    this.accountId = options.accountId;
     this.api = options.api;
     this.clock = options.clock;
     this.debounceMs = options.debounceMs ?? 750;
@@ -193,14 +206,20 @@ export class ProgressSync {
     this.manifestationId = options.manifestationId;
     this.mutationId = options.mutationId;
     this.storage = options.storage;
-    this.storageKey = progressStorageKey(this.manifestationId, this.deviceId);
-    const persisted = readPersisted(this.storage, this.storageKey, this.deviceId);
+    this.storageKey = progressStorageKey(this.accountId, this.manifestationId, this.deviceId);
+    const persisted = readPersisted(this.storage, this.storageKey, this.accountId, this.deviceId);
     if (persisted !== null) {
       this.currentVersion = persisted.version;
       this.pending = persisted.pending;
       if (this.pending.length > 0) {
-        this.state = { status: "offline", version: this.currentVersion };
+        this.currentLocator = this.pending.at(-1)?.locator;
+        this.state = this.positionState("offline");
       }
+    }
+    try {
+      this.storage?.removeItem(`${progressKeyPrefix}${this.manifestationId}:${this.deviceId}`);
+    } catch {
+      // Unsafe unscoped records are ignored even when browser storage cannot be cleaned up.
     }
   }
 
@@ -215,25 +234,9 @@ export class ProgressSync {
   }
 
   async start(): Promise<void> {
-    try {
-      const global = await this.api.get(this.manifestationId);
-      if (this.disposed) {
-        return;
-      }
-      if (global !== null) {
-        this.currentVersion = global.version;
-        this.currentLocator = global.locator;
-      }
-      if (this.pending.length === 0) {
-        this.transition(global === null
-          ? { status: "idle", version: 0 }
-          : { status: "synced", version: global.version, locator: global.locator });
-      } else {
-        this.transition(this.positionState("dirty"));
-        await this.flush();
-      }
-    } catch (error) {
-      this.transition(this.positionState(this.errorStatus(error)));
+    await this.loadInitialProgress();
+    if (this.initialReadStatus === "loaded" && this.pending.length > 0 && this.conflict === null) {
+      await this.flush();
     }
   }
 
@@ -294,8 +297,14 @@ export class ProgressSync {
     }
   }
 
-  retry(): Promise<void> {
-    return this.flush();
+  async retry(): Promise<void> {
+    if (this.initialReadStatus === "failed") {
+      await this.loadInitialProgress();
+      if (!this.initialProgressIsLoaded()) {
+        return;
+      }
+    }
+    await this.flush();
   }
 
   async resolveConflict(choice: ConflictChoice): Promise<void> {
@@ -304,15 +313,25 @@ export class ProgressSync {
     }
     const selected = this.conflict;
     this.conflict = null;
-    this.pending = [];
     this.currentVersion = selected.global.version;
+    this.currentLocator = choice === "global"
+      ? selected.global.locator ?? undefined
+      : selected.device.locator;
+    if (this.pending.length > 0) {
+      for (const pending of this.pending) {
+        delete pending.baseVersion;
+      }
+      this.currentLocator = this.pending.at(-1)?.locator ?? this.currentLocator;
+      this.persist();
+      this.transition(this.positionState("dirty"));
+      await this.flush();
+      return;
+    }
     if (choice === "global") {
-      this.currentLocator = selected.global.locator ?? undefined;
       this.persist();
       this.transition(this.positionState("synced"));
       return;
     }
-    this.currentLocator = selected.device.locator;
     this.pending.push({
       clientMutationId: this.mutationId(),
       createdAt: this.clock.now(),
@@ -339,6 +358,7 @@ export class ProgressSync {
       this.persist();
       this.transition(this.positionState("saving"));
       const request: ProgressUpdateRequest = {
+        accountId: this.accountId,
         baseVersion: next.baseVersion,
         clientMutationId: next.clientMutationId,
         deviceId: this.deviceId,
@@ -347,18 +367,21 @@ export class ProgressSync {
       this.activeRequest = request;
       try {
         const result = await this.api.update(this.manifestationId, request, { bounded });
+        this.authoritativeRevision += 1;
         this.pending.shift();
         if (result.kind === "conflict") {
           this.currentVersion = result.global.version;
-          this.currentLocator = result.device.locator;
-          this.conflict = { global: result.global, device: result.device };
+          const latestLocal = this.pending.at(-1)?.locator ?? result.device.locator;
+          const device = { ...result.device, locator: latestLocal };
+          this.currentLocator = latestLocal;
+          this.conflict = { global: result.global, device };
           this.persist();
           this.transition({
             status: "conflict",
             version: result.global.version,
-            locator: result.device.locator,
+            locator: latestLocal,
             global: result.global,
-            device: result.device,
+            device,
           });
           return;
         }
@@ -366,6 +389,9 @@ export class ProgressSync {
         this.currentLocator = result.progress.locator;
         this.persist();
       } catch (error) {
+        if (error instanceof ProgressApiError && error.kind === "inaccessible") {
+          this.authoritativeRevision += 1;
+        }
         this.persist();
         this.transition(this.positionState(this.errorStatus(error)));
         return;
@@ -383,6 +409,76 @@ export class ProgressSync {
 
   private errorStatus(error: unknown): "inaccessible" | "offline" {
     return error instanceof ProgressApiError && error.kind === "inaccessible" ? "inaccessible" : "offline";
+  }
+
+  private initialProgressIsLoaded(): boolean {
+    return this.initialReadStatus === "loaded";
+  }
+
+  private async loadInitialProgress(): Promise<void> {
+    if (this.disposed || this.initialReadStatus === "loaded") {
+      return;
+    }
+    if (this.initialRead !== null) {
+      return this.initialRead;
+    }
+    const revisionAtStart = this.authoritativeRevision;
+    this.initialReadStatus = "loading";
+    const operation = (async () => {
+      try {
+        const global = await this.api.get(this.manifestationId);
+        if (this.disposed) {
+          return;
+        }
+        this.initialReadStatus = "loaded";
+        if (
+          this.authoritativeRevision !== revisionAtStart ||
+          this.state.status === "conflict" ||
+          this.state.status === "inaccessible"
+        ) {
+          return;
+        }
+        const head = this.pending[0];
+        if (this.pending.length > 0 || this.activeRequest !== null) {
+          if (this.activeRequest === null && head?.baseVersion === undefined) {
+            this.currentVersion = global?.version ?? 0;
+          }
+          this.transition(this.positionState("dirty"));
+          return;
+        }
+        if (global === null) {
+          this.currentVersion = 0;
+          this.currentLocator = undefined;
+          this.transition({ status: "idle", version: 0 });
+        } else {
+          this.currentVersion = global.version;
+          this.currentLocator = global.locator;
+          this.transition({ status: "synced", version: global.version, locator: global.locator });
+        }
+      } catch (error) {
+        if (this.disposed) {
+          return;
+        }
+        if (
+          this.authoritativeRevision !== revisionAtStart ||
+          this.state.status === "conflict" ||
+          this.state.status === "inaccessible"
+        ) {
+          this.initialReadStatus = "loaded";
+          return;
+        }
+        this.initialReadStatus = "failed";
+        this.transition(this.positionState(this.errorStatus(error)));
+      }
+    })();
+    this.initialRead = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.initialRead === operation) {
+        this.initialRead = null;
+      }
+    }
   }
 
   private positionState(status: "dirty" | "inaccessible" | "offline" | "saving" | "synced"): ProgressState {
@@ -416,6 +512,7 @@ export class ProgressSync {
         return;
       }
       const serialized = JSON.stringify({
+        accountId: this.accountId,
         deviceId: this.deviceId,
         pending: this.pending,
         version: this.currentVersion,
