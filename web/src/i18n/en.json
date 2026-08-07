@@ -48,7 +48,8 @@
     "rateLimited": "Too many attempts. Please try again later.",
     "sessionNotFound": "That session is no longer active.",
     "unauthenticated": "Log in to continue.",
-    "unknown": "The request could not be completed. Request ID: {{requestId}}"
+    "unknown": "The request could not be completed. Request ID: {{requestId}}",
+    "libraryRequiresOwner": "A library must keep at least one owner."
   },
   "sessions": {
     "title": "Account sessions",
@@ -61,5 +62,98 @@
     "revokeAll": "Revoke all sessions",
     "revokedOne": "Session revoked.",
     "empty": "No sessions found."
+  },
+  "roles": {
+    "owner": "Owner",
+    "editor": "Editor",
+    "reader": "Reader"
+  },
+  "libraries": {
+    "current": "Current library",
+    "loading": "Loading libraries…",
+    "role": "Your role: {{role}}",
+    "navigation": "Library navigation",
+    "books": "All books",
+    "uploads": "Uploads",
+    "members": "Members",
+    "settings": "Library settings",
+    "emptyTitle": "No libraries",
+    "empty": "You do not have a library yet."
+  },
+  "catalog": {
+    "allBooks": "All books",
+    "loading": "Loading books…",
+    "loadingMore": "Loading more books…",
+    "loadingItem": "Loading book…",
+    "booksList": "Books",
+    "loadMore": "Load more books",
+    "empty": "No books in this library.",
+    "unknownAuthor": "Unknown author",
+    "work": "Work",
+    "edition": "Edition / format",
+    "copy": "Library copy",
+    "epub": "EPUB",
+    "available": "Available in this library",
+    "onlineOnly": "Online reading only",
+    "readOnline": "Read online",
+    "download": "Download EPUB"
+  },
+  "uploads": {
+    "title": "Uploads",
+    "file": "EPUB file",
+    "submit": "Upload EPUB",
+    "fileRequired": "Select an EPUB file.",
+    "tooLarge": "EPUB files must be 1 GiB or smaller.",
+    "progress": "Upload progress",
+    "bytes": "{{sent}} B of {{total}} B transmitted ({{percentage}}%)",
+    "cancel": "Cancel transfer",
+    "background": "Transfer complete. Processing continues in the background.",
+    "canceled": "Upload canceled.",
+    "openExisting": "Open existing book",
+    "openBook": "Open book",
+    "states": {
+      "created": "Upload created.",
+      "receiving": "Receiving file.",
+      "received": "File received.",
+      "queued": "Waiting for background processing.",
+      "validating": "Validating EPUB.",
+      "importing": "Adding the book to the library.",
+      "retry_wait": "A temporary problem occurred. Retrying automatically.",
+      "ready": "Book is ready.",
+      "duplicate": "Already in this library.",
+      "failed": "This EPUB could not be imported. Choose a valid EPUB and try again.",
+      "expired": "This upload expired. Select the file to start again."
+    }
+  },
+  "members": {
+    "title": "Members",
+    "loading": "Loading members…",
+    "inviteEmail": "Invitee email",
+    "inviteRole": "Invitation role",
+    "send": "Send invitation",
+    "invited": "Invitation sent.",
+    "roleFor": "Role for {{userId}}",
+    "remove": "Remove {{userId}}",
+    "roleUpdated": "Member role updated.",
+    "removed": "Member removed."
+  },
+  "settings": {
+    "title": "Library settings",
+    "readerDownload": "Allow readers to download original EPUB files",
+    "readSeparate": "Online reading permission remains separate.",
+    "save": "Save library settings",
+    "saved": "Library settings saved."
+  },
+  "invitations": {
+    "title": "Library invitation",
+    "login": "Log in to accept invitation",
+    "accept": "Accept invitation",
+    "processing": "Accepting invitation…",
+    "accepted": "Invitation accepted.",
+    "wrongAccount": "This invitation is for {{email}}. Switch accounts to continue.",
+    "unverified": "Verify your email before accepting this invitation.",
+    "expired": "This invitation has expired.",
+    "consumed": "This invitation has already been used.",
+    "invalid": "This invitation is not valid."
   }
 }

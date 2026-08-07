@@ -34,9 +34,13 @@ pub enum LibraryMutationOutcome {
     LastOwner,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AcceptInvitationOutcome {
     Accepted(LibraryId),
+    WrongAccount { invited_email: String },
+    Unverified,
+    Expired,
+    Consumed,
     Invalid,
 }
 

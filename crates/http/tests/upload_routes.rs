@@ -21,7 +21,7 @@ use folioharbor_application::{
     rate_limit::{CheckRateLimit, RateLimitDecision, RateLimitUseCase},
 };
 use folioharbor_domain::{
-    id::{LibraryId, SessionId, UploadId, UserId},
+    id::{ItemId, LibraryId, SessionId, UploadId, UserId},
     identity::CsrfToken,
     imports::{
         quota::ByteCount,
@@ -165,10 +165,11 @@ impl UploadApi for FakeUploads {
     }
 }
 
-fn app() -> (axum::Router, LibraryId, UploadId) {
+fn app_with_state(state: UploadState) -> (axum::Router, LibraryId, UploadId, ItemId) {
     let actor = UserId::new();
     let library = LibraryId::new();
     let upload = UploadId::new();
+    let result_item = ItemId::new();
     let services = Arc::new(Services {
         sessions: HashMap::from([("actor".to_owned(), actor)]),
     });
@@ -180,9 +181,10 @@ fn app() -> (axum::Router, LibraryId, UploadId) {
             media_type: "application/epub+zip".into(),
             declared_bytes: ByteCount::new(4),
             received_bytes: ByteCount::new(0),
-            state: UploadState::Created,
+            state,
             storage_key: None,
             error_code: None,
+            item_id: (state == UploadState::Duplicate).then_some(result_item),
         },
     });
     let state = AppState::new(
@@ -200,7 +202,12 @@ fn app() -> (axum::Router, LibraryId, UploadId) {
         services,
     )
     .with_upload_api(uploads);
-    (router(state), library, upload)
+    (router(state), library, upload, result_item)
+}
+
+fn app() -> (axum::Router, LibraryId, UploadId) {
+    let (app, library, upload, _) = app_with_state(UploadState::Created);
+    (app, library, upload)
 }
 fn request(method: Method, uri: String, content_type: &str, body: Body) -> Request<Body> {
     Request::builder()
@@ -260,6 +267,38 @@ async fn upload_routes_return_accepted_status_resources_and_reject_limit_before_
     assert!(String::from_utf8_lossy(&body).contains("payload_too_large"));
 }
 
+#[tokio::test]
+async fn duplicate_upload_status_exposes_the_existing_item_target() {
+    let (app, library, upload, result_item) = app_with_state(UploadState::Duplicate);
+    let response = app
+        .oneshot(request(
+            Method::GET,
+            format!(
+                "/api/v1/libraries/{}/uploads/{}",
+                library.as_uuid(),
+                upload.as_uuid()
+            ),
+            "application/json",
+            Body::empty(),
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("JSON status");
+    let expected_item = result_item.as_uuid().to_string();
+    assert_eq!(
+        value["item_id"].as_str(),
+        Some(expected_item.as_str()),
+        "Duplicate must identify the existing visible Item"
+    );
+}
+
 #[test]
 fn openapi_documents_upload_limits_states_media_and_retry_contract() {
     let document: Value =
@@ -294,6 +333,11 @@ fn openapi_documents_upload_limits_states_media_and_retry_contract() {
             "missing {state}"
         );
     }
+    assert_eq!(
+        document["components"]["schemas"]["UploadStatus"]["properties"]["item_id"]["format"]
+            .as_str(),
+        Some("uuid")
+    );
     let description=document["paths"]["/api/v1/libraries/{library_id}/uploads/{upload_id}/content"]["put"]["description"].as_str().expect("retry description");
     assert!(description.contains("same upload_id"));
 }

@@ -303,6 +303,7 @@ fn fixture_scope(
             state: UploadState::Created,
             storage_key: None,
             error_code: None,
+            item_id: None,
         }),
         transitions: Mutex::new(Vec::new()),
         fail_finalize: Mutex::new(false),

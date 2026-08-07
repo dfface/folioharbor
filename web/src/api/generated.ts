@@ -244,6 +244,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/invitations/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Atomically accepts an email-bound invitation and returns only a masked email hint on account mismatch. */
+        post: operations["acceptLibraryInvitation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/libraries/{library_id}/uploads": {
         parameters: {
             query?: never;
@@ -462,6 +479,42 @@ export interface components {
             /** @enum {string} */
             status: "active" | "idle_expired" | "absolute_expired" | "revoked";
         };
+        LibraryCapabilities: {
+            /** @description Effective holding.edit capability */
+            can_upload: boolean;
+            /** @description Effective member.invite capability */
+            can_invite_members: boolean;
+            /** @description Effective library.manage capability for role and removal operations */
+            can_manage_members: boolean;
+            /** @description Effective library.manage capability for settings */
+            can_manage_settings: boolean;
+        };
+        Library: {
+            /** Format: uuid */
+            library_id: string;
+            name: string;
+            /** @enum {string} */
+            role: "owner" | "editor" | "reader";
+            reader_download_enabled: boolean;
+            capabilities: components["schemas"]["LibraryCapabilities"];
+        };
+        LibraryMember: {
+            /** Format: uuid */
+            user_id: string;
+            /** @enum {string} */
+            role: "owner" | "editor" | "reader";
+        };
+        InvitationAcceptance: {
+            /** @enum {string} */
+            status: "accepted" | "wrong_account" | "unverified" | "expired" | "consumed" | "invalid";
+            /**
+             * Format: uuid
+             * @description Present only when accepted
+             */
+            library_id?: string | null;
+            /** @description Masked and present only for wrong_account */
+            email_hint?: string | null;
+        };
         CreateUploadRequest: {
             file_name: string;
             /** @enum {string} */
@@ -483,6 +536,11 @@ export interface components {
             status_url: string;
             /** @description Stable safe code; implementation or storage details are never exposed */
             error_code?: string | null;
+            /**
+             * Format: uuid
+             * @description Existing or newly created visible Item for Ready and Duplicate completion
+             */
+            item_id?: string | null;
         };
         BookSummary: {
             /** Format: uuid */
@@ -1117,12 +1175,14 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Libraries visible to the authenticated member */
+            /** @description Libraries visible to the authenticated member with server-derived capabilities */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["Library"][];
+                };
             };
             401: components["responses"]["Problem"];
         };
@@ -1138,12 +1198,14 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Authorized library detail */
+            /** @description Authorized library detail with server-derived capabilities */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["Library"];
+                };
             };
             400: components["responses"]["InvalidSessionIdProblem"];
             401: components["responses"]["Problem"];
@@ -1204,7 +1266,9 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["LibraryMember"][];
+                };
             };
             400: components["responses"]["InvalidSessionIdProblem"];
             401: components["responses"]["Problem"];
@@ -1257,7 +1321,14 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    role: "owner" | "editor" | "reader";
+                };
+            };
+        };
         responses: {
             /** @description Role changed and audited atomically */
             204: {
@@ -1286,7 +1357,16 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Format: email */
+                    email: string;
+                    /** @enum {string} */
+                    role: "editor" | "reader";
+                };
+            };
+        };
         responses: {
             /** @description Invitation created and audited atomically */
             204: {
@@ -1318,6 +1398,44 @@ export interface operations {
                     "application/problem+json": components["schemas"]["ProblemDetails"];
                 };
             };
+        };
+    };
+    acceptLibraryInvitation: {
+        parameters: {
+            query?: never;
+            header: {
+                /**
+                 * @description Opaque session-bound CSRF token for unsafe authenticated requests
+                 * @example opaque-csrf-token
+                 */
+                "X-CSRF-Token": components["parameters"]["CsrfToken"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    token: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Safe invitation acceptance state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InvitationAcceptance"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+            413: components["responses"]["Problem"];
+            415: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
         };
     };
     createUpload: {

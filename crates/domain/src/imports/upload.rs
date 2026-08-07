@@ -1,5 +1,5 @@
 use crate::{
-    id::{LibraryId, UploadId},
+    id::{ItemId, LibraryId, UploadId},
     imports::{blob::StorageKey, quota::ByteCount},
 };
 
@@ -97,4 +97,5 @@ pub struct UploadSession {
     pub state: UploadState,
     pub storage_key: Option<StorageKey>,
     pub error_code: Option<String>,
+    pub item_id: Option<ItemId>,
 }

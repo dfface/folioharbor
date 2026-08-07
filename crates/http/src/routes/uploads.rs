@@ -52,6 +52,7 @@ struct UploadResponse {
     state: &'static str,
     status_url: String,
     error_code: Option<String>,
+    item_id: Option<String>,
 }
 
 impl From<UploadSession> for UploadResponse {
@@ -70,6 +71,7 @@ impl From<UploadSession> for UploadResponse {
                 upload.upload_id.as_uuid()
             ),
             error_code: upload.error_code,
+            item_id: upload.item_id.map(|item| item.as_uuid().to_string()),
         }
     }
 }

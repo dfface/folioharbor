@@ -7,7 +7,7 @@ use folioharbor_application::ports::{
 use folioharbor_application::{
     audit::{AuditDecision, AuditEvent, AuditSource},
     authorization::{Action, AuthorizationGrant, ResourceRef},
-    libraries::{LibraryMemberView, LibraryView},
+    libraries::{LibraryCapabilities, LibraryMemberView, LibraryView},
 };
 use folioharbor_domain::{
     id::{LibraryId, UserId},
@@ -42,22 +42,18 @@ impl LibraryQueryRepository for PgLibraryRepository {
         )
         .await
         .map_err(|_| LibraryQueryRepositoryError)?;
-        let rows = sqlx::query!(
-            r#"SELECT library_id AS "library_id!",name AS "name!"
-               FROM folioharbor.library_list_visible($1)"#,
-            actor.as_uuid(),
+        let rows = sqlx::query_as::<_, (Uuid, String, String, bool, bool, bool, bool, bool)>(
+            "SELECT library_id,name,role_code,reader_download_enabled,can_upload,can_invite_members,can_manage_members,can_manage_settings FROM folioharbor.library_web_visible($1)",
         )
+        .bind(actor.as_uuid())
         .fetch_all(&mut *tx)
         .await
         .map_err(|_| LibraryQueryRepositoryError)?;
         tx.commit().await.map_err(|_| LibraryQueryRepositoryError)?;
         Ok(rows
             .into_iter()
-            .map(|row| LibraryView {
-                library_id: LibraryId::from_uuid(row.library_id),
-                name: row.name,
-            })
-            .collect())
+            .map(library_view)
+            .collect::<Result<Vec<_>, _>>()?)
     }
     async fn get_library(
         &self,
@@ -85,21 +81,16 @@ impl LibraryQueryRepository for PgLibraryRepository {
         )
         .await
         .map_err(|_| LibraryQueryRepositoryError)?;
-        let row = sqlx::query!(
-            r#"SELECT library_id AS "library_id!",name AS "name!"
-               FROM folioharbor.library_get_visible($1,$2,$3)"#,
-            grant.actor().as_uuid(),
-            library.as_uuid(),
-            grant.membership_version(),
+        let row = sqlx::query_as::<_, (Uuid, String, String, bool, bool, bool, bool, bool)>(
+            "SELECT library_id,name,role_code,reader_download_enabled,can_upload,can_invite_members,can_manage_members,can_manage_settings FROM folioharbor.library_web_visible($1) WHERE library_id=$2",
         )
+        .bind(grant.actor().as_uuid())
+        .bind(library.as_uuid())
         .fetch_optional(&mut *tx)
         .await
         .map_err(|_| LibraryQueryRepositoryError)?;
         tx.commit().await.map_err(|_| LibraryQueryRepositoryError)?;
-        Ok(row.map(|row| LibraryView {
-            library_id: LibraryId::from_uuid(row.library_id),
-            name: row.name,
-        }))
+        row.map(library_view).transpose()
     }
     async fn list_members(
         &self,
@@ -158,6 +149,32 @@ impl PgLibraryRepository {
 }
 fn persistence_error(_: sqlx::Error) -> LibraryRepositoryError {
     LibraryRepositoryError
+}
+fn library_view(
+    row: (Uuid, String, String, bool, bool, bool, bool, bool),
+) -> Result<LibraryView, LibraryQueryRepositoryError> {
+    let (
+        library_id,
+        name,
+        role,
+        reader_download_enabled,
+        can_upload,
+        can_invite_members,
+        can_manage_members,
+        can_manage_settings,
+    ) = row;
+    Ok(LibraryView {
+        library_id: LibraryId::from_uuid(library_id),
+        name,
+        role: RoleCode::parse(&role).ok_or(LibraryQueryRepositoryError)?,
+        reader_download_enabled,
+        capabilities: LibraryCapabilities {
+            can_upload,
+            can_invite_members,
+            can_manage_members,
+            can_manage_settings,
+        },
+    })
 }
 fn mutation(value: &str) -> Result<LibraryMutationOutcome, LibraryRepositoryError> {
     match value {
@@ -322,12 +339,37 @@ impl LibraryRepository for PgLibraryRepository {
         hash: TokenHash,
         now: OffsetDateTime,
     ) -> Result<AcceptInvitationOutcome, LibraryRepositoryError> {
-        let row=sqlx::query!(r#"SELECT outcome AS "outcome!", accepted_library_id FROM folioharbor.library_accept_invitation($1,$2,$3)"#,user_id.as_uuid(),hash.as_bytes().as_slice(),now).fetch_one(&self.pool).await.map_err(persistence_error)?;
-        match (row.outcome.as_str(), row.accepted_library_id) {
-            ("accepted", Some(id)) => {
+        let mut tx = self.pool.begin().await.map_err(persistence_error)?;
+        PgTransactionContext::apply(
+            &mut tx,
+            &DatabaseContext::api_without_library(
+                user_id,
+                folioharbor_domain::id::RequestId::new(),
+            ),
+        )
+        .await
+        .map_err(persistence_error)?;
+        let row = sqlx::query_as::<_, (String, Option<Uuid>, Option<String>)>(
+            "SELECT outcome,accepted_library_id,invited_email FROM folioharbor.library_accept_invitation_detailed($1,$2,$3)",
+        )
+        .bind(user_id.as_uuid())
+        .bind(hash.as_bytes().as_slice())
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(persistence_error)?;
+        tx.commit().await.map_err(persistence_error)?;
+        match (row.0.as_str(), row.1, row.2) {
+            ("accepted", Some(id), _) => {
                 Ok(AcceptInvitationOutcome::Accepted(LibraryId::from_uuid(id)))
             }
-            ("invalid", _) => Ok(AcceptInvitationOutcome::Invalid),
+            ("wrong_account", _, Some(invited_email)) => {
+                Ok(AcceptInvitationOutcome::WrongAccount { invited_email })
+            }
+            ("unverified", _, _) => Ok(AcceptInvitationOutcome::Unverified),
+            ("expired", _, _) => Ok(AcceptInvitationOutcome::Expired),
+            ("consumed", _, _) => Ok(AcceptInvitationOutcome::Consumed),
+            ("invalid", _, _) => Ok(AcceptInvitationOutcome::Invalid),
             _ => Err(LibraryRepositoryError),
         }
     }

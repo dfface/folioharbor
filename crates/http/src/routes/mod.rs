@@ -148,6 +148,7 @@ pub fn router(state: AppState) -> Router {
                 .merge(uploads::router())
                 .merge(catalog::router()),
         )
+        .nest("/api/v1/invitations", libraries::invitation_router())
         .nest("/api/v1/items", reader::router().merge(download::router()))
         .nest("/api/v1/manifestations", progress::router())
         .layer(axum_middleware::from_fn_with_state(

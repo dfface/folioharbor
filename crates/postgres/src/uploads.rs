@@ -160,6 +160,7 @@ impl UploadRepository for PgUploadRepository {
             state: UploadState::Created,
             storage_key: None,
             error_code: None,
+            item_id: None,
         })
     }
 
@@ -171,25 +172,29 @@ impl UploadRepository for PgUploadRepository {
         request: RequestId,
     ) -> Result<Option<UploadSession>, UploadRepositoryError> {
         let mut transaction = self.transaction(actor, library, request).await?;
-        let row = sqlx::query!("SELECT file_name,media_type,declared_bytes,received_bytes,state,storage_key,error_code FROM folioharbor.upload_sessions WHERE upload_id=$1 AND library_id=$2",upload.as_uuid(),library.as_uuid()).fetch_optional(&mut *transaction).await.map_err(persistence_error)?;
+        let row = sqlx::query_as::<_, (String, String, i64, i64, String, Option<String>, Option<String>, Option<uuid::Uuid>)>("SELECT file_name,media_type,declared_bytes,received_bytes,state,storage_key,error_code,result_item_id FROM folioharbor.upload_sessions WHERE upload_id=$1 AND library_id=$2")
+            .bind(upload.as_uuid())
+            .bind(library.as_uuid())
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(persistence_error)?;
         transaction.commit().await.map_err(persistence_error)?;
         row.map(|row| {
             Ok(UploadSession {
                 upload_id: upload,
                 library_id: library,
-                file_name: row.file_name,
-                media_type: row.media_type,
+                file_name: row.0,
+                media_type: row.1,
                 declared_bytes: ByteCount::new(
-                    u64::try_from(row.declared_bytes)
-                        .map_err(|_| UploadRepositoryError::Persistence)?,
+                    u64::try_from(row.2).map_err(|_| UploadRepositoryError::Persistence)?,
                 ),
                 received_bytes: ByteCount::new(
-                    u64::try_from(row.received_bytes)
-                        .map_err(|_| UploadRepositoryError::Persistence)?,
+                    u64::try_from(row.3).map_err(|_| UploadRepositoryError::Persistence)?,
                 ),
-                state: UploadState::parse(&row.state).ok_or(UploadRepositoryError::Persistence)?,
-                storage_key: row.storage_key.map(StorageKey::from_opaque),
-                error_code: row.error_code,
+                state: UploadState::parse(&row.4).ok_or(UploadRepositoryError::Persistence)?,
+                storage_key: row.5.map(StorageKey::from_opaque),
+                error_code: row.6,
+                item_id: row.7.map(folioharbor_domain::id::ItemId::from_uuid),
             })
         })
         .transpose()

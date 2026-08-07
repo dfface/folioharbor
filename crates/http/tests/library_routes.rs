@@ -27,7 +27,7 @@ use folioharbor_application::{
 };
 use folioharbor_domain::{
     id::{LibraryId, SessionId, UserId},
-    identity::CsrfToken,
+    identity::{CsrfToken, SessionToken},
 };
 use folioharbor_http::{AppState, router};
 use folioharbor_postgres::{
@@ -230,10 +230,20 @@ fn openapi_exposes_the_complete_library_authorization_surface()
         "/api/v1/libraries/{library_id}/members",
         "/api/v1/libraries/{library_id}/members/{user_id}",
         "/api/v1/libraries/{library_id}/invitations",
+        "/api/v1/invitations/accept",
     ] {
         assert!(
             paths.contains_key(Value::String(path.to_owned())),
             "missing {path}"
+        );
+    }
+    let library = &document["components"]["schemas"]["Library"];
+    assert_eq!(library["properties"]["role"]["type"], "string");
+    let capabilities = &document["components"]["schemas"]["LibraryCapabilities"];
+    for capability in ["can_upload", "can_manage_members", "can_manage_settings"] {
+        assert_eq!(
+            capabilities["properties"][capability]["type"], "boolean",
+            "missing server capability {capability}"
         );
     }
     let unavailable = &document["paths"]["/api/v1/libraries/{library_id}/invitations"]["post"]["responses"]
@@ -386,6 +396,177 @@ async fn unavailable_invitation_delivery_returns_correlated_503_without_persiste
 }
 
 #[tokio::test]
+async fn invitation_acceptance_reports_safe_states_and_keeps_the_personal_library()
+-> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let now = OffsetDateTime::now_utc();
+    let owner = UserId::new();
+    let invited = UserId::new();
+    let wrong_account = UserId::new();
+    let unverified = UserId::new();
+    for (user, email, status) in [
+        (owner, "owner@accept.test", "verified"),
+        (invited, "reader@example.com", "verified"),
+        (wrong_account, "wrong@accept.test", "verified"),
+        (unverified, "pending@example.com", "pending_verification"),
+    ] {
+        sqlx::query("INSERT INTO folioharbor.user_accounts(user_id,normalized_email,display_email,status,created_at,verified_at) VALUES($1,$2,$2,$3,$4,CASE WHEN $3='verified' THEN $4 ELSE NULL END)")
+            .bind(user.as_uuid())
+            .bind(email)
+            .bind(status)
+            .bind(now)
+            .execute(&pools.owner)
+            .await?;
+    }
+    let personal = LibraryId::new();
+    let shared = LibraryId::new();
+    for (library, personal_owner, name) in [
+        (personal, Some(invited), "Reader Personal"),
+        (shared, None, "Shared Library"),
+    ] {
+        sqlx::query("INSERT INTO folioharbor.libraries(library_id,personal_owner_id,name,created_at,updated_at) VALUES($1,$2,$3,$4,$4)")
+            .bind(library.as_uuid())
+            .bind(personal_owner.map(UserId::as_uuid))
+            .bind(name)
+            .bind(now)
+            .execute(&pools.owner)
+            .await?;
+    }
+    for (library, user, role) in [(personal, invited, "owner"), (shared, owner, "owner")] {
+        sqlx::query("INSERT INTO folioharbor.library_memberships(library_id,user_id,role_code,status,joined_at) VALUES($1,$2,$3,'active',$4)")
+            .bind(library.as_uuid())
+            .bind(user.as_uuid())
+            .bind(role)
+            .bind(now)
+            .execute(&pools.owner)
+            .await?;
+    }
+
+    let insert_invitation = |token: &str, email: &str, expires_at: OffsetDateTime| {
+        let hash = SessionToken::parse(SecretString::from(token.to_owned())).hash_for_storage();
+        sqlx::query("INSERT INTO folioharbor.library_invitations(invitation_id,library_id,invited_by,normalized_email,display_email,role_code,token_hash,created_at,expires_at) VALUES($1,$2,$3,$4,$4,'reader',$5,$6,$7)")
+            .bind(uuid::Uuid::now_v7())
+            .bind(shared.as_uuid())
+            .bind(owner.as_uuid())
+            .bind(email.to_owned())
+            .bind(hash.as_bytes().to_vec())
+            .bind(now - time::Duration::hours(1))
+            .bind(expires_at)
+    };
+    insert_invitation(
+        "active-invitation",
+        "reader@example.com",
+        now + time::Duration::hours(1),
+    )
+    .execute(&pools.owner)
+    .await?;
+    insert_invitation(
+        "expired-invitation",
+        "reader@example.com",
+        now - time::Duration::minutes(1),
+    )
+    .execute(&pools.owner)
+    .await?;
+    insert_invitation(
+        "unverified-invitation",
+        "pending@example.com",
+        now + time::Duration::hours(1),
+    )
+    .execute(&pools.owner)
+    .await?;
+
+    let auth = Arc::new(RouteAuth(HashMap::from([
+        ("invited".to_owned(), invited),
+        ("wrong".to_owned(), wrong_account),
+        ("unverified".to_owned(), unverified),
+    ])));
+    let service = Arc::new(LibraryService::new(
+        PgLibraryRepository::new(pools.api.clone()),
+        PgAuthorizationRepository::new(pools.api.clone()),
+        PgAuditRepository::new(pools.api.clone()),
+        NoopSealer,
+        FixedClock::new(now),
+        FixedRandom::new(7),
+    ));
+    let state = AppState::new(
+        Url::parse("https://library.example")?,
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth.clone(),
+        auth,
+    )
+    .with_library_api(service);
+    let app = router(state);
+
+    async fn accept(
+        app: &axum::Router,
+        actor: &str,
+        token: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let response = app
+            .clone()
+            .oneshot(request(
+                &Method::POST,
+                "/api/v1/invitations/accept",
+                actor,
+                Body::from(serde_json::json!({ "token": token }).to_string()),
+            ))
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await?.to_bytes();
+        Ok(serde_json::from_slice(&body)?)
+    }
+
+    let wrong = accept(&app, "wrong", "active-invitation").await?;
+    assert_eq!(wrong["status"], "wrong_account");
+    assert_eq!(wrong["email_hint"], "r***@example.com");
+
+    let unverified_result = accept(&app, "unverified", "unverified-invitation").await?;
+    assert_eq!(unverified_result["status"], "unverified");
+
+    let expired = accept(&app, "invited", "expired-invitation").await?;
+    assert_eq!(expired["status"], "expired");
+
+    let accepted = accept(&app, "invited", "active-invitation").await?;
+    assert_eq!(accepted["status"], "accepted");
+    assert_eq!(accepted["library_id"], shared.as_uuid().to_string());
+
+    let consumed = accept(&app, "invited", "active-invitation").await?;
+    assert_eq!(consumed["status"], "consumed");
+
+    let response = app
+        .oneshot(request(
+            &Method::GET,
+            "/api/v1/libraries",
+            "invited",
+            Body::empty(),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await?.to_bytes();
+    let libraries: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(libraries.as_array().map(Vec::len), Some(2));
+
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn concrete_routes_enforce_role_matrix_and_correlate_denial_audits() -> anyhow::Result<()> {
     let database = TestPostgres::provision().await?;
     let pools = PgPools::connect_for_tests(
@@ -469,12 +650,23 @@ async fn concrete_routes_enforce_role_matrix_and_correlate_denial_audits() -> an
     }
 
     let detail = format!("/api/v1/libraries/{}", library.as_uuid());
-    for actor in ["owner", "editor", "reader"] {
+    for (actor, role, can_upload, can_manage) in [
+        ("owner", "owner", true, true),
+        ("editor", "editor", true, false),
+        ("reader", "reader", false, false),
+    ] {
         let response = app
             .clone()
             .oneshot(request(&Method::GET, &detail, actor, Body::empty()))
             .await?;
         assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await?.to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(value["role"], role);
+        assert_eq!(value["reader_download_enabled"], false);
+        assert_eq!(value["capabilities"]["can_upload"], can_upload);
+        assert_eq!(value["capabilities"]["can_manage_members"], can_manage);
+        assert_eq!(value["capabilities"]["can_manage_settings"], can_manage);
     }
     let unrelated_response = app
         .clone()

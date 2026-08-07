@@ -1,7 +1,7 @@
 import { useState, type SyntheticEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { login, type LoginRequest } from "./api";
 import {
@@ -19,6 +19,7 @@ import { resetAuthIdentityQueries } from "./session";
 export function LoginPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const requestSignal = useRequestController();
   const { error, focusVersion, setError } = useErrorSummaryState();
@@ -33,7 +34,11 @@ export function LoginPage() {
       setError(null);
       setFieldErrors({});
       void resetAuthIdentityQueries(queryClient).then(() => {
-        void navigate("/", { replace: true });
+        const requestedReturn = searchParams.get("returnTo");
+        const returnTo = requestedReturn?.startsWith("/invitations/") === true && !requestedReturn.startsWith("//")
+          ? requestedReturn
+          : "/";
+        void navigate(returnTo, { replace: true });
       });
     },
   });

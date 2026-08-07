@@ -48,7 +48,8 @@
     "rateLimited": "尝试次数过多，请稍后再试。",
     "sessionNotFound": "该会话已失效。",
     "unauthenticated": "请登录后继续。",
-    "unknown": "请求无法完成。请求 ID：{{requestId}}"
+    "unknown": "请求无法完成。请求 ID：{{requestId}}",
+    "libraryRequiresOwner": "书库必须至少保留一位所有者。"
   },
   "sessions": {
     "title": "账户会话",
@@ -61,5 +62,98 @@
     "revokeAll": "撤销全部会话",
     "revokedOne": "会话已撤销。",
     "empty": "没有会话。"
+  },
+  "roles": {
+    "owner": "所有者",
+    "editor": "编辑者",
+    "reader": "读者"
+  },
+  "libraries": {
+    "current": "当前书库",
+    "loading": "正在加载书库…",
+    "role": "你的角色：{{role}}",
+    "navigation": "书库导航",
+    "books": "全部图书",
+    "uploads": "上传",
+    "members": "成员",
+    "settings": "书库设置",
+    "emptyTitle": "没有书库",
+    "empty": "你还没有可用的书库。"
+  },
+  "catalog": {
+    "allBooks": "全部图书",
+    "loading": "正在加载图书…",
+    "loadingMore": "正在加载更多图书…",
+    "loadingItem": "正在加载图书…",
+    "booksList": "图书",
+    "loadMore": "加载更多图书",
+    "empty": "此书库暂无图书。",
+    "unknownAuthor": "未知作者",
+    "work": "作品",
+    "edition": "版本 / 格式",
+    "copy": "书库馆藏",
+    "epub": "EPUB",
+    "available": "此书库可用",
+    "onlineOnly": "仅可在线阅读",
+    "readOnline": "在线阅读",
+    "download": "下载 EPUB"
+  },
+  "uploads": {
+    "title": "上传",
+    "file": "EPUB 文件",
+    "submit": "上传 EPUB",
+    "fileRequired": "请选择 EPUB 文件。",
+    "tooLarge": "EPUB 文件必须不超过 1 GiB。",
+    "progress": "上传进度",
+    "bytes": "已传输 {{sent}} B / {{total}} B（{{percentage}}%）",
+    "cancel": "取消传输",
+    "background": "传输完成，正在后台处理。",
+    "canceled": "上传已取消。",
+    "openExisting": "打开已有图书",
+    "openBook": "打开图书",
+    "states": {
+      "created": "上传已创建。",
+      "receiving": "正在接收文件。",
+      "received": "文件接收完成。",
+      "queued": "等待后台处理。",
+      "validating": "正在验证 EPUB。",
+      "importing": "正在将图书添加到书库。",
+      "retry_wait": "出现临时问题，将自动重试。",
+      "ready": "图书已就绪。",
+      "duplicate": "此书库中已存在。",
+      "failed": "无法导入此 EPUB。请选择有效的 EPUB 后重试。",
+      "expired": "此上传已过期，请重新选择文件。"
+    }
+  },
+  "members": {
+    "title": "成员",
+    "loading": "正在加载成员…",
+    "inviteEmail": "受邀人邮箱",
+    "inviteRole": "邀请角色",
+    "send": "发送邀请",
+    "invited": "邀请已发送。",
+    "roleFor": "{{userId}} 的角色",
+    "remove": "移除 {{userId}}",
+    "roleUpdated": "成员角色已更新。",
+    "removed": "成员已移除。"
+  },
+  "settings": {
+    "title": "书库设置",
+    "readerDownload": "允许读者下载原始 EPUB 文件",
+    "readSeparate": "在线阅读权限保持独立。",
+    "save": "保存书库设置",
+    "saved": "书库设置已保存。"
+  },
+  "invitations": {
+    "title": "书库邀请",
+    "login": "登录以接受邀请",
+    "accept": "接受邀请",
+    "processing": "正在接受邀请…",
+    "accepted": "邀请已接受。",
+    "wrongAccount": "此邀请发送给 {{email}}，请切换账户后继续。",
+    "unverified": "请先验证邮箱，再接受邀请。",
+    "expired": "此邀请已过期。",
+    "consumed": "此邀请已被使用。",
+    "invalid": "此邀请无效。"
   }
 }

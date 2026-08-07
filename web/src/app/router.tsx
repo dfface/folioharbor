@@ -9,6 +9,13 @@ import { ResetPasswordPage } from "../features/auth/ResetPasswordPage";
 import { SessionsPage } from "../features/auth/SessionsPage";
 import { useSession } from "../features/auth/session";
 import { VerifyEmailPage } from "../features/auth/VerifyEmailPage";
+import { BooksPage } from "../features/catalog/BooksPage";
+import { ItemDetailPage } from "../features/catalog/ItemDetailPage";
+import { LibraryHome, LibraryLayout } from "../features/libraries/LibraryLayout";
+import { SettingsPage } from "../features/libraries/SettingsPage";
+import { InvitationPage } from "../features/members/InvitationPage";
+import { MembersPage } from "../features/members/MembersPage";
+import { UploadPage } from "../features/uploads/UploadPage";
 import { AppLayout, AuthenticatedLayout } from "./layout";
 
 function SessionLoading() {
@@ -43,15 +50,11 @@ function RequireAuthentication() {
   return session.status === "anonymous" ? <Navigate to="/login" replace /> : <Outlet />;
 }
 
-function HomePage() {
-  const { t } = useTranslation();
-  return <h2>{t("app.welcome")}</h2>;
-}
-
 export function AppRouter() {
   return (
     <Routes>
       <Route element={<AppLayout />}>
+        <Route path="/invitations/:token" element={<InvitationPage />} />
         <Route element={<RequireAnonymous />}>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
@@ -61,8 +64,16 @@ export function AppRouter() {
         </Route>
         <Route element={<RequireAuthentication />}>
           <Route element={<AuthenticatedLayout />}>
-            <Route index element={<HomePage />} />
+            <Route index element={<LibraryHome />} />
             <Route path="/account/sessions" element={<SessionsPage />} />
+            <Route path="/libraries/:libraryId" element={<LibraryLayout />}>
+              <Route index element={<Navigate to="books" replace />} />
+              <Route path="books" element={<BooksPage />} />
+              <Route path="items/:itemId" element={<ItemDetailPage />} />
+              <Route path="uploads" element={<UploadPage />} />
+              <Route path="members" element={<MembersPage />} />
+              <Route path="settings" element={<SettingsPage />} />
+            </Route>
           </Route>
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

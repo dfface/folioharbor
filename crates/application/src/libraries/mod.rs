@@ -6,7 +6,7 @@ mod provision_personal;
 mod remove_member;
 mod settings;
 
-pub use accept_invitation::{AcceptInvitation, AcceptInvitationCommand};
+pub use accept_invitation::{AcceptInvitation, AcceptInvitationCommand, InvitationAcceptance};
 pub use api::*;
 pub use change_role::{ChangeMemberRole, ChangeMemberRoleCommand};
 pub use invite_member::{InviteMember, InviteMemberCommand};

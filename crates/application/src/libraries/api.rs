@@ -3,10 +3,12 @@ use folioharbor_domain::{
     id::{LibraryId, RequestId, UserId},
     libraries::role::RoleCode,
 };
+use secrecy::SecretString;
 
 use super::{
-    ChangeMemberRole, ChangeMemberRoleCommand, InviteMember, InviteMemberCommand, RemoveMember,
-    RemoveMemberCommand, UpdateLibrarySettings, UpdateLibrarySettingsCommand,
+    AcceptInvitation, AcceptInvitationCommand, ChangeMemberRole, ChangeMemberRoleCommand,
+    InvitationAcceptance, InviteMember, InviteMemberCommand, RemoveMember, RemoveMemberCommand,
+    UpdateLibrarySettings, UpdateLibrarySettingsCommand,
 };
 use crate::{
     audit::AuditEvent,
@@ -20,9 +22,19 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LibraryCapabilities {
+    pub can_upload: bool,
+    pub can_invite_members: bool,
+    pub can_manage_members: bool,
+    pub can_manage_settings: bool,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LibraryView {
     pub library_id: LibraryId,
     pub name: String,
+    pub role: RoleCode,
+    pub reader_download_enabled: bool,
+    pub capabilities: LibraryCapabilities,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LibraryMemberView {
@@ -67,6 +79,10 @@ pub struct RemoveLibraryMemberRequest {
     pub library_id: LibraryId,
     pub user_id: UserId,
 }
+pub struct AcceptLibraryInvitationRequest {
+    pub actor: UserId,
+    pub token: SecretString,
+}
 
 #[async_trait]
 pub trait LibraryApi: Send + Sync {
@@ -83,6 +99,10 @@ pub trait LibraryApi: Send + Sync {
     async fn invite_member(&self, request: InviteLibraryMemberRequest) -> Result<(), AppError>;
     async fn change_member(&self, request: ChangeLibraryMemberRequest) -> Result<(), AppError>;
     async fn remove_member(&self, request: RemoveLibraryMemberRequest) -> Result<(), AppError>;
+    async fn accept_invitation(
+        &self,
+        request: AcceptLibraryInvitationRequest,
+    ) -> Result<InvitationAcceptance, AppError>;
 }
 
 pub struct LibraryService<R, A, S, M, C, N> {
@@ -290,6 +310,17 @@ where
         )
         .await
     }
+    async fn accept_invitation(
+        &self,
+        r: AcceptLibraryInvitationRequest,
+    ) -> Result<InvitationAcceptance, AppError> {
+        AcceptInvitation::new(&self.repository, &self.clock)
+            .execute_detailed(AcceptInvitationCommand {
+                user_id: r.actor,
+                token: r.token,
+            })
+            .await
+    }
 }
 impl<R, A, S, M, C, N> LibraryService<R, A, S, M, C, N>
 where
@@ -364,6 +395,12 @@ impl LibraryApi for UnavailableLibraryApi {
         unavailable()
     }
     async fn remove_member(&self, _: RemoveLibraryMemberRequest) -> Result<(), AppError> {
+        unavailable()
+    }
+    async fn accept_invitation(
+        &self,
+        _: AcceptLibraryInvitationRequest,
+    ) -> Result<InvitationAcceptance, AppError> {
         unavailable()
     }
 }

@@ -114,7 +114,9 @@ async fn invitations_are_email_bound_expiring_single_use_and_preserve_personal_l
         repository
             .accept_invitation(attacker, token_hash, now)
             .await?,
-        AcceptInvitationOutcome::Invalid
+        AcceptInvitationOutcome::WrongAccount {
+            invited_email: "invitee@example.com".to_owned()
+        }
     );
     let attacker_memberships: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM folioharbor.library_memberships WHERE library_id=$1 AND user_id=$2 AND status='active'",
@@ -141,7 +143,7 @@ async fn invitations_are_email_bound_expiring_single_use_and_preserve_personal_l
         repository
             .accept_invitation(invitee, token_hash, now)
             .await?,
-        AcceptInvitationOutcome::Invalid
+        AcceptInvitationOutcome::Consumed
     );
     let personal_after: uuid::Uuid = sqlx::query_scalar(
         "SELECT library_id FROM folioharbor.libraries WHERE personal_owner_id=$1",
@@ -185,7 +187,7 @@ async fn invitations_are_email_bound_expiring_single_use_and_preserve_personal_l
         repository
             .accept_invitation(invitee, expired_hash, now + time::Duration::minutes(2))
             .await?,
-        AcceptInvitationOutcome::Invalid
+        AcceptInvitationOutcome::Expired
     );
 
     api.close().await;

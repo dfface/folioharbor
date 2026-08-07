@@ -15,14 +15,16 @@ use folioharbor_application::{
     config::AuthFeatures,
     error::{AppError, FieldViolation},
     libraries::{
-        ChangeLibraryMemberRequest, InviteLibraryMemberRequest, ListLibrariesRequest,
-        ReadLibraryRequest, RemoveLibraryMemberRequest, UpdateSettingsRequest,
+        AcceptLibraryInvitationRequest, ChangeLibraryMemberRequest, InvitationAcceptance,
+        InviteLibraryMemberRequest, LibraryCapabilities, ListLibrariesRequest, ReadLibraryRequest,
+        RemoveLibraryMemberRequest, UpdateSettingsRequest,
     },
 };
 use folioharbor_domain::{
     id::{LibraryId, RequestId, UserId},
     libraries::role::RoleCode,
 };
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 pub fn router(auth_features: Option<AuthFeatures>) -> Router<AppState> {
@@ -42,10 +44,24 @@ pub fn router(auth_features: Option<AuthFeatures>) -> Router<AppState> {
     }
 }
 
+pub fn invitation_router() -> Router<AppState> {
+    Router::new().route("/accept", post(accept_invitation))
+}
+
 #[derive(Serialize)]
 struct LibraryResponse {
     library_id: String,
     name: String,
+    role: &'static str,
+    reader_download_enabled: bool,
+    capabilities: LibraryCapabilitiesResponse,
+}
+#[derive(Serialize)]
+struct LibraryCapabilitiesResponse {
+    can_upload: bool,
+    can_invite_members: bool,
+    can_manage_members: bool,
+    can_manage_settings: bool,
 }
 #[derive(Serialize)]
 struct MemberResponse {
@@ -66,6 +82,43 @@ struct RoleBody {
 struct InvitationBody {
     email: String,
     role: String,
+}
+#[derive(Deserialize)]
+struct AcceptInvitationBody {
+    token: String,
+}
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum AcceptInvitationResponse {
+    Accepted { library_id: String },
+    WrongAccount { email_hint: String },
+    Unverified,
+    Expired,
+    Consumed,
+    Invalid,
+}
+
+impl From<LibraryCapabilities> for LibraryCapabilitiesResponse {
+    fn from(value: LibraryCapabilities) -> Self {
+        Self {
+            can_upload: value.can_upload,
+            can_invite_members: value.can_invite_members,
+            can_manage_members: value.can_manage_members,
+            can_manage_settings: value.can_manage_settings,
+        }
+    }
+}
+
+impl From<folioharbor_application::libraries::LibraryView> for LibraryResponse {
+    fn from(value: folioharbor_application::libraries::LibraryView) -> Self {
+        Self {
+            library_id: value.library_id.as_uuid().to_string(),
+            name: value.name,
+            role: value.role.as_str(),
+            reader_download_enabled: value.reader_download_enabled,
+            capabilities: value.capabilities.into(),
+        }
+    }
 }
 
 fn library_id(raw: &str) -> Result<LibraryId, AppError> {
@@ -108,10 +161,7 @@ async fn list_libraries(
         Ok(values) => Json(
             values
                 .into_iter()
-                .map(|v| LibraryResponse {
-                    library_id: v.library_id.as_uuid().to_string(),
-                    name: v.name,
-                })
+                .map(LibraryResponse::from)
                 .collect::<Vec<_>>(),
         )
         .into_response(),
@@ -138,11 +188,7 @@ async fn get_library(
         })
         .await
     {
-        Ok(v) => Json(LibraryResponse {
-            library_id: v.library_id.as_uuid().to_string(),
-            name: v.name,
-        })
-        .into_response(),
+        Ok(v) => Json(LibraryResponse::from(v)).into_response(),
         Err(e) => problem(&e, &ctx),
     }
 }
@@ -233,6 +279,41 @@ async fn invite_member(
             .await,
         &ctx,
     )
+}
+
+async fn accept_invitation(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<ProblemContext>,
+    AuthenticatedActor(actor): AuthenticatedActor,
+    ApiJson(body): ApiJson<AcceptInvitationBody>,
+) -> Response {
+    match state
+        .library_api
+        .accept_invitation(AcceptLibraryInvitationRequest {
+            actor: actor.user_id,
+            token: SecretString::from(body.token),
+        })
+        .await
+    {
+        Ok(outcome) => {
+            let response = match outcome {
+                InvitationAcceptance::Accepted { library_id } => {
+                    AcceptInvitationResponse::Accepted {
+                        library_id: library_id.as_uuid().to_string(),
+                    }
+                }
+                InvitationAcceptance::WrongAccount { email_hint } => {
+                    AcceptInvitationResponse::WrongAccount { email_hint }
+                }
+                InvitationAcceptance::Unverified => AcceptInvitationResponse::Unverified,
+                InvitationAcceptance::Expired => AcceptInvitationResponse::Expired,
+                InvitationAcceptance::Consumed => AcceptInvitationResponse::Consumed,
+                InvitationAcceptance::Invalid => AcceptInvitationResponse::Invalid,
+            };
+            Json(response).into_response()
+        }
+        Err(error) => problem(&error, &ctx),
+    }
 }
 async fn change_member(
     State(state): State<AppState>,

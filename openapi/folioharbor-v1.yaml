@@ -101,7 +101,11 @@ paths:
       operationId: listLibraries
       security: [{cookieAuth: []}]
       responses:
-        '200': {description: Libraries visible to the authenticated member}
+        '200':
+          description: Libraries visible to the authenticated member with server-derived capabilities
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/Library'}}
         '401': {$ref: '#/components/responses/Problem'}
   /api/v1/libraries/{library_id}:
     get:
@@ -109,7 +113,11 @@ paths:
       security: [{cookieAuth: []}]
       parameters: [{$ref: '#/components/parameters/LibraryId'}]
       responses:
-        '200': {description: Authorized library detail}
+        '200':
+          description: Authorized library detail with server-derived capabilities
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Library'}
         '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
         '401': {$ref: '#/components/responses/Problem'}
         '404': {$ref: '#/components/responses/Problem'}
@@ -141,7 +149,11 @@ paths:
       security: [{cookieAuth: []}]
       parameters: [{$ref: '#/components/parameters/LibraryId'}]
       responses:
-        '200': {description: Library members visible to the authenticated member}
+        '200':
+          description: Library members visible to the authenticated member
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/LibraryMember'}}
         '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
         '401': {$ref: '#/components/responses/Problem'}
         '404': {$ref: '#/components/responses/Problem'}
@@ -150,6 +162,15 @@ paths:
       operationId: changeLibraryMemberRole
       security: [{cookieAuth: []}]
       parameters: [{$ref: '#/components/parameters/LibraryId'}, {$ref: '#/components/parameters/UserId'}, {$ref: '#/components/parameters/CsrfToken'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [role]
+              properties: {role: {type: string, enum: [owner, editor, reader]}}
       responses:
         '204': {description: Role changed and audited atomically}
         '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
@@ -169,6 +190,17 @@ paths:
       operationId: inviteLibraryMember
       security: [{cookieAuth: []}]
       parameters: [{$ref: '#/components/parameters/LibraryId'}, {$ref: '#/components/parameters/CsrfToken'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, role]
+              properties:
+                email: {type: string, format: email}
+                role: {type: string, enum: [editor, reader]}
       responses:
         '204': {description: Invitation created and audited atomically}
         '400': {$ref: '#/components/responses/InvalidSessionIdProblem'}
@@ -180,6 +212,33 @@ paths:
             application/problem+json:
               schema: {$ref: '#/components/schemas/ProblemDetails'}
               example: {type: 'https://library.example/problems/mail-delivery-unavailable', title: Dependency unavailable, status: 503, detail: A required service is temporarily unavailable., instance: /problems/01JREQ00000000000000000000, code: mail_delivery_unavailable, request_id: 01JREQ00000000000000000000}
+  /api/v1/invitations/accept:
+    post:
+      operationId: acceptLibraryInvitation
+      description: Atomically accepts an email-bound invitation and returns only a masked email hint on account mismatch.
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: '#/components/parameters/CsrfToken'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token]
+              properties: {token: {type: string, minLength: 1}}
+      responses:
+        '200':
+          description: Safe invitation acceptance state
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InvitationAcceptance'}
+        '400': {$ref: '#/components/responses/Problem'}
+        '401': {$ref: '#/components/responses/Problem'}
+        '403': {$ref: '#/components/responses/Problem'}
+        '413': {$ref: '#/components/responses/Problem'}
+        '415': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
   /api/v1/libraries/{library_id}/uploads:
     post:
       operationId: createUpload
@@ -639,6 +698,40 @@ components:
         session_id: {type: string, format: uuid}
         is_current: {type: boolean}
         status: {type: string, enum: [active, idle_expired, absolute_expired, revoked]}
+    LibraryCapabilities:
+      type: object
+      additionalProperties: false
+      required: [can_upload, can_invite_members, can_manage_members, can_manage_settings]
+      properties:
+        can_upload: {type: boolean, description: Effective holding.edit capability}
+        can_invite_members: {type: boolean, description: Effective member.invite capability}
+        can_manage_members: {type: boolean, description: Effective library.manage capability for role and removal operations}
+        can_manage_settings: {type: boolean, description: Effective library.manage capability for settings}
+    Library:
+      type: object
+      additionalProperties: false
+      required: [library_id, name, role, reader_download_enabled, capabilities]
+      properties:
+        library_id: {type: string, format: uuid}
+        name: {type: string}
+        role: {type: string, enum: [owner, editor, reader]}
+        reader_download_enabled: {type: boolean}
+        capabilities: {$ref: '#/components/schemas/LibraryCapabilities'}
+    LibraryMember:
+      type: object
+      additionalProperties: false
+      required: [user_id, role]
+      properties:
+        user_id: {type: string, format: uuid}
+        role: {type: string, enum: [owner, editor, reader]}
+    InvitationAcceptance:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: {type: string, enum: [accepted, wrong_account, unverified, expired, consumed, invalid]}
+        library_id: {type: [string, 'null'], format: uuid, description: Present only when accepted}
+        email_hint: {type: [string, 'null'], description: Masked and present only for wrong_account}
     CreateUploadRequest:
       type: object
       additionalProperties: false
@@ -661,6 +754,7 @@ components:
         state: {type: string, enum: [created, receiving, received, queued, validating, importing, ready, duplicate, failed, expired, retry_wait]}
         status_url: {type: string}
         error_code: {type: [string, 'null'], description: Stable safe code; implementation or storage details are never exposed}
+        item_id: {type: [string, 'null'], format: uuid, description: Existing or newly created visible Item for Ready and Duplicate completion}
     BookSummary:
       type: object
       additionalProperties: false
