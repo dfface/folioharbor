@@ -378,3 +378,89 @@ Commit:
 git add scripts/smoke.sh scripts/smoke.test.sh deploy/README.md
 git commit -m "feat: add staging smoke deployment workflow"
 ```
+
+### Task 4: Publish the root documentation entry point
+
+**Files:**
+- Modify: `README.md`
+- Modify: `docs/superpowers/plans/2026-08-09-staging-smoke-deployment.md`
+
+**Interfaces:**
+- Consumes the supported commands documented in `scripts/smoke.sh`,
+  `deploy/README.md`, and `tests/e2e/README.md`.
+- Produces the root-level onboarding entry point for the current EPUB vertical
+  slice, project layout, automated E2E, and staging manual acceptance.
+
+- [x] **Step 1: Document implemented scope and boundaries**
+
+Replace the root README's brief implementation list with an explicit
+`## Current capabilities` section. Describe local account authentication,
+personal and shared libraries, invitations and roles, EPUB import and
+background cataloguing, browser reading, progress synchronization,
+permission-controlled download, PostgreSQL 18/RLS, local Blob lifecycle, and
+API/Worker/CLI/Web health boundaries. Keep the excluded scope explicit:
+OIDC, non-EPUB formats, OPDS, annotations, S3-compatible storage, search,
+federation, and mobile clients are not shipped.
+
+- [x] **Step 2: Add an accurate architecture and repository map**
+
+Add an `## Architecture and repository map` section that identifies:
+
+```text
+apps/       API, Worker, and operator CLI processes
+crates/     domain/application layers and PostgreSQL, storage, EPUB, HTTP adapters
+web/        React web application and browser tests
+migrations/ SQLx PostgreSQL schema migrations
+openapi/    versioned HTTP contract
+deploy/     production-shaped Compose topology and deployment configuration
+tests/e2e/  Playwright production-shaped end-to-end harness
+scripts/    operator and verification commands, including smoke.sh
+docs/       product, design, operations, and release documentation
+```
+
+State that API and Worker use separate least-privilege database roles, while
+the Compose topology keeps PostgreSQL and Blob storage internal and exposes
+only the loopback-bound Web reverse proxy.
+
+- [x] **Step 3: Provide usable test and staging start commands**
+
+Add a `## Run and verify` section with separate subsections:
+
+- Rust quality gates: `cargo fmt --all --check`, strict workspace Clippy,
+  workspace tests, and `cargo deny check`.
+- Browser E2E: `pnpm install --frozen-lockfile`, Playwright Chromium install,
+  and `pnpm --dir web exec playwright test`; link to `tests/e2e/README.md` and
+  state that it creates and tears down its own clean Docker topology.
+- Staging manual acceptance: copy `deploy/staging.env.example` to the ignored
+  `.env.staging`, create the eight ignored secret files, then invoke
+  `scripts/smoke.sh check` and `scripts/smoke.sh up --admin-email ...`; link to
+  `deploy/README.md` for real SMTP, reverse proxy, secrets, lifecycle, and the
+  manual EPUB checklist.
+
+Do not include credential values or a command that deletes staging data in the
+root README.
+
+- [x] **Step 4: Verify all root documentation links and commands**
+
+Run:
+
+```bash
+bash -n scripts/smoke.sh scripts/smoke.test.sh
+bash scripts/smoke.test.sh
+scripts/smoke.sh smoke
+test -f deploy/README.md
+test -f deploy/staging.env.example
+test -f tests/e2e/README.md
+test -f docs/operations/release-checklist.md
+git diff --check
+```
+
+Expected: every command exits 0 and the printed smoke checklist contains the
+EPUB upload step. Do not start a real staging environment.
+
+- [x] **Step 5: Commit the root onboarding documentation**
+
+```bash
+git add README.md docs/superpowers/plans/2026-08-09-staging-smoke-deployment.md
+git commit -m "docs: clarify project onboarding"
+```
