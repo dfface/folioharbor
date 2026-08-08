@@ -55,3 +55,14 @@ URL-encoded role password and the Compose hostname, for example
 The eight files are `postgres-password`, `owner-password`, `api-password`,
 `worker-password`, `owner-database-url`, `api-database-url`,
 `worker-database-url`, and `application-secret`.
+
+Validate the configured staging topology before changing container state:
+
+```sh
+scripts/smoke.sh check
+scripts/smoke.sh smoke
+```
+
+`check` validates the selected configuration, secret paths and permissions, and
+the rendered Compose topology; it does not start containers. `smoke` only
+prints the manual EPUB acceptance checklist and does not invoke Docker.
