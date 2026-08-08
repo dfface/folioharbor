@@ -71,12 +71,16 @@ and the eight `FOLIOHARBOR_*_FILE` secret paths.
 
 - [ ] **Step 1: Write failing configuration-template contract tests**
 
-Create `scripts/smoke.test.sh` with a portable test runner that records failures and exits non-zero. Add tests that assert all required keys exist in `deploy/staging.env.example`, and that Git ignores the two real staging paths:
+Create `scripts/smoke.test.sh` with a portable test runner that records failures and exits non-zero. Copy `deploy/staging.env.example` to a temporary fixture, source that fixture in a child shell, and assert its observable configuration contract rather than grepping source text. The fixture must yield a staging project, isolated secret paths, and real-deployment endpoints; also assert that Git ignores the two real staging paths:
 
 ```bash
-require_line 'FOLIOHARBOR_COMPOSE_PROJECT=folioharbor-staging' deploy/staging.env.example
-require_line 'FOLIOHARBOR_POSTGRES_PASSWORD_FILE=./secrets.staging/postgres-password' deploy/staging.env.example
-require_line 'FOLIOHARBOR_APPLICATION_SECRET_FILE=./secrets.staging/application-secret' deploy/staging.env.example
+assert_equals folioharbor-staging "$(read_fixture_value FOLIOHARBOR_COMPOSE_PROJECT)"
+assert_equals ./secrets.staging/postgres-password \
+  "$(read_fixture_value FOLIOHARBOR_POSTGRES_PASSWORD_FILE)"
+assert_equals ./secrets.staging/application-secret \
+  "$(read_fixture_value FOLIOHARBOR_APPLICATION_SECRET_FILE)"
+assert_equals https://staging-library.example/ \
+  "$(read_fixture_value FOLIOHARBOR_PUBLIC_BASE_URL)"
 git check-ignore -q deploy/.env.staging
 git check-ignore -q deploy/secrets.staging/application-secret
 ```
