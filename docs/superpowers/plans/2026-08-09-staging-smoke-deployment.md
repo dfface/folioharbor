@@ -294,7 +294,7 @@ Compose argument list:
 ```bash
 docker compose ... up -d postgres storage-init migration
 docker compose ... run --rm migration folioharbor admin create --email "$email"
-docker compose ... up -d api worker web
+docker compose ... up -d --wait api worker web
 docker compose ... ps
 ```
 
