@@ -29,3 +29,29 @@ The active limits are starting examples, not sizing guarantees. Worker concurren
 Terminate HTTPS at a separately managed reverse proxy in front of the loopback-bound Web port. Forward only trusted client metadata, preserve `traceparent`, and impose upload/time limits consistent with FolioHarbor. The API is internal to the Compose network; do not publish it, PostgreSQL, or the Blob volume directly.
 
 Secrets may be supplied directly with the documented `FOLIOHARBOR_*` environment names or with the matching `_FILE` names. Prefer Compose secrets. Never commit `.env`, `deploy/secrets/`, database URLs, cookies, tokens, or SMTP passwords.
+
+## Staging manual acceptance
+
+Staging uses the same Compose topology as production, with separate configuration,
+secrets, and Docker resources. Prepare its ignored inputs before starting it:
+
+```sh
+cp deploy/staging.env.example deploy/.env.staging
+mkdir -m 0700 deploy/secrets.staging
+# Create the eight secret files named by deploy/.env.staging, then:
+chmod 600 deploy/secrets.staging/*
+scripts/smoke.sh check
+```
+
+Set `FOLIOHARBOR_COMPOSE_PROJECT` to an isolated name (the template uses
+`folioharbor-staging`). Set `FOLIOHARBOR_PUBLIC_BASE_URL` to the HTTPS URL of
+the staging reverse proxy and keep `FOLIOHARBOR_HTTP_BIND` loopback-bound. Use
+a real staging SMTP service and a staging sender address.
+
+Create independent PostgreSQL administrator, owner, API, Worker, and application
+secrets. The owner, API, and Worker database URLs must use the matching,
+URL-encoded role password and the Compose hostname, for example
+`postgres://folioharbor_api:<url-encoded-password>@postgres/folioharbor`.
+The eight files are `postgres-password`, `owner-password`, `api-password`,
+`worker-password`, `owner-database-url`, `api-database-url`,
+`worker-database-url`, and `application-secret`.
