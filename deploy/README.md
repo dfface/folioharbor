@@ -66,3 +66,37 @@ scripts/smoke.sh smoke
 `check` validates the selected configuration, secret paths and permissions, and
 the rendered Compose topology; it does not start containers. `smoke` only
 prints the manual EPUB acceptance checklist and does not invoke Docker.
+
+Start the staging deployment and create (or safely reuse) an administrator:
+
+```sh
+scripts/smoke.sh up --admin-email admin@staging.example
+scripts/smoke.sh status
+scripts/smoke.sh logs api
+scripts/smoke.sh down
+```
+
+`up` starts PostgreSQL, storage initialization, and schema migration before it
+prompts for the administrator password. It then starts API, Worker, and Web and
+waits for their Compose health checks. If a phase fails, services and volumes
+remain available for `status` and `logs` diagnosis.
+
+`down` stops the isolated staging project and removes orphan containers, but
+keeps the PostgreSQL and Blob volumes. For a disposable staging environment,
+`scripts/smoke.sh destroy` permanently removes those volumes only after you
+type the configured `FOLIOHARBOR_COMPOSE_PROJECT` exactly.
+
+Use a different isolated environment file when needed:
+
+```sh
+scripts/smoke.sh --env-file deploy/.env.staging check
+```
+
+After a successful `up`, complete this manual EPUB smoke checklist:
+
+1. Sign in with the staging administrator.
+2. Upload a representative EPUB and wait for it to appear in the library.
+3. Open the book in the reader and navigate between chapters.
+4. Refresh the reader, reopen the book, and confirm reading progress persists.
+5. Return to the library and confirm the book and progress remain visible.
+6. Check `scripts/smoke.sh status` and review service logs if any step fails.

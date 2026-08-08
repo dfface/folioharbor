@@ -46,9 +46,31 @@ assert_empty_file() {
   fi
 }
 
+assert_not_contains() {
+  needle="$1"
+  haystack="$2"
+  description="$3"
+
+  if [[ "$haystack" == *"$needle"* ]]; then
+    fail "$description: output must not contain '$needle'"
+  fi
+}
+
 run_smoke() {
   smoke_output=""
   if smoke_output="$("$smoke_script" "$@" 2>&1)"; then
+    smoke_status=0
+  else
+    smoke_status=$?
+  fi
+}
+
+run_smoke_with_confirmation() {
+  confirmation="$1"
+  shift
+
+  smoke_output=""
+  if smoke_output="$(printf '%s\n' "$confirmation" | "$smoke_script" "$@" 2>&1)"; then
     smoke_status=0
   else
     smoke_status=$?
@@ -147,6 +169,65 @@ else
   assert_empty_file "$docker_log" "smoke"
   assert_contains "Upload a representative EPUB" "$smoke_output" \
     "smoke prints the EPUB acceptance step"
+
+  printf 'fixture-only-value' > "$fixture_secrets/api-password"
+  chmod 600 "$fixture_secrets/api-password"
+
+  : > "$docker_log"
+  SMOKE_TEST_DOCKER_LOG="$docker_log" PATH="$fake_bin:$PATH" \
+    run_smoke --env-file "$fixture_env" up --admin-email admin@staging.example
+  if (( smoke_status != 0 )); then
+    fail "up succeeds for complete staging configuration: $smoke_output"
+  fi
+  up_log="$(cat "$docker_log")"
+  case "$up_log" in
+    *"config --quiet"*"up -d postgres storage-init migration"*"run --rm migration folioharbor admin create --email admin@staging.example"*"up -d --wait api worker web"*) ;;
+    *) fail "up preserves migration and bootstrap ordering" ;;
+  esac
+
+  : > "$docker_log"
+  SMOKE_TEST_DOCKER_LOG="$docker_log" PATH="$fake_bin:$PATH" \
+    run_smoke --env-file "$fixture_env" status
+  if (( smoke_status != 0 )); then
+    fail "status succeeds: $smoke_output"
+  fi
+  assert_contains "ps" "$(cat "$docker_log")" "status shows Compose service state"
+
+  : > "$docker_log"
+  SMOKE_TEST_DOCKER_LOG="$docker_log" PATH="$fake_bin:$PATH" \
+    run_smoke --env-file "$fixture_env" logs api
+  if (( smoke_status != 0 )); then
+    fail "logs accepts a named service: $smoke_output"
+  fi
+  assert_contains "logs --follow --tail 200 api" "$(cat "$docker_log")" \
+    "logs follows the requested service"
+
+  : > "$docker_log"
+  SMOKE_TEST_DOCKER_LOG="$docker_log" PATH="$fake_bin:$PATH" \
+    run_smoke --env-file "$fixture_env" down
+  if (( smoke_status != 0 )); then
+    fail "down succeeds: $smoke_output"
+  fi
+  down_log="$(cat "$docker_log")"
+  assert_contains "down --remove-orphans" "$down_log" "down removes orphan containers"
+  assert_not_contains "down -v" "$down_log" "down preserves staging volumes"
+
+  : > "$docker_log"
+  SMOKE_TEST_DOCKER_LOG="$docker_log" PATH="$fake_bin:$PATH" \
+    run_smoke_with_confirmation wrong-project --env-file "$fixture_env" destroy
+  if (( smoke_status == 0 )); then
+    fail "destroy rejects an incorrect project confirmation"
+  fi
+  assert_empty_file "$docker_log" "rejected destroy"
+
+  : > "$docker_log"
+  SMOKE_TEST_DOCKER_LOG="$docker_log" PATH="$fake_bin:$PATH" \
+    run_smoke_with_confirmation folioharbor-staging --env-file "$fixture_env" destroy
+  if (( smoke_status != 0 )); then
+    fail "destroy accepts the configured project confirmation: $smoke_output"
+  fi
+  assert_contains "down -v --remove-orphans" "$(cat "$docker_log")" \
+    "confirmed destroy removes staging volumes"
 fi
 
 if (( failures > 0 )); then

@@ -23,6 +23,11 @@ Usage: scripts/smoke.sh [--env-file PATH] <command>
 
 Commands:
   check    Validate staging configuration without starting containers.
+  up       Start staging services and create an administrator.
+  status   Show staging service state.
+  logs     Follow all staging logs or one service's logs.
+  down     Stop staging services while preserving volumes.
+  destroy  Remove staging services and volumes after confirmation.
   smoke    Print the manual EPUB smoke checklist without calling Docker.
 EOF
 }
@@ -98,11 +103,15 @@ compose() {
     -f "$compose_file" "$@"
 }
 
-check() {
+prepare_compose() {
   command -v docker >/dev/null 2>&1 || die "Docker Compose requires docker"
   load_environment
   [[ -n "${FOLIOHARBOR_COMPOSE_PROJECT:-}" ]] || \
     die "missing FOLIOHARBOR_COMPOSE_PROJECT in $environment_file"
+}
+
+check() {
+  prepare_compose
 
   for variable_name in "${secret_variables[@]}"; do
     validate_secret_file "$variable_name"
@@ -110,6 +119,60 @@ check() {
 
   compose config --quiet
   printf 'staging configuration is valid: %s\n' "$FOLIOHARBOR_COMPOSE_PROJECT"
+}
+
+up() {
+  admin_email="$1"
+  check
+
+  if ! compose up -d postgres storage-init migration; then
+    die "failed to start PostgreSQL, storage initialization, or migration; run scripts/smoke.sh --env-file $environment_file logs"
+  fi
+
+  if ! compose run --rm migration folioharbor admin create --email "$admin_email"; then
+    die "failed to create the staging administrator; run scripts/smoke.sh --env-file $environment_file logs"
+  fi
+
+  if ! compose up -d --wait api worker web; then
+    die "failed to start healthy API, Worker, and Web services; run scripts/smoke.sh --env-file $environment_file logs"
+  fi
+
+  compose ps
+  smoke
+}
+
+status() {
+  prepare_compose
+  compose ps
+}
+
+logs() {
+  service_name="${1:-}"
+  prepare_compose
+
+  if [[ -n "$service_name" && "$service_name" == -* ]]; then
+    die "service name must not start with -"
+  fi
+
+  if [[ -n "$service_name" ]]; then
+    compose logs --follow --tail 200 "$service_name"
+  else
+    compose logs --follow --tail 200
+  fi
+}
+
+down() {
+  prepare_compose
+  compose down --remove-orphans
+}
+
+destroy() {
+  prepare_compose
+  printf 'Type %s to permanently remove staging volumes: ' "$FOLIOHARBOR_COMPOSE_PROJECT" >&2
+  IFS= read -r confirmation || die "destroy confirmation was not provided"
+  [[ "$confirmation" == "$FOLIOHARBOR_COMPOSE_PROJECT" ]] || \
+    die "destroy confirmation did not match $FOLIOHARBOR_COMPOSE_PROJECT"
+  compose down -v --remove-orphans
 }
 
 smoke() {
@@ -146,13 +209,37 @@ done
 
 resolve_environment_file
 
-case "${1:-}" in
+command_name="${1:-}"
+shift || true
+
+case "$command_name" in
   check)
-    [[ $# -eq 1 ]] || die "check does not accept additional arguments"
+    [[ $# -eq 0 ]] || die "check does not accept additional arguments"
     check
     ;;
+  up)
+    [[ $# -eq 2 && "$1" == "--admin-email" && -n "$2" ]] || \
+      die "up requires --admin-email EMAIL"
+    up "$2"
+    ;;
+  status)
+    [[ $# -eq 0 ]] || die "status does not accept additional arguments"
+    status
+    ;;
+  logs)
+    [[ $# -le 1 ]] || die "logs accepts at most one service name"
+    logs "${1:-}"
+    ;;
+  down)
+    [[ $# -eq 0 ]] || die "down does not accept additional arguments"
+    down
+    ;;
+  destroy)
+    [[ $# -eq 0 ]] || die "destroy does not accept additional arguments"
+    destroy
+    ;;
   smoke)
-    [[ $# -eq 1 ]] || die "smoke does not accept additional arguments"
+    [[ $# -eq 0 ]] || die "smoke does not accept additional arguments"
     smoke
     ;;
   *)
