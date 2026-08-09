@@ -501,6 +501,7 @@ fn rejects_ambiguous_or_indirect_ncx_labels() -> anyhow::Result<()> {
         br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><text>First</text><text>Second</text></navLabel><content src="chapter.xhtml"/></navPoint></navMap></ncx>"#.as_slice(),
         br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><span>Missing text</span></navLabel><content src="chapter.xhtml"/></navPoint></navMap></ncx>"#.as_slice(),
         br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><span><text>Indirect</text></span></navLabel><content src="chapter.xhtml"/></navPoint></navMap></ncx>"#.as_slice(),
+        br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><text>Chapter</text></navLabel><![CDATA[rogue]]><content src="chapter.xhtml"/></navPoint></navMap></ncx>"#.as_slice(),
     ] {
         let source = epub(&[
             FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },

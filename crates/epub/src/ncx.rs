@@ -23,6 +23,7 @@ pub(crate) fn parse(
             Ok((namespace, Event::Start(element))) => state.start(&namespace, &element)?,
             Ok((namespace, Event::Empty(element))) => state.empty(&namespace, &element)?,
             Ok((_, Event::Text(text))) => state.text(&text)?,
+            Ok((_, Event::CData(cdata))) => state.cdata(&cdata)?,
             Ok((namespace, Event::End(element))) => state.end(&namespace, &element)?,
             Ok((_, Event::Eof)) => break,
             Ok(_) => {}
@@ -196,21 +197,26 @@ impl<'a> NcxState<'a> {
     }
 
     fn text(&mut self, text: &quick_xml::events::BytesText<'_>) -> Result<(), EpubError> {
+        let value = text
+            .xml_content(XmlVersion::Implicit1_0)
+            .map_err(|_| error())?;
+        self.text_value(&value)
+    }
+
+    fn cdata(&mut self, cdata: &quick_xml::events::BytesCData<'_>) -> Result<(), EpubError> {
+        let value = cdata.decode().map_err(|_| error())?;
+        self.text_value(&value)
+    }
+
+    fn text_value(&mut self, value: &str) -> Result<(), EpubError> {
         if let Some(label) = self.label.as_mut() {
-            let value = text
-                .xml_content(XmlVersion::Implicit1_0)
-                .map_err(|_| error())?;
             if label.text_depth == Some(self.depth) {
-                label.value.push_str(&value);
+                label.value.push_str(value);
             } else if !value.trim().is_empty() {
                 return Err(error());
             }
         } else if !self.nav_points.is_empty()
-            && !text
-                .xml_content(XmlVersion::Implicit1_0)
-                .map_err(|_| error())?
-                .trim()
-                .is_empty()
+            && !value.trim().is_empty()
         {
             return Err(error());
         }
