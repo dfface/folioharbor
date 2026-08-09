@@ -506,8 +506,9 @@ async fn import_recovery_hides_real_epub_source_details_in_durable_failures()
             Option<String>,
             Option<String>,
             Option<String>,
+            Option<String>,
         ) = sqlx::query_as(
-            "SELECT job.error_code,job.error_summary,upload.error_code,upload.error_summary,attempt.error_summary FROM folioharbor.background_jobs job JOIN folioharbor.upload_sessions upload ON upload.upload_id=$2 JOIN folioharbor.job_attempts attempt ON attempt.job_id=job.job_id WHERE job.job_id=$1",
+            "SELECT job.error_code,job.error_summary,upload.error_code,upload.error_summary,attempt.error_code,attempt.error_summary FROM folioharbor.background_jobs job JOIN folioharbor.upload_sessions upload ON upload.upload_id=$2 JOIN folioharbor.job_attempts attempt ON attempt.job_id=job.job_id WHERE job.job_id=$1",
         )
         .bind(seeded.job.as_uuid())
         .bind(seeded.upload.as_uuid())
@@ -520,10 +521,11 @@ async fn import_recovery_hides_real_epub_source_details_in_durable_failures()
                 Some(expected_summary.into()),
                 Some(expected_code.into()),
                 None,
+                Some(expected_code.into()),
                 Some(expected_summary.into()),
             )
         );
-        for summary in [persisted.1, persisted.3, persisted.4]
+        for summary in [persisted.1, persisted.3, persisted.5]
             .into_iter()
             .flatten()
         {
