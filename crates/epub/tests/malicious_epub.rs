@@ -444,6 +444,27 @@ fn requires_exactly_one_readable_navigation_document() -> anyhow::Result<()> {
 }
 
 #[test]
+fn rejects_invalid_epub_two_ncx_navigation() -> anyhow::Result<()> {
+    for ncx in [
+        br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><text>Outside</text></navLabel><content src="missing.xhtml"/></navPoint></navMap></ncx>"#.as_slice(),
+        br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><text>   </text></navLabel><content src="chapter.xhtml"/></navPoint></navMap></ncx>"#.as_slice(),
+        br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><head/></ncx>"#.as_slice(),
+    ] {
+        let source = epub(&[
+            FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
+            FixtureEntry { path: "book.opf", bytes: epub_two_ncx_opf(), compression: Stored },
+            FixtureEntry { path: "chapter.xhtml", bytes: b"<html/>", compression: Stored },
+            FixtureEntry { path: "toc.ncx", bytes: ncx, compression: Stored },
+        ])?;
+        assert_eq!(
+            inspect(&source, ParserLimits::default())?,
+            EpubErrorCode::InvalidNavigation
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn spine_requires_readable_content_or_a_readable_fallback() -> anyhow::Result<()> {
     let image_only = epub(&[
         FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
@@ -526,6 +547,10 @@ fn minimal_opf() -> &'static [u8] {
 
 fn nav_opf() -> &'static [u8] {
     br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Book</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine><itemref idref="chapter"/></spine></package>"#
+}
+
+fn epub_two_ncx_opf() -> &'static [u8] {
+    br#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Book</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest><spine toc="ncx"><itemref idref="chapter"/></spine></package>"#
 }
 
 fn valid_nav() -> &'static [u8] {

@@ -2,6 +2,7 @@ mod archive;
 mod container;
 mod error;
 mod navigation;
+mod ncx;
 mod package;
 mod resource_reader;
 mod sanitize;

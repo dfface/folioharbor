@@ -7,7 +7,7 @@ use quick_xml::{
     reader::NsReader,
 };
 
-use crate::{EpubError, EpubErrorCode, EpubPath, archive::BoundedArchive, navigation};
+use crate::{EpubError, EpubErrorCode, EpubPath, archive::BoundedArchive, navigation, ncx};
 
 const OPF_NS: &[u8] = b"http://www.idpf.org/2007/opf";
 const DC_NS: &[u8] = b"http://purl.org/dc/elements/1.1/";
@@ -57,10 +57,12 @@ struct ManifestItem {
 }
 
 struct PackageDocument {
+    is_epub_two: bool,
     metadata: Metadata,
     manifest: BTreeMap<String, ManifestItem>,
     order: Vec<String>,
     spine_refs: Vec<(String, bool)>,
+    ncx_id: Option<String>,
     warnings: Vec<String>,
 }
 
@@ -114,10 +116,12 @@ impl<'a> PackageState<'a> {
             archive,
             package_path,
             document: PackageDocument {
+                is_epub_two: false,
                 metadata: Metadata::default(),
                 manifest: BTreeMap::new(),
                 order: Vec::new(),
                 spine_refs: Vec::new(),
+                ncx_id: None,
                 warnings: Vec::new(),
             },
             metadata_field: None,
@@ -141,17 +145,17 @@ impl<'a> PackageState<'a> {
         let is_dc = is_namespace(namespace, DC_NS);
         if self.depth == 1 {
             let version = attribute(element, b"version")?;
-            if !is_opf
-                || local.as_slice() != b"package"
-                || !version
-                    .as_deref()
-                    .is_some_and(|value| value.starts_with("3."))
-            {
+            let is_epub_two = version
+                .as_deref()
+                .is_some_and(|value| value.starts_with("2."));
+            let is_epub_three = version.as_deref().is_some_and(|value| value.starts_with("3."));
+            if !is_opf || local.as_slice() != b"package" || (!is_epub_two && !is_epub_three) {
                 return Err(invalid_package());
             }
             self.saw_package = true;
+            self.document.is_epub_two = is_epub_two;
         } else if self.depth == 2 && is_opf {
-            self.start_section(&local)?;
+            self.start_section(&local, element)?;
         } else if self.depth == 3 && self.section == Some(PackageSection::Metadata) && is_dc {
             if matches!(
                 local.as_slice(),
@@ -185,7 +189,11 @@ impl<'a> PackageState<'a> {
         Ok(())
     }
 
-    fn start_section(&mut self, local: &[u8]) -> Result<(), EpubError> {
+    fn start_section(
+        &mut self,
+        local: &[u8],
+        element: &BytesStart<'_>,
+    ) -> Result<(), EpubError> {
         let section = match local {
             b"metadata" => Some(PackageSection::Metadata),
             b"manifest" => Some(PackageSection::Manifest),
@@ -196,6 +204,9 @@ impl<'a> PackageState<'a> {
         if let Some(section) = section {
             if !self.seen_sections.insert(section) {
                 return Err(invalid_package());
+            }
+            if section == PackageSection::Spine {
+                self.document.ncx_id = attribute(element, b"toc")?;
             }
             self.section = Some(section);
         }
@@ -375,24 +386,43 @@ fn build_publication(
         .values()
         .find(|item| has_property(&item.properties, "cover-image"))
         .map(|item| item.href.clone());
-    let mut navigation_items = document
-        .manifest
-        .values()
-        .filter(|item| has_property(&item.properties, "nav"));
-    let nav = navigation_items
-        .next()
-        .filter(|item| item.media_type == "application/xhtml+xml")
-        .ok_or_else(|| error(EpubErrorCode::InvalidNavigation))?;
-    if navigation_items.next().is_some() {
-        return Err(error(EpubErrorCode::InvalidNavigation));
-    }
-    let toc = navigation::parse(
-        archive,
-        archive
-            .get(&strip_fragment(&nav.href)?)
-            .ok_or_else(|| error(EpubErrorCode::InvalidNavigation))?,
-        &nav.href,
-    )?;
+    let toc = if document.is_epub_two {
+        let ncx_id = document
+            .ncx_id
+            .as_deref()
+            .ok_or_else(|| error(EpubErrorCode::InvalidNavigation))?;
+        let ncx_item = document
+            .manifest
+            .get(ncx_id)
+            .filter(|item| item.media_type == "application/x-dtbncx+xml")
+            .ok_or_else(|| error(EpubErrorCode::InvalidNavigation))?;
+        ncx::parse(
+            archive,
+            archive
+                .get(&strip_fragment(&ncx_item.href)?)
+                .ok_or_else(|| error(EpubErrorCode::InvalidNavigation))?,
+            &ncx_item.href,
+        )?
+    } else {
+        let mut navigation_items = document
+            .manifest
+            .values()
+            .filter(|item| has_property(&item.properties, "nav"));
+        let nav = navigation_items
+            .next()
+            .filter(|item| item.media_type == "application/xhtml+xml")
+            .ok_or_else(|| error(EpubErrorCode::InvalidNavigation))?;
+        if navigation_items.next().is_some() {
+            return Err(error(EpubErrorCode::InvalidNavigation));
+        }
+        navigation::parse(
+            archive,
+            archive
+                .get(&strip_fragment(&nav.href)?)
+                .ok_or_else(|| error(EpubErrorCode::InvalidNavigation))?,
+            &nav.href,
+        )?
+    };
     Ok(ParsedPublication {
         metadata: document.metadata,
         spine,

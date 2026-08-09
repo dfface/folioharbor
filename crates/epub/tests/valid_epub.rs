@@ -3,7 +3,9 @@ mod fixtures;
 
 use std::io::Cursor;
 
+use fixtures::{FixtureEntry, epub};
 use folioharbor_epub::{EpubParser, EpubPath, ParserLimits};
+use zip::CompressionMethod::Stored;
 
 #[test]
 fn parses_epub_three_into_neutral_publication_data() -> anyhow::Result<()> {
@@ -66,6 +68,46 @@ fn parses_epub_three_into_neutral_publication_data() -> anyhow::Result<()> {
 #[test]
 fn fixture_generation_is_deterministic() -> anyhow::Result<()> {
     assert_eq!(fixtures::valid_epub()?, fixtures::valid_epub()?);
+    Ok(())
+}
+
+#[test]
+fn parses_epub_two_ncx_entries_into_ordered_toc() -> anyhow::Result<()> {
+    let source = epub(&[
+        FixtureEntry {
+            path: "META-INF/container.xml",
+            bytes: br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#,
+            compression: Stored,
+        },
+        FixtureEntry {
+            path: "book.opf",
+            bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>EPUB 2 Book</dc:title></metadata><manifest><item id="chapter-one" href="text/one.xhtml" media-type="application/xhtml+xml"/><item id="chapter-two" href="text/two.xhtml" media-type="application/xhtml+xml"/><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest><spine toc="ncx"><itemref idref="chapter-one"/><itemref idref="chapter-two"/></spine></package>"#,
+            compression: Stored,
+        },
+        FixtureEntry {
+            path: "toc.ncx",
+            bytes: br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint id="one"><navLabel><text>One</text></navLabel><content src="text/one.xhtml#start"/><navPoint id="two"><navLabel><text>Two</text></navLabel><content src="text/two.xhtml"/></navPoint></navPoint></navMap></ncx>"#,
+            compression: Stored,
+        },
+        FixtureEntry {
+            path: "text/one.xhtml",
+            bytes: b"<html/>",
+            compression: Stored,
+        },
+        FixtureEntry {
+            path: "text/two.xhtml",
+            bytes: b"<html/>",
+            compression: Stored,
+        },
+    ])?;
+
+    let publication = EpubParser::inspect(&mut Cursor::new(source), ParserLimits::default())?;
+
+    assert_eq!(publication.toc.len(), 2);
+    assert_eq!(publication.toc[0].label, "One");
+    assert_eq!(publication.toc[0].href.as_str(), "text/one.xhtml#start");
+    assert_eq!(publication.toc[1].label, "Two");
+    assert_eq!(publication.toc[1].href.as_str(), "text/two.xhtml");
     Ok(())
 }
 
