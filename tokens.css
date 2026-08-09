@@ -1,0 +1,64 @@
+/* Hallmark · genre: modern-minimal · macrostructure: Workbench · theme: Cobalt · enrichment: none · nav: N3 Side-rail · footer: Ft2 Inline single line
+ * audience: personal, household, and small-team library members · use: resume reading and manage a library
+ * pre-emit critique: P5 H5 E5 S5 R5 V4
+ */
+:root {
+  --font-display: "Geist Variable", sans-serif;
+  --font-body: "Geist Variable", sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, monospace;
+  --color-paper: oklch(98% 0.004 250);
+  --color-paper-raised: oklch(100% 0 0);
+  --color-paper-muted: oklch(95% 0.008 250);
+  --color-ink: oklch(22% 0.018 255);
+  --color-ink-soft: oklch(37% 0.016 255);
+  --color-muted: oklch(53% 0.016 255);
+  --color-rule: oklch(89% 0.01 250);
+  --color-accent: oklch(48% 0.19 264);
+  --color-accent-ink: oklch(99% 0.003 250);
+  --color-focus: oklch(57% 0.17 250);
+  --color-success: oklch(48% 0.12 150);
+  --color-error: oklch(55% 0.19 28);
+  --color-shadow: oklch(28% 0.025 255 / 0.11);
+  --space-2xs: 0.25rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2rem;
+  --space-2xl: 3rem;
+  --space-3xl: 4.5rem;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: clamp(1.5rem, 2.2vw, 2rem);
+  --text-display: clamp(2.25rem, 4vw, 3.75rem);
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+  --rule-hair: 1px;
+  --dur-fast: 130ms;
+  --dur-base: 200ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --background: var(--color-paper);
+  --foreground: var(--color-ink);
+  --card: var(--color-paper-raised);
+  --card-foreground: var(--color-ink);
+  --popover: var(--color-paper-raised);
+  --popover-foreground: var(--color-ink);
+  --primary: var(--color-accent);
+  --primary-foreground: var(--color-accent-ink);
+  --secondary: var(--color-paper-muted);
+  --secondary-foreground: var(--color-ink);
+  --muted: var(--color-paper-muted);
+  --muted-foreground: var(--color-muted);
+  --accent: var(--color-paper-muted);
+  --accent-foreground: var(--color-ink);
+  --destructive: var(--color-error);
+  --border: var(--color-rule);
+  --input: var(--color-rule);
+  --ring: var(--color-focus);
+  --radius: var(--radius-md);
+}

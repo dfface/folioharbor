@@ -2,7 +2,9 @@
   "app": {
     "name": "FolioHarbor",
     "loading": "Checking your session…",
-    "welcome": "Your reading harbor is ready.",
+    "welcome": "Reading and management, in one steady rhythm.",
+    "context": "Your private library",
+    "footer": "Local-first · kept private",
     "language": "Language",
     "english": "English",
     "chinese": "简体中文"
@@ -10,7 +12,11 @@
   "nav": {
     "home": "Home",
     "sessions": "Sessions",
-    "logout": "Log out"
+    "logout": "Log out",
+    "loggingOut": "Signing out…",
+    "library": "Library",
+    "preferences": "Preferences",
+    "workspace": "Workspace navigation"
   },
   "auth": {
     "email": "Email",
@@ -70,6 +76,7 @@
   },
   "libraries": {
     "current": "Current library",
+    "workspace": "Library workspace",
     "loading": "Loading libraries…",
     "role": "Your role: {{role}}",
     "navigation": "Library navigation",
@@ -82,6 +89,17 @@
   },
   "catalog": {
     "allBooks": "All books",
+    "collection": "Collection",
+    "description": "Search, browse, and continue your next stretch of reading.",
+    "bookCount": "{{count}} books",
+    "search": "Search books",
+    "searchPlaceholder": "Search by title or author",
+    "view": "View",
+    "gridView": "Grid view",
+    "listView": "Compact list view",
+    "noResults": "No books match this search.",
+    "readyToRead": "Ready to read",
+    "openBook": "Open {{title}}",
     "loading": "Loading books…",
     "loadingMore": "Loading more books…",
     "loadingItem": "Loading book…",

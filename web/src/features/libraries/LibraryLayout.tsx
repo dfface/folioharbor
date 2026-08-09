@@ -1,6 +1,7 @@
 import { createContext, useContext } from "react";
 import { useTranslation } from "react-i18next";
-import { Link, Navigate, Outlet, useNavigate, useParams } from "react-router";
+import { BookOpen, Settings2, Upload, Users } from "lucide-react";
+import { NavLink, Navigate, Outlet, useNavigate, useParams } from "react-router";
 
 import { requestErrorMessage } from "../auth/form";
 import type { Library } from "./api";
@@ -49,16 +50,21 @@ export function LibraryLayout() {
             libraries={libraries.data}
             onChange={(nextLibrary) => { void navigate(`/libraries/${encodeURIComponent(nextLibrary)}/books`); }}
           />
-          <h2 id="current-library-title">{library.name}</h2>
-          <p className="library-eyebrow">{t("libraries.role", { role: t(`roles.${library.role}`) })}</p>
+          <div className="library-title-row">
+            <div>
+              <p className="library-eyebrow">{t("libraries.workspace")}</p>
+              <h2 id="current-library-title">{library.name}</h2>
+            </div>
+            <p className="library-role">{t("libraries.role", { role: t(`roles.${library.role}`) })}</p>
+          </div>
         </div>
         <nav className="library-nav" aria-label={t("libraries.navigation")}>
-          <Link to={`${base}/books`}>{t("libraries.books")}</Link>{" "}
-          {library.capabilities.can_upload ? <Link to={`${base}/uploads`}>{t("libraries.uploads")}</Link> : null}{" "}
+          <NavLink to={`${base}/books`}><BookOpen size={16} aria-hidden="true" />{t("libraries.books")}</NavLink>
+          {library.capabilities.can_upload ? <NavLink to={`${base}/uploads`}><Upload size={16} aria-hidden="true" />{t("libraries.uploads")}</NavLink> : null}
           {library.capabilities.can_invite_members || library.capabilities.can_manage_members
-            ? <Link to={`${base}/members`}>{t("libraries.members")}</Link>
+            ? <NavLink to={`${base}/members`}><Users size={16} aria-hidden="true" />{t("libraries.members")}</NavLink>
             : null}{" "}
-          {library.capabilities.can_manage_settings ? <Link to={`${base}/settings`}>{t("libraries.settings")}</Link> : null}
+          {library.capabilities.can_manage_settings ? <NavLink to={`${base}/settings`}><Settings2 size={16} aria-hidden="true" />{t("libraries.settings")}</NavLink> : null}
         </nav>
         <Outlet />
       </section>
