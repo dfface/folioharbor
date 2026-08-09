@@ -271,11 +271,19 @@ fn reconciled_failure(code: &str) -> JobFailure {
         }
         _ => JobFailure::Permanent {
             code: match code {
+                "encrypted_epub_unsupported" => "encrypted_epub_unsupported",
+                "invalid_epub_navigation" => "invalid_epub_navigation",
                 "invalid_epub" => "invalid_epub",
                 "catalog_import_invalid" => "catalog_import_invalid",
                 _ => "import_failed",
             },
-            summary: format!("persisted import failure: {code}"),
+            summary: match code {
+                "encrypted_epub_unsupported" => {
+                    "encrypted EPUB files are not supported".to_owned()
+                }
+                "invalid_epub_navigation" => "publication navigation is invalid".to_owned(),
+                _ => format!("persisted import failure: {code}"),
+            },
         },
     }
 }

@@ -219,7 +219,22 @@ async fn cleanup_claim_survives_a_real_process_crash_and_is_reclaimed() -> anyho
 
 struct FailureDispatcher(Mutex<HashMap<String, Option<JobFailure>>>);
 
-struct ParserFailure(PublicationParserError);
+const UNTRUSTED_PARSER_DETAILS: &str =
+    "/private/imports/book.opf <package><metadata>secret</metadata></package> PK\\x03\\x04";
+
+struct ParserFailure {
+    error: PublicationParserError,
+    untrusted_details: String,
+}
+
+impl ParserFailure {
+    fn new(error: PublicationParserError) -> Self {
+        Self {
+            error,
+            untrusted_details: UNTRUSTED_PARSER_DETAILS.to_owned(),
+        }
+    }
+}
 
 #[async_trait]
 impl PublicationParser for ParserFailure {
@@ -231,7 +246,8 @@ impl PublicationParser for ParserFailure {
         &self,
         _: &StorageKey,
     ) -> Result<folioharbor_domain::catalog::CatalogPublication, PublicationParserError> {
-        Err(self.0)
+        std::hint::black_box(&self.untrusted_details);
+        Err(self.error)
     }
 }
 
@@ -400,7 +416,7 @@ async fn import_recovery_persists_typed_parser_failures_without_archive_details(
         let seeded = seed_import(&pools, &blobs, sequence).await?;
         let process = Arc::new(ProcessImportJob::new(
             Arc::new(PgImportRepository::new(pools.worker.clone())),
-            Arc::new(ParserFailure(parser_error)),
+            Arc::new(ParserFailure::new(parser_error)),
             Arc::new(PgCatalogRepository::new(pools.worker.clone())),
             RetrySchedule::default(),
         ));
@@ -412,9 +428,15 @@ async fn import_recovery_persists_typed_parser_failures_without_archive_details(
         );
 
         assert_eq!(runner.run_once().await?, 1);
-        let persisted: (Option<String>, Option<String>, Option<String>, Option<String>) =
+        let persisted: (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) =
             sqlx::query_as(
-                "SELECT job.error_code,job.error_summary,upload.error_code,attempt.error_summary FROM folioharbor.background_jobs job JOIN folioharbor.upload_sessions upload ON upload.upload_id=$2 JOIN folioharbor.job_attempts attempt ON attempt.job_id=job.job_id WHERE job.job_id=$1",
+                "SELECT job.error_code,job.error_summary,upload.error_code,upload.error_summary,attempt.error_summary FROM folioharbor.background_jobs job JOIN folioharbor.upload_sessions upload ON upload.upload_id=$2 JOIN folioharbor.job_attempts attempt ON attempt.job_id=job.job_id WHERE job.job_id=$1",
             )
             .bind(seeded.job.as_uuid())
             .bind(seeded.upload.as_uuid())
@@ -426,15 +448,112 @@ async fn import_recovery_persists_typed_parser_failures_without_archive_details(
                 Some(expected_code.into()),
                 Some(expected_summary.into()),
                 Some(expected_code.into()),
+                None,
                 Some(expected_summary.into()),
             )
         );
-        for summary in [persisted.1, persisted.3].into_iter().flatten() {
+        for summary in [persisted.1, persisted.3, persisted.4]
+            .into_iter()
+            .flatten()
+        {
             assert!(!summary.contains(seeded.storage_key.as_str()));
             assert!(!summary.contains("book.opf"));
             assert!(!summary.contains("<package"));
             assert!(!summary.contains("PK\\x03\\x04"));
+            assert!(!summary.contains(UNTRUSTED_PARSER_DETAILS));
         }
+    }
+
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn import_recovery_keeps_typed_terminal_code_after_lease_expiry() -> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let directory = tempfile::tempdir()?;
+    let blobs: Arc<dyn BlobStore> = Arc::new(LocalBlobStore::new(directory.path()));
+
+    for (sequence, parser_error, expected_code, expected_summary) in [
+        (
+            11,
+            PublicationParserError::EncryptedContent,
+            "encrypted_epub_unsupported",
+            "encrypted EPUB files are not supported",
+        ),
+        (
+            12,
+            PublicationParserError::InvalidNavigation,
+            "invalid_epub_navigation",
+            "publication navigation is invalid",
+        ),
+    ] {
+        let seeded = seed_import(&pools, &blobs, sequence).await?;
+        let jobs = Arc::new(PgJobRepository::new(pools.worker.clone()));
+        let now = OffsetDateTime::now_utc();
+        let leased = jobs
+            .lease(LeaseJobs {
+                owner: format!("typed-parser-crash-{sequence}"),
+                now,
+                lease_for: Duration::minutes(1),
+                limit: 1,
+                request_id: RequestId::new(),
+            })
+            .await?;
+        assert_eq!(leased.len(), 1);
+        let process = Arc::new(ProcessImportJob::new(
+            Arc::new(PgImportRepository::new(pools.worker.clone())),
+            Arc::new(ParserFailure::new(parser_error)),
+            Arc::new(PgCatalogRepository::new(pools.worker.clone())),
+            RetrySchedule::default(),
+        ));
+        let failure = WorkerHandlers::new(process.clone())
+            .dispatch(leased[0].clone())
+            .await
+            .expect_err("parser failure persists before the worker crash");
+        assert!(matches!(
+            failure,
+            JobFailure::Permanent { code, summary }
+                if code == expected_code && summary == expected_summary
+        ));
+        sqlx::query("UPDATE folioharbor.background_jobs SET lease_expires_at=$2 WHERE job_id=$1")
+            .bind(seeded.job.as_uuid())
+            .bind(now - Duration::seconds(1))
+            .execute(&pools.owner)
+            .await?;
+
+        let restarted = WorkerRunner::new(
+            jobs,
+            Arc::new(WorkerHandlers::new(process)),
+            format!("typed-parser-recovery-{sequence}"),
+            RunnerConfig::new(1).expect("one recovery slot"),
+        );
+        assert_eq!(restarted.run_once().await?, 1);
+        let persisted: (Option<String>, Option<String>, Option<String>, Option<String>) =
+            sqlx::query_as(
+                "SELECT job.error_code,job.error_summary,upload.error_code,upload.error_summary FROM folioharbor.background_jobs job JOIN folioharbor.upload_sessions upload ON upload.upload_id=$2 WHERE job.job_id=$1",
+            )
+            .bind(seeded.job.as_uuid())
+            .bind(seeded.upload.as_uuid())
+            .fetch_one(&pools.owner)
+            .await?;
+        assert_eq!(
+            persisted,
+            (
+                Some(expected_code.into()),
+                Some(expected_summary.into()),
+                Some(expected_code.into()),
+                None,
+            )
+        );
     }
 
     pools.close().await;
