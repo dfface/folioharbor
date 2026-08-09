@@ -461,8 +461,7 @@ fn build_publication(
     let guide_cover = document
         .guide_cover
         .as_ref()
-        .filter(|cover| manifest_contains_href(&document.manifest, cover))
-        .cloned();
+        .and_then(|cover| manifest_resource_href(&document.manifest, cover));
     let cover = document
         .epub_two_cover_id
         .as_deref()
@@ -662,13 +661,15 @@ fn is_readable_spine_item(version: PackageVersion, item: &ManifestItem) -> bool 
     ) || (version == PackageVersion::Epub2 && item.media_type == "text/html")
 }
 
-fn manifest_contains_href(manifest: &BTreeMap<String, ManifestItem>, href: &EpubPath) -> bool {
-    let Ok(href) = strip_fragment(href) else {
-        return false;
-    };
-    manifest
-        .values()
-        .any(|item| strip_fragment(&item.href).is_ok_and(|manifest_href| manifest_href == href))
+fn manifest_resource_href(
+    manifest: &BTreeMap<String, ManifestItem>,
+    href: &EpubPath,
+) -> Option<EpubPath> {
+    let href = strip_fragment(href).ok()?;
+    manifest.values().find_map(|item| {
+        let manifest_href = strip_fragment(&item.href).ok()?;
+        (manifest_href == href).then_some(manifest_href)
+    })
 }
 
 fn push_warning(warnings: &mut Vec<String>, warning: String) {

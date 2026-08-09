@@ -332,6 +332,25 @@ async fn omits_unmanifested_guide_cover_from_catalog_publication() -> anyhow::Re
     Ok(())
 }
 
+#[tokio::test]
+async fn normalizes_fragmented_guide_cover_to_manifest_catalog_resource() -> anyhow::Result<()> {
+    let source = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#, compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Guide cover fragment</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="guide" href="guide.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine><guide><reference type="cover" href="guide.xhtml#cover"/></guide></package>"#, compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html/>", compression: Stored },
+        FixtureEntry { path: "guide.xhtml", bytes: b"<html id=\"cover\"/>", compression: Stored },
+    ])?;
+    let parser =
+        EpubPublicationParser::new(Arc::new(ArchiveBlobs(source)), ParserLimits::default());
+
+    let publication = parser
+        .parse(&StorageKey::from_opaque("fixture".to_owned()))
+        .await?;
+
+    assert_eq!(publication.cover_href(), Some("guide.xhtml"));
+    Ok(())
+}
+
 fn sha256(input: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     Sha256::digest(input).into()
