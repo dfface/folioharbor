@@ -6,6 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use fixtures::{FixtureEntry, epub};
 use folioharbor_application::{
     imports::{CleanupImports, JobFailure, ProcessImportJob, RetrySchedule},
     ports::{
@@ -31,6 +32,7 @@ use folioharbor_worker::{JobDispatcher, RunnerConfig, WorkerRunner, handlers::Wo
 use secrecy::SecretString;
 use sha2::{Digest as _, Sha256};
 use time::{Duration, OffsetDateTime};
+use zip::CompressionMethod::Stored;
 
 #[path = "../../../tests/fixtures/epub/generate-fixtures.rs"]
 mod fixtures;
@@ -219,22 +221,7 @@ async fn cleanup_claim_survives_a_real_process_crash_and_is_reclaimed() -> anyho
 
 struct FailureDispatcher(Mutex<HashMap<String, Option<JobFailure>>>);
 
-const UNTRUSTED_PARSER_DETAILS: &str =
-    "/private/imports/book.opf <package><metadata>secret</metadata></package> PK\\x03\\x04";
-
-struct ParserFailure {
-    error: PublicationParserError,
-    untrusted_details: String,
-}
-
-impl ParserFailure {
-    fn new(error: PublicationParserError) -> Self {
-        Self {
-            error,
-            untrusted_details: UNTRUSTED_PARSER_DETAILS.to_owned(),
-        }
-    }
-}
+struct ParserFailure(PublicationParserError);
 
 #[async_trait]
 impl PublicationParser for ParserFailure {
@@ -246,8 +233,7 @@ impl PublicationParser for ParserFailure {
         &self,
         _: &StorageKey,
     ) -> Result<folioharbor_domain::catalog::CatalogPublication, PublicationParserError> {
-        std::hint::black_box(&self.untrusted_details);
-        Err(self.error)
+        Err(self.0)
     }
 }
 
@@ -416,7 +402,7 @@ async fn import_recovery_persists_typed_parser_failures_without_archive_details(
         let seeded = seed_import(&pools, &blobs, sequence).await?;
         let process = Arc::new(ProcessImportJob::new(
             Arc::new(PgImportRepository::new(pools.worker.clone())),
-            Arc::new(ParserFailure::new(parser_error)),
+            Arc::new(ParserFailure(parser_error)),
             Arc::new(PgCatalogRepository::new(pools.worker.clone())),
             RetrySchedule::default(),
         ));
@@ -460,7 +446,91 @@ async fn import_recovery_persists_typed_parser_failures_without_archive_details(
             assert!(!summary.contains("book.opf"));
             assert!(!summary.contains("<package"));
             assert!(!summary.contains("PK\\x03\\x04"));
-            assert!(!summary.contains(UNTRUSTED_PARSER_DETAILS));
+        }
+    }
+
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn import_recovery_hides_real_epub_source_details_in_durable_failures()
+-> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let directory = tempfile::tempdir()?;
+    let blobs: Arc<dyn BlobStore> = Arc::new(LocalBlobStore::new(directory.path()));
+
+    for (sequence, payload, expected_code, expected_summary) in [
+        (
+            21,
+            encrypted_epub_with_sentinels()?,
+            "encrypted_epub_unsupported",
+            "encrypted EPUB files are not supported",
+        ),
+        (
+            22,
+            invalid_navigation_epub_with_sentinels()?,
+            "invalid_epub_navigation",
+            "publication navigation is invalid",
+        ),
+    ] {
+        let seeded = seed_import_with_payload(&pools, &blobs, sequence, payload).await?;
+        let process = Arc::new(ProcessImportJob::new(
+            Arc::new(PgImportRepository::new(pools.worker.clone())),
+            Arc::new(EpubPublicationParser::new(
+                blobs.clone(),
+                ParserLimits::default(),
+            )),
+            Arc::new(PgCatalogRepository::new(pools.worker.clone())),
+            RetrySchedule::default(),
+        ));
+        let runner = WorkerRunner::new(
+            Arc::new(PgJobRepository::new(pools.worker.clone())),
+            Arc::new(WorkerHandlers::new(process)),
+            format!("real-epub-failure-{sequence}"),
+            RunnerConfig::new(1).expect("one real EPUB failure slot"),
+        );
+
+        assert_eq!(runner.run_once().await?, 1);
+        let persisted: (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT job.error_code,job.error_summary,upload.error_code,upload.error_summary,attempt.error_summary FROM folioharbor.background_jobs job JOIN folioharbor.upload_sessions upload ON upload.upload_id=$2 JOIN folioharbor.job_attempts attempt ON attempt.job_id=job.job_id WHERE job.job_id=$1",
+        )
+        .bind(seeded.job.as_uuid())
+        .bind(seeded.upload.as_uuid())
+        .fetch_one(&pools.owner)
+        .await?;
+        assert_eq!(
+            persisted,
+            (
+                Some(expected_code.into()),
+                Some(expected_summary.into()),
+                Some(expected_code.into()),
+                None,
+                Some(expected_summary.into()),
+            )
+        );
+        for summary in [persisted.1, persisted.3, persisted.4]
+            .into_iter()
+            .flatten()
+        {
+            assert!(!summary.contains(seeded.storage_key.as_str()));
+            assert!(!summary.contains("private/book.opf"));
+            assert!(!summary.contains("<package"));
+            assert!(!summary.contains("PK\\x03\\x04"));
         }
     }
 
@@ -511,7 +581,7 @@ async fn import_recovery_keeps_typed_terminal_code_after_lease_expiry() -> anyho
         assert_eq!(leased.len(), 1);
         let process = Arc::new(ProcessImportJob::new(
             Arc::new(PgImportRepository::new(pools.worker.clone())),
-            Arc::new(ParserFailure::new(parser_error)),
+            Arc::new(ParserFailure(parser_error)),
             Arc::new(PgCatalogRepository::new(pools.worker.clone())),
             RetrySchedule::default(),
         ));
@@ -663,11 +733,19 @@ async fn seed_import(
     blobs: &Arc<dyn BlobStore>,
     sequence: usize,
 ) -> anyhow::Result<SeededImport> {
+    seed_import_with_payload(pools, blobs, sequence, fixtures::valid_epub()?).await
+}
+
+async fn seed_import_with_payload(
+    pools: &PgPools,
+    blobs: &Arc<dyn BlobStore>,
+    sequence: usize,
+    payload: Vec<u8>,
+) -> anyhow::Result<SeededImport> {
     let now = OffsetDateTime::now_utc();
     let actor = UserId::new();
     let library = LibraryId::new();
     let upload = UploadId::new();
-    let payload = fixtures::valid_epub()?;
     let bytes = i64::try_from(payload.len())?;
     let digest = Sha256Digest::from_bytes(Sha256::digest(&payload).into());
     let identity = BlobIdentity::new(
@@ -713,6 +791,52 @@ async fn seed_import(
         bytes,
         storage_key: promoted.key,
     })
+}
+
+fn encrypted_epub_with_sentinels() -> anyhow::Result<Vec<u8>> {
+    let mut source = epub(&[FixtureEntry {
+        path: "private/book.opf",
+        bytes: b"<package><metadata>secret</metadata></package>",
+        compression: Stored,
+    }])?;
+    for signature in [b"PK\x03\x04".as_slice(), b"PK\x01\x02".as_slice()] {
+        let offset = source
+            .windows(4)
+            .position(|window| window == signature)
+            .ok_or_else(|| anyhow::anyhow!("fixture ZIP header missing"))?;
+        let flag_offset = if signature[2] == 3 {
+            offset + 6
+        } else {
+            offset + 8
+        };
+        source[flag_offset] |= 1;
+    }
+    Ok(source)
+}
+
+fn invalid_navigation_epub_with_sentinels() -> anyhow::Result<Vec<u8>> {
+    epub(&[
+        FixtureEntry {
+            path: "META-INF/container.xml",
+            bytes: br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="private/book.opf"/></rootfiles></container>"#,
+            compression: Stored,
+        },
+        FixtureEntry {
+            path: "private/book.opf",
+            bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Secret navigation</dc:title></metadata><manifest><item id="chapter" href="text/chapter.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine><itemref idref="chapter"/></spine></package>"#,
+            compression: Stored,
+        },
+        FixtureEntry {
+            path: "private/text/chapter.xhtml",
+            bytes: b"<html/>",
+            compression: Stored,
+        },
+        FixtureEntry {
+            path: "private/nav.xhtml",
+            bytes: br#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><a href="missing.xhtml">secret</a></nav></body></html>"#,
+            compression: Stored,
+        },
+    ])
 }
 
 fn import_service(pools: &PgPools, blobs: Arc<dyn BlobStore>, owner: &str) -> WorkerRunner {
