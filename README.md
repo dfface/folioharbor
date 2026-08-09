@@ -1,5 +1,15 @@
 # FolioHarbor · 书港
 
+> [!WARNING]
+> ## 项目已终止
+>
+> FolioHarbor 不再继续开发、发布或维护。该仓库保留为一次产品与技术
+> 探索的记录，不应部署到生产环境，也不应依赖其中的安全、兼容性或运
+> 维承诺。当前 staging 与现有代码仅供历史参考。
+>
+> 在终止前完成的联邦阅读网络可行性调研见
+> [调研简报](docs/research/2026-08-09-federated-reading-network-feasibility.md)。
+
 FolioHarbor（中文名：书港）是一个面向个人、家庭和小型团队的开源私人数字图书馆。
 
 项目当前完成了首个 EPUB 端到端切片的候选实现。需求、决策和标准化设计仍然是实现的约束来源；发布前必须通过 [发布检查表](docs/operations/release-checklist.md)。
