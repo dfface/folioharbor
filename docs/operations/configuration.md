@@ -15,3 +15,18 @@ Use three PostgreSQL roles and credentials:
 Neither runtime role is superuser, database owner, `BYPASSRLS`, or a substitute for the other. A system administrator row is separate from library membership and grants no implicit `item.read` or other content permission.
 
 Readiness is intentionally aggregate. `/health/live` checks only the serving process. `/health/ready` returns `ready`, `bootstrap_required`, or `unavailable`; it never names the failed database, schema, storage path, reserve, or credential. Readiness requires database access, exact schema 28 compatibility, valid required configuration, usable Blob storage above the configured free reserve, and at least one system administrator.
+
+## EPUB import compatibility
+
+FolioHarbor imports non-DRM EPUB 2.0, EPUB 2.0.1, and EPUB 3.0 through 3.3
+packages. It accepts the common recoverable package variations used by these
+versions: an EPUB 2 NCX selected by `spine@toc`, a single unambiguous NCX when
+that attribute is absent, EPUB 2 cover metadata or guide-cover fallback, and a
+readable spine-derived table of contents when no usable navigation document is
+present. EPUB 3 Navigation Documents take precedence when they are usable.
+
+This compatibility is intentionally bounded. Encrypted ZIP entries and
+DRM-protected EPUBs are not supported and are rejected. Archives that are
+damaged, exceed import safety limits, contain unsafe paths or navigation
+targets, or have ambiguous or unusable package metadata may also be rejected;
+the importer does not promise recovery for arbitrary malformed EPUB archives.

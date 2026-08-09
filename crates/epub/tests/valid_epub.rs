@@ -152,6 +152,24 @@ fn parses_epub_two_ncx_entries_into_ordered_toc() -> anyhow::Result<()> {
 }
 
 #[test]
+fn parses_calibre_epub_two_opf_ncx_and_html_structure() -> anyhow::Result<()> {
+    let publication = EpubParser::inspect(
+        &mut Cursor::new(calibre_epub_two_fixture()?),
+        ParserLimits::default(),
+    )?;
+
+    assert!(!publication.spine.is_empty());
+    assert_eq!(publication.spine[0].href.as_str(), "OEBPS/Text/chapter-1.html");
+    assert!(!publication.toc.is_empty());
+    assert_eq!(publication.toc[0].label, "Chapter 1");
+    assert_eq!(
+        publication.toc[0].href.as_str(),
+        "OEBPS/Text/chapter-1.html#chapter-1"
+    );
+    Ok(())
+}
+
+#[test]
 fn accepts_supported_epub_two_patch_and_epub_three_minor_versions() -> anyhow::Result<()> {
     let epub_two = epub(&[
         FixtureEntry { path: "META-INF/container.xml", bytes: br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#, compression: Stored },
@@ -354,4 +372,39 @@ async fn normalizes_fragmented_guide_cover_to_manifest_catalog_resource() -> any
 fn sha256(input: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     Sha256::digest(input).into()
+}
+
+fn calibre_epub_two_fixture() -> anyhow::Result<Vec<u8>> {
+    epub(&[
+        FixtureEntry {
+            path: "mimetype",
+            bytes: b"application/epub+zip",
+            compression: Stored,
+        },
+        FixtureEntry {
+            path: "META-INF/container.xml",
+            bytes: br#"<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            compression: Stored,
+        },
+        FixtureEntry {
+            path: "OEBPS/content.opf",
+            bytes: br#"<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" unique-identifier="book-id" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Structural fixture</dc:title><dc:identifier id="book-id">urn:fixture:calibre-epub2</dc:identifier></metadata><manifest><item id="chapter-1" href="Text/chapter-1.html" media-type="text/html"/><item id="chapter-2" href="Text/chapter-2.xhtml" media-type="application/xhtml+xml"/><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest><spine toc="ncx"><itemref idref="chapter-1"/><itemref idref="chapter-2"/></spine></package>"#,
+            compression: Stored,
+        },
+        FixtureEntry {
+            path: "OEBPS/toc.ncx",
+            bytes: br#"<?xml version="1.0" encoding="utf-8"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><navMap><navPoint id="chapter-1" playOrder="1"><navLabel><text>Chapter 1</text></navLabel><content src="Text/chapter-1.html#chapter-1"/></navPoint><navPoint id="chapter-2" playOrder="2"><navLabel><text>Chapter 2</text></navLabel><content src="Text/chapter-2.xhtml"/></navPoint></navMap></ncx>"#,
+            compression: Stored,
+        },
+        FixtureEntry {
+            path: "OEBPS/Text/chapter-1.html",
+            bytes: b"<html><body><h1 id=\"chapter-1\">Chapter 1</h1></body></html>",
+            compression: Stored,
+        },
+        FixtureEntry {
+            path: "OEBPS/Text/chapter-2.xhtml",
+            bytes: br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Chapter 2</h1></body></html>"#,
+            compression: Stored,
+        },
+    ])
 }
