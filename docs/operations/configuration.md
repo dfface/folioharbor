@@ -22,8 +22,10 @@ FolioHarbor imports non-DRM EPUB 2.0, EPUB 2.0.1, and EPUB 3.0 through 3.3
 packages. It accepts the common recoverable package variations used by these
 versions: an EPUB 2 NCX selected by `spine@toc`, a single unambiguous NCX when
 that attribute is absent, EPUB 2 cover metadata or guide-cover fallback, and a
-readable spine-derived table of contents when no usable navigation document is
-present. EPUB 3 Navigation Documents take precedence when they are usable.
+readable spine-derived table of contents only when no navigation alternative
+is declared. A declared Navigation Document or NCX that is unusable is rejected
+rather than being replaced with a spine-derived table of contents. EPUB 3
+Navigation Documents take precedence when they are usable.
 
 This compatibility is intentionally bounded. Encrypted ZIP entries and
 DRM-protected EPUBs are not supported and are rejected. Archives that are
