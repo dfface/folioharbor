@@ -42,7 +42,7 @@ export function SettingsPage() {
   }
 
   return (
-    <section aria-labelledby="settings-title">
+    <section className="page-section" aria-labelledby="settings-title">
       <h3 id="settings-title">{t("settings.title")}</h3>
       {mutation.error === null ? null : <p role="alert">{requestErrorMessage(mutation.error, t)}</p>}
       {saved ? <p role="status">{t("settings.saved")}</p> : null}

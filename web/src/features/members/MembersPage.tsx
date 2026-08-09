@@ -62,7 +62,7 @@ export function MembersPage() {
   }
 
   return (
-    <section aria-labelledby="members-title">
+    <section className="page-section" aria-labelledby="members-title">
       <h3 id="members-title">{t("members.title")}</h3>
       {error === null ? null : <p role="alert">{requestErrorMessage(error, t)}</p>}
       {notice === null ? null : <p role="status">{t(`members.${notice}`)}</p>}

@@ -247,7 +247,7 @@ export function ReaderPage() {
   }
 
   return (
-    <section aria-labelledby="reader-title" onKeyDown={(event) => {
+    <section className="page-section reader-page" aria-labelledby="reader-title" onKeyDown={(event) => {
       if (modalOpen) {
         return;
       }

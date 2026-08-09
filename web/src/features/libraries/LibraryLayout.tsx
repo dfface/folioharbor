@@ -42,15 +42,17 @@ export function LibraryLayout() {
 
   return (
     <LibraryContext.Provider value={library}>
-      <section aria-labelledby="current-library-title">
-        <LibrarySwitcher
-          currentLibraryId={library.library_id}
-          libraries={libraries.data}
-          onChange={(nextLibrary) => { void navigate(`/libraries/${encodeURIComponent(nextLibrary)}/books`); }}
-        />
-        <h2 id="current-library-title">{library.name}</h2>
-        <p>{t("libraries.role", { role: t(`roles.${library.role}`) })}</p>
-        <nav aria-label={t("libraries.navigation")}>
+      <section className="library-shell" aria-labelledby="current-library-title">
+        <div className="library-intro">
+          <LibrarySwitcher
+            currentLibraryId={library.library_id}
+            libraries={libraries.data}
+            onChange={(nextLibrary) => { void navigate(`/libraries/${encodeURIComponent(nextLibrary)}/books`); }}
+          />
+          <h2 id="current-library-title">{library.name}</h2>
+          <p className="library-eyebrow">{t("libraries.role", { role: t(`roles.${library.role}`) })}</p>
+        </div>
+        <nav className="library-nav" aria-label={t("libraries.navigation")}>
           <Link to={`${base}/books`}>{t("libraries.books")}</Link>{" "}
           {library.capabilities.can_upload ? <Link to={`${base}/uploads`}>{t("libraries.uploads")}</Link> : null}{" "}
           {library.capabilities.can_invite_members || library.capabilities.can_manage_members

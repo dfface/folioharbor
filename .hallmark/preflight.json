@@ -1,0 +1,8 @@
+{
+  "date": "2026-08-09",
+  "framework": "React 19 + Vite 7",
+  "font_stack": "introduced Fraunces Variable + Geist Variable",
+  "palette": "introduced Atelier warm-paper tokens",
+  "motion": "motion-cut",
+  "spacing": "introduced 4px-derived semantic scale"
+}

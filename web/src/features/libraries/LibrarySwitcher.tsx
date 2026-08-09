@@ -11,7 +11,7 @@ interface LibrarySwitcherProps {
 export function LibrarySwitcher({ currentLibraryId, libraries, onChange }: LibrarySwitcherProps) {
   const { t } = useTranslation();
   return (
-    <div>
+    <div className="library-switcher">
       <label htmlFor="library-switcher">{t("libraries.current")}</label>
       <select
         id="library-switcher"

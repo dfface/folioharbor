@@ -18,6 +18,10 @@
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    },
     "types": ["vitest/globals", "@testing-library/jest-dom", "node"]
   },
   "include": ["src", "e2e", "playwright.config.ts", "vite.config.ts", "vitest.config.ts"]

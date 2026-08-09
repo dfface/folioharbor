@@ -1,0 +1,67 @@
+/* Hallmark · macrostructure: Catalogue · tone: editorial · anchor hue: warm copper
+ * audience: personal library members · use: organise and begin reading · theme: Atelier
+ * nav: N5 Floating pill · footer: Ft1 Mast-headed · contrast: pass (40–41)
+ * honest: pass (46) · chrome: pass (47) · tokens: pass (48) · mobile: pass (34, 49, 50–57)
+ * pre-emit critique: P5 H4 E5 S5 R5 V4
+ */
+:root {
+  --font-display: "Fraunces Variable", Georgia, serif;
+  --font-body: "Geist Variable", Arial, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, monospace;
+  --color-paper: oklch(97% 0.014 82);
+  --color-paper-raised: oklch(99% 0.006 88);
+  --color-paper-muted: oklch(93% 0.02 82);
+  --color-ink: oklch(24% 0.025 48);
+  --color-ink-soft: oklch(41% 0.028 48);
+  --color-muted: oklch(49% 0.022 56);
+  --color-rule: oklch(77% 0.03 72);
+  --color-accent: oklch(47% 0.105 47);
+  --color-accent-ink: oklch(98% 0.008 80);
+  --color-focus: oklch(37% 0.12 248);
+  --color-success: oklch(42% 0.1 151);
+  --color-error: oklch(49% 0.17 27);
+  --color-shadow: oklch(21% 0.02 48 / 0.12);
+  --space-2xs: 0.25rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2rem;
+  --space-2xl: 3rem;
+  --space-3xl: 4.5rem;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.25rem;
+  --text-xl: clamp(1.5rem, 3vw, 2.25rem);
+  --text-display: clamp(2.4rem, 5vw, 4.75rem);
+  --radius-sm: 0.375rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1.25rem;
+  --rule-hair: 1px;
+  --dur-fast: 130ms;
+  --dur-base: 220ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+  --background: var(--color-paper);
+  --foreground: var(--color-ink);
+  --card: var(--color-paper-raised);
+  --card-foreground: var(--color-ink);
+  --popover: var(--color-paper-raised);
+  --popover-foreground: var(--color-ink);
+  --primary: var(--color-accent);
+  --primary-foreground: var(--color-accent-ink);
+  --secondary: var(--color-paper-muted);
+  --secondary-foreground: var(--color-ink);
+  --muted: var(--color-paper-muted);
+  --muted-foreground: var(--color-muted);
+  --accent: var(--color-paper-muted);
+  --accent-foreground: var(--color-ink);
+  --destructive: var(--color-error);
+  --border: var(--color-rule);
+  --input: var(--color-rule);
+  --ring: var(--color-focus);
+  --radius: var(--radius-md);
+}

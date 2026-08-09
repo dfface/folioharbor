@@ -86,7 +86,7 @@ export function UploadPage() {
     : Math.min(100, Math.round((progress.sentBytes / progress.totalBytes) * 100));
 
   return (
-    <section aria-labelledby="uploads-title">
+    <section className="page-section" aria-labelledby="uploads-title">
       <h3 id="uploads-title">{t("uploads.title")}</h3>
       {localError === null ? null : <p role="alert">{localError}</p>}
       {mutation.error === null || isAbortError(mutation.error) ? null : <p role="alert">{requestErrorMessage(mutation.error, t)}</p>}

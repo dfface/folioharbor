@@ -11,14 +11,14 @@ export function ItemDetailPage() {
   const { itemId = "" } = useParams();
   const item = useItem(library.library_id, itemId);
   if (item.isPending) {
-    return <p role="status">{t("catalog.loadingItem")}</p>;
+    return <p className="page-section" role="status">{t("catalog.loadingItem")}</p>;
   }
   if (item.isError) {
-    return <p role="alert">{requestErrorMessage(item.error, t)}</p>;
+    return <p className="page-section" role="alert">{requestErrorMessage(item.error, t)}</p>;
   }
   const detail = item.data;
   return (
-    <article aria-labelledby="item-title">
+    <section className="page-section"><article aria-labelledby="item-title">
       <h3 id="item-title">{detail.primary_title}</h3>
       <dl>
         <div><dt>{t("catalog.work")}</dt><dd>{detail.authors.length > 0 ? detail.authors.join(", ") : t("catalog.unknownAuthor")}</dd></div>
@@ -30,6 +30,6 @@ export function ItemDetailPage() {
         {detail.can_download ? <a href={`/api/v1/items/${encodeURIComponent(detail.item_id)}/download`}>{t("catalog.download")}</a> : null}
       </div>
       {detail.can_read && !detail.can_download ? <p>{t("catalog.onlineOnly")}</p> : null}
-    </article>
+    </article></section>
   );
 }
