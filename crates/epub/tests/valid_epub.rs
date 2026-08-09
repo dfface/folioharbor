@@ -1,11 +1,51 @@
 #[path = "../../../tests/fixtures/epub/generate-fixtures.rs"]
 mod fixtures;
 
-use std::io::Cursor;
+use std::{io::Cursor, sync::Arc};
 
+use async_trait::async_trait;
 use fixtures::{FixtureEntry, epub};
-use folioharbor_epub::{EpubParser, EpubPath, ParserLimits};
+use folioharbor_application::ports::{BlobStore, BlobStoreError, PromotedBlob, PublicationParser};
+use folioharbor_domain::imports::blob::{BlobIdentity, StorageKey};
+use folioharbor_epub::{EpubParser, EpubPath, EpubPublicationParser, ParserLimits};
 use zip::CompressionMethod::Stored;
+
+struct ArchiveBlobs(Vec<u8>);
+
+#[async_trait]
+impl BlobStore for ArchiveBlobs {
+    fn candidate_key(&self, _: &BlobIdentity) -> StorageKey {
+        unreachable!()
+    }
+    async fn create_staging_for(&self, _: &StorageKey) -> Result<(), BlobStoreError> {
+        unreachable!()
+    }
+    async fn append(&self, _: &StorageKey, _: &[u8]) -> Result<(), BlobStoreError> {
+        unreachable!()
+    }
+    async fn read_range(&self, _: &StorageKey, _: u64, _: u64) -> Result<Vec<u8>, BlobStoreError> {
+        unreachable!()
+    }
+    async fn promote(
+        &self,
+        _: &StorageKey,
+        _: &BlobIdentity,
+    ) -> Result<PromotedBlob, BlobStoreError> {
+        unreachable!()
+    }
+    async fn delete(&self, _: &StorageKey) -> Result<(), BlobStoreError> {
+        unreachable!()
+    }
+    async fn free_bytes(&self) -> Result<u64, BlobStoreError> {
+        unreachable!()
+    }
+    async fn open_publication(
+        &self,
+        _: &StorageKey,
+    ) -> Result<Box<dyn folioharbor_application::ports::PublicationSource>, BlobStoreError> {
+        Ok(Box::new(Cursor::new(self.0.clone())))
+    }
+}
 
 #[test]
 fn parses_epub_three_into_neutral_publication_data() -> anyhow::Result<()> {
@@ -211,6 +251,32 @@ fn derives_toc_from_readable_spine_when_navigation_is_absent() -> anyhow::Result
 }
 
 #[test]
+fn keeps_navigation_fallback_warning_after_metadata_warning_saturation() -> anyhow::Result<()> {
+    let metadata = (0..32)
+        .map(|index| format!(r#"<meta property="unknown-{index}">value</meta>"#))
+        .collect::<String>();
+    let package = format!(
+        r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Warnings</dc:title>{metadata}</metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#
+    );
+    let source = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#, compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: package.as_bytes(), compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html/>", compression: Stored },
+    ])?;
+
+    let publication = EpubParser::inspect(&mut Cursor::new(source), ParserLimits::default())?;
+
+    assert_eq!(publication.warnings.len(), 32);
+    assert!(
+        publication
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("generated table of contents"))
+    );
+    Ok(())
+}
+
+#[test]
 fn uses_epub_two_manifest_cover_before_guide_cover() -> anyhow::Result<()> {
     let source = epub(&[
         FixtureEntry { path: "META-INF/container.xml", bytes: br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#, compression: Stored },
@@ -233,7 +299,7 @@ fn uses_epub_two_manifest_cover_before_guide_cover() -> anyhow::Result<()> {
 fn uses_epub_two_guide_cover_when_manifest_cover_is_absent() -> anyhow::Result<()> {
     let source = epub(&[
         FixtureEntry { path: "META-INF/container.xml", bytes: br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#, compression: Stored },
-        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Guide cover</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine><guide><reference type="cover" href="guide.xhtml"/></guide></package>"#, compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Guide cover</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="guide" href="guide.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine><guide><reference type="cover" href="guide.xhtml"/></guide></package>"#, compression: Stored },
         FixtureEntry { path: "chapter.xhtml", bytes: b"<html/>", compression: Stored },
         FixtureEntry { path: "guide.xhtml", bytes: b"<html/>", compression: Stored },
     ])?;
@@ -244,6 +310,25 @@ fn uses_epub_two_guide_cover_when_manifest_cover_is_absent() -> anyhow::Result<(
         publication.cover.as_ref().map(EpubPath::as_str),
         Some("guide.xhtml")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn omits_unmanifested_guide_cover_from_catalog_publication() -> anyhow::Result<()> {
+    let source = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#, compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Guide cover</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine><guide><reference type="cover" href="guide.xhtml"/></guide></package>"#, compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html/>", compression: Stored },
+        FixtureEntry { path: "guide.xhtml", bytes: b"<html/>", compression: Stored },
+    ])?;
+    let parser =
+        EpubPublicationParser::new(Arc::new(ArchiveBlobs(source)), ParserLimits::default());
+
+    let publication = parser
+        .parse(&StorageKey::from_opaque("fixture".to_owned()))
+        .await?;
+
+    assert_eq!(publication.cover_href(), None);
     Ok(())
 }
 

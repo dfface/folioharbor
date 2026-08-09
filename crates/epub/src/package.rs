@@ -458,6 +458,11 @@ fn build_publication(
             })
         })
         .collect::<Result<Vec<_>, EpubError>>()?;
+    let guide_cover = document
+        .guide_cover
+        .as_ref()
+        .filter(|cover| manifest_contains_href(&document.manifest, cover))
+        .cloned();
     let cover = document
         .epub_two_cover_id
         .as_deref()
@@ -470,10 +475,10 @@ fn build_publication(
                 .find(|item| has_property(&item.properties, "cover-image"))
                 .map(|item| item.href.clone())
         })
-        .or(document.guide_cover.clone());
+        .or(guide_cover);
     let (toc, warning) = select_toc(archive, &document, &spine)?;
     if let Some(warning) = warning {
-        push_warning(&mut document.warnings, warning);
+        push_compatibility_warning(&mut document.warnings, warning);
     }
     Ok(ParsedPublication {
         metadata: document.metadata,
@@ -549,12 +554,17 @@ fn preferred_navigation(
     document: &PackageDocument,
 ) -> Result<Option<NavigationDocument<'_>>, EpubError> {
     match document.version {
-        PackageVersion::Epub2 => Ok(document
-            .ncx_id
-            .as_deref()
-            .and_then(|id| document.manifest.get(id))
-            .filter(|item| is_ncx(item))
-            .map(NavigationDocument::Ncx)),
+        PackageVersion::Epub2 => {
+            let Some(ncx_id) = document.ncx_id.as_deref() else {
+                return Ok(None);
+            };
+            let ncx = document
+                .manifest
+                .get(ncx_id)
+                .filter(|item| is_ncx(item))
+                .ok_or_else(|| error(EpubErrorCode::InvalidNavigation))?;
+            Ok(Some(NavigationDocument::Ncx(ncx)))
+        }
         PackageVersion::Epub3 => {
             let navigation_items = document
                 .manifest
@@ -564,10 +574,13 @@ fn preferred_navigation(
             if navigation_items.len() > 1 {
                 return Err(error(EpubErrorCode::InvalidNavigation));
             }
-            Ok(navigation_items
-                .into_iter()
-                .find(|item| is_nav(item))
-                .map(NavigationDocument::Nav))
+            let Some(navigation_item) = navigation_items.into_iter().next() else {
+                return Ok(None);
+            };
+            if !is_nav(navigation_item) {
+                return Err(error(EpubErrorCode::InvalidNavigation));
+            }
+            Ok(Some(NavigationDocument::Nav(navigation_item)))
         }
     }
 }
@@ -649,10 +662,26 @@ fn is_readable_spine_item(version: PackageVersion, item: &ManifestItem) -> bool 
     ) || (version == PackageVersion::Epub2 && item.media_type == "text/html")
 }
 
+fn manifest_contains_href(manifest: &BTreeMap<String, ManifestItem>, href: &EpubPath) -> bool {
+    let Ok(href) = strip_fragment(href) else {
+        return false;
+    };
+    manifest
+        .values()
+        .any(|item| strip_fragment(&item.href).is_ok_and(|manifest_href| manifest_href == href))
+}
+
 fn push_warning(warnings: &mut Vec<String>, warning: String) {
     if warnings.len() < MAX_WARNINGS {
         warnings.push(warning);
     }
+}
+
+fn push_compatibility_warning(warnings: &mut Vec<String>, warning: String) {
+    if warnings.len() >= MAX_WARNINGS {
+        warnings.truncate(MAX_WARNINGS - 1);
+    }
+    warnings.insert(0, warning);
 }
 
 fn attribute(element: &BytesStart<'_>, name: &[u8]) -> Result<Option<String>, EpubError> {

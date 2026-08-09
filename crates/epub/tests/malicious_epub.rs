@@ -503,6 +503,48 @@ fn rejects_multiple_navigation_fallback_candidates() -> anyhow::Result<()> {
 }
 
 #[test]
+fn rejects_invalid_declared_navigation_even_with_a_valid_alternative() -> anyhow::Result<()> {
+    let epub_two = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Declared NCX</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="declared" href="declared.xhtml" media-type="application/xhtml+xml"/><item id="alternative" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest><spine toc="declared"><itemref idref="chapter"/></spine></package>"#, compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html/>", compression: Stored },
+        FixtureEntry { path: "declared.xhtml", bytes: b"<html/>", compression: Stored },
+        FixtureEntry { path: "toc.ncx", bytes: br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><text>Alternative</text></navLabel><content src="chapter.xhtml"/></navPoint></navMap></ncx>"#, compression: Stored },
+    ])?;
+    let epub_three = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Declared nav</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="declared" href="declared.xhtml" media-type="text/html" properties="nav"/><item id="alternative" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#, compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html/>", compression: Stored },
+        FixtureEntry { path: "declared.xhtml", bytes: b"<html/>", compression: Stored },
+        FixtureEntry { path: "toc.ncx", bytes: br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><text>Alternative</text></navLabel><content src="chapter.xhtml"/></navPoint></navMap></ncx>"#, compression: Stored },
+    ])?;
+
+    for source in [&epub_two, &epub_three] {
+        assert_eq!(
+            inspect(source, ParserLimits::default())?,
+            EpubErrorCode::InvalidNavigation
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn rejects_invalid_declared_navigation_instead_of_deriving_spine_toc() -> anyhow::Result<()> {
+    let source = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Declared nav</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="declared" href="declared.xhtml" media-type="text/html" properties="nav"/></manifest><spine><itemref idref="chapter"/></spine></package>"#, compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html/>", compression: Stored },
+        FixtureEntry { path: "declared.xhtml", bytes: b"<html/>", compression: Stored },
+    ])?;
+
+    assert_eq!(
+        inspect(&source, ParserLimits::default())?,
+        EpubErrorCode::InvalidNavigation
+    );
+    Ok(())
+}
+
+#[test]
 fn spine_requires_readable_content_or_a_readable_fallback() -> anyhow::Result<()> {
     let image_only = epub(&[
         FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
