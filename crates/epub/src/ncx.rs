@@ -40,7 +40,7 @@ struct NcxState<'a> {
     saw_nav_map: bool,
     nav_map_depth: Option<usize>,
     nav_points: Vec<NavPoint>,
-    label_depth: Option<usize>,
+    label: Option<Label>,
     toc: Vec<(usize, TocEntry)>,
     next_order: usize,
     depth: usize,
@@ -49,8 +49,15 @@ struct NcxState<'a> {
 struct NavPoint {
     depth: usize,
     order: usize,
-    label: String,
+    label: Option<String>,
     href: Option<EpubPath>,
+}
+
+struct Label {
+    nav_label_depth: usize,
+    text_depth: Option<usize>,
+    saw_text: bool,
+    value: String,
 }
 
 impl<'a> NcxState<'a> {
@@ -62,7 +69,7 @@ impl<'a> NcxState<'a> {
             saw_nav_map: false,
             nav_map_depth: None,
             nav_points: Vec::new(),
-            label_depth: None,
+            label: None,
             toc: Vec::new(),
             next_order: 0,
             depth: 0,
@@ -86,6 +93,9 @@ impl<'a> NcxState<'a> {
             self.saw_ncx = true;
             return Ok(());
         }
+        if self.label.is_some() && !is_ncx {
+            return Err(error());
+        }
         if !is_ncx {
             return Ok(());
         }
@@ -101,6 +111,8 @@ impl<'a> NcxState<'a> {
             }
             b"navPoint" => self.start_nav_point(),
             b"navLabel" => self.start_label(),
+            b"text" if self.label.is_some() || !self.nav_points.is_empty() => self.start_text(),
+            b"text" => Ok(()),
             b"content" => self.set_target(element),
             _ => Ok(()),
         }
@@ -111,6 +123,9 @@ impl<'a> NcxState<'a> {
         namespace: &ResolveResult<'_>,
         element: &BytesStart<'_>,
     ) -> Result<(), EpubError> {
+        if self.label.is_some() {
+            return Err(error());
+        }
         if !is_namespace(namespace, NCX_NS) {
             return Ok(());
         }
@@ -122,7 +137,7 @@ impl<'a> NcxState<'a> {
     }
 
     fn start_nav_point(&mut self) -> Result<(), EpubError> {
-        if self.nav_map_depth.is_none() || self.label_depth.is_some() {
+        if self.nav_map_depth.is_none() || self.label.is_some() {
             return Err(error());
         }
         let order = self.next_order;
@@ -130,7 +145,7 @@ impl<'a> NcxState<'a> {
         self.nav_points.push(NavPoint {
             depth: self.depth,
             order,
-            label: String::new(),
+            label: None,
             href: None,
         });
         Ok(())
@@ -138,10 +153,31 @@ impl<'a> NcxState<'a> {
 
     fn start_label(&mut self) -> Result<(), EpubError> {
         let point = self.nav_points.last().ok_or_else(error)?;
-        if self.label_depth.is_some() || self.depth != point.depth.saturating_add(1) {
+        if self.label.is_some()
+            || point.label.is_some()
+            || self.depth != point.depth.saturating_add(1)
+        {
             return Err(error());
         }
-        self.label_depth = Some(self.depth);
+        self.label = Some(Label {
+            nav_label_depth: self.depth,
+            text_depth: None,
+            saw_text: false,
+            value: String::new(),
+        });
+        Ok(())
+    }
+
+    fn start_text(&mut self) -> Result<(), EpubError> {
+        let label = self.label.as_mut().ok_or_else(error)?;
+        if label.saw_text
+            || label.text_depth.is_some()
+            || self.depth != label.nav_label_depth.saturating_add(1)
+        {
+            return Err(error());
+        }
+        label.saw_text = true;
+        label.text_depth = Some(self.depth);
         Ok(())
     }
 
@@ -160,13 +196,23 @@ impl<'a> NcxState<'a> {
     }
 
     fn text(&mut self, text: &quick_xml::events::BytesText<'_>) -> Result<(), EpubError> {
-        if self.label_depth.is_some() {
-            let point = self.nav_points.last_mut().ok_or_else(error)?;
-            point.label.push_str(
-                &text
-                    .xml_content(XmlVersion::Implicit1_0)
-                    .map_err(|_| error())?,
-            );
+        if let Some(label) = self.label.as_mut() {
+            let value = text
+                .xml_content(XmlVersion::Implicit1_0)
+                .map_err(|_| error())?;
+            if label.text_depth == Some(self.depth) {
+                label.value.push_str(&value);
+            } else if !value.trim().is_empty() {
+                return Err(error());
+            }
+        } else if !self.nav_points.is_empty()
+            && !text
+                .xml_content(XmlVersion::Implicit1_0)
+                .map_err(|_| error())?
+                .trim()
+                .is_empty()
+        {
+            return Err(error());
         }
         Ok(())
     }
@@ -178,18 +224,17 @@ impl<'a> NcxState<'a> {
     ) -> Result<(), EpubError> {
         let local = element.local_name();
         let is_ncx = is_namespace(namespace, NCX_NS);
-        if is_ncx && local.as_ref() == b"navLabel" {
-            if self.label_depth != Some(self.depth) {
-                return Err(error());
-            }
-            self.label_depth = None;
+        if is_ncx && local.as_ref() == b"text" {
+            self.end_text()?;
+        } else if is_ncx && local.as_ref() == b"navLabel" {
+            self.end_label()?;
         } else if is_ncx && local.as_ref() == b"navPoint" {
             let point = self
                 .nav_points
                 .pop()
                 .filter(|point| point.depth == self.depth)
                 .ok_or_else(error)?;
-            let label = point.label.trim();
+            let label = point.label.as_deref().ok_or_else(error)?.trim();
             let href = point.href.ok_or_else(error)?;
             if label.is_empty() {
                 return Err(error());
@@ -214,12 +259,35 @@ impl<'a> NcxState<'a> {
         Ok(())
     }
 
+    fn end_text(&mut self) -> Result<(), EpubError> {
+        let Some(label) = self.label.as_mut() else {
+            return self.nav_points.is_empty().then_some(()).ok_or_else(error);
+        };
+        if label.text_depth != Some(self.depth) {
+            return Err(error());
+        }
+        label.text_depth = None;
+        Ok(())
+    }
+
+    fn end_label(&mut self) -> Result<(), EpubError> {
+        let label = self.label.take().ok_or_else(error)?;
+        if label.nav_label_depth != self.depth || label.text_depth.is_some() || !label.saw_text {
+            return Err(error());
+        }
+        let point = self.nav_points.last_mut().ok_or_else(error)?;
+        if point.label.replace(label.value).is_some() {
+            return Err(error());
+        }
+        Ok(())
+    }
+
     fn finish(mut self) -> Result<Vec<TocEntry>, EpubError> {
         if !self.saw_ncx
             || !self.saw_nav_map
             || self.depth != 0
             || self.nav_map_depth.is_some()
-            || self.label_depth.is_some()
+            || self.label.is_some()
             || !self.nav_points.is_empty()
             || self.toc.is_empty()
         {

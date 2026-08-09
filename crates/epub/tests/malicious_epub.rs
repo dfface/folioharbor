@@ -465,6 +465,58 @@ fn rejects_invalid_epub_two_ncx_navigation() -> anyhow::Result<()> {
 }
 
 #[test]
+fn rejects_unsupported_epub_package_versions() -> anyhow::Result<()> {
+    for version in ["2.9", "3.9"] {
+        let (package, navigation_path, navigation) = if version.starts_with('2') {
+            (
+                format!(r#"<package xmlns="http://www.idpf.org/2007/opf" version="{version}"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Unsupported</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest><spine toc="ncx"><itemref idref="chapter"/></spine></package>"#),
+                "toc.ncx",
+                br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><text>Chapter</text></navLabel><content src="chapter.xhtml"/></navPoint></navMap></ncx>"#.as_slice(),
+            )
+        } else {
+            (
+                format!(r#"<package xmlns="http://www.idpf.org/2007/opf" version="{version}"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Unsupported</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine><itemref idref="chapter"/></spine></package>"#),
+                "nav.xhtml",
+                valid_nav(),
+            )
+        };
+        let source = epub(&[
+            FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
+            FixtureEntry { path: "book.opf", bytes: package.as_bytes(), compression: Stored },
+            FixtureEntry { path: "chapter.xhtml", bytes: b"<html/>", compression: Stored },
+            FixtureEntry { path: navigation_path, bytes: navigation, compression: Stored },
+        ])?;
+        assert_eq!(
+            inspect(&source, ParserLimits::default())?,
+            EpubErrorCode::InvalidPackage
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn rejects_ambiguous_or_indirect_ncx_labels() -> anyhow::Result<()> {
+    for ncx in [
+        br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><text>First</text></navLabel><navLabel><text>Second</text></navLabel><content src="chapter.xhtml"/></navPoint></navMap></ncx>"#.as_slice(),
+        br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><text>First</text><text>Second</text></navLabel><content src="chapter.xhtml"/></navPoint></navMap></ncx>"#.as_slice(),
+        br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><span>Missing text</span></navLabel><content src="chapter.xhtml"/></navPoint></navMap></ncx>"#.as_slice(),
+        br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><span><text>Indirect</text></span></navLabel><content src="chapter.xhtml"/></navPoint></navMap></ncx>"#.as_slice(),
+    ] {
+        let source = epub(&[
+            FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
+            FixtureEntry { path: "book.opf", bytes: epub_two_ncx_opf(), compression: Stored },
+            FixtureEntry { path: "chapter.xhtml", bytes: b"<html/>", compression: Stored },
+            FixtureEntry { path: "toc.ncx", bytes: ncx, compression: Stored },
+        ])?;
+        assert_eq!(
+            inspect(&source, ParserLimits::default())?,
+            EpubErrorCode::InvalidNavigation
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn spine_requires_readable_content_or_a_readable_fallback() -> anyhow::Result<()> {
     let image_only = epub(&[
         FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },

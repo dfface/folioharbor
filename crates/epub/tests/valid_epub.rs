@@ -111,6 +111,36 @@ fn parses_epub_two_ncx_entries_into_ordered_toc() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn accepts_supported_epub_two_patch_and_epub_three_minor_versions() -> anyhow::Result<()> {
+    let epub_two = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#, compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0.1"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>EPUB 2.0.1</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest><spine toc="ncx"><itemref idref="chapter"/></spine></package>"#, compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html/>", compression: Stored },
+        FixtureEntry { path: "toc.ncx", bytes: br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><text>Chapter</text></navLabel><content src="chapter.xhtml"/></navPoint></navMap></ncx>"#, compression: Stored },
+    ])?;
+    let epub_three = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#, compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.3"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>EPUB 3.3</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine><itemref idref="chapter"/></spine></package>"#, compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html/>", compression: Stored },
+        FixtureEntry { path: "nav.xhtml", bytes: br#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><a href="chapter.xhtml">Chapter</a></nav></body></html>"#, compression: Stored },
+    ])?;
+
+    assert_eq!(
+        EpubParser::inspect(&mut Cursor::new(epub_two), ParserLimits::default())?
+            .metadata
+            .titles,
+        ["EPUB 2.0.1"]
+    );
+    assert_eq!(
+        EpubParser::inspect(&mut Cursor::new(epub_three), ParserLimits::default())?
+            .metadata
+            .titles,
+        ["EPUB 3.3"]
+    );
+    Ok(())
+}
+
 fn sha256(input: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     Sha256::digest(input).into()

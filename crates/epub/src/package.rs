@@ -145,10 +145,8 @@ impl<'a> PackageState<'a> {
         let is_dc = is_namespace(namespace, DC_NS);
         if self.depth == 1 {
             let version = attribute(element, b"version")?;
-            let is_epub_two = version
-                .as_deref()
-                .is_some_and(|value| value.starts_with("2."));
-            let is_epub_three = version.as_deref().is_some_and(|value| value.starts_with("3."));
+            let is_epub_two = matches!(version.as_deref(), Some("2.0" | "2.0.1"));
+            let is_epub_three = matches!(version.as_deref(), Some("3.0" | "3.1" | "3.2" | "3.3"));
             if !is_opf || local.as_slice() != b"package" || (!is_epub_two && !is_epub_three) {
                 return Err(invalid_package());
             }
