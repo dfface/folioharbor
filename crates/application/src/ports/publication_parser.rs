@@ -4,6 +4,10 @@ use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum PublicationParserError {
+    #[error("publication contains unsupported encrypted content")]
+    EncryptedContent,
+    #[error("publication navigation is invalid")]
+    InvalidNavigation,
     #[error("publication is malformed")]
     Malformed,
     #[error("publication bytes are temporarily unavailable")]

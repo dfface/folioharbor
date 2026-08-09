@@ -187,6 +187,22 @@ impl ProcessImportJob {
         error: PublicationParserError,
     ) -> JobFailure {
         let (state, code, failure) = match error {
+            PublicationParserError::EncryptedContent => (
+                UploadState::Failed,
+                "encrypted_epub_unsupported",
+                permanent(
+                    "encrypted_epub_unsupported",
+                    "encrypted EPUB files are not supported",
+                ),
+            ),
+            PublicationParserError::InvalidNavigation => (
+                UploadState::Failed,
+                "invalid_epub_navigation",
+                permanent(
+                    "invalid_epub_navigation",
+                    "publication navigation is invalid",
+                ),
+            ),
             PublicationParserError::Malformed => (
                 UploadState::Failed,
                 "invalid_epub",

@@ -129,8 +129,16 @@ impl PublicationParser for EpubPublicationParser {
             .await
             .map_err(|error| map_storage_error(&error))?;
         let parsed = EpubParser::inspect(&mut source, self.limits)
-            .map_err(|_| PublicationParserError::Malformed)?;
+            .map_err(|error| map_epub_error(error.code()))?;
         map_publication(parsed)
+    }
+}
+
+fn map_epub_error(code: EpubErrorCode) -> PublicationParserError {
+    match code {
+        EpubErrorCode::EncryptedContent => PublicationParserError::EncryptedContent,
+        EpubErrorCode::InvalidNavigation => PublicationParserError::InvalidNavigation,
+        _ => PublicationParserError::Malformed,
     }
 }
 

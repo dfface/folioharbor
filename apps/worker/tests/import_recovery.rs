@@ -10,7 +10,7 @@ use folioharbor_application::{
     imports::{CleanupImports, JobFailure, ProcessImportJob, RetrySchedule},
     ports::{
         BlobStore, ImportCleanupRepository, ImportRepository, JobRepository, LeaseJobs,
-        PublicationParser,
+        PublicationParser, PublicationParserError,
     },
 };
 use folioharbor_domain::{
@@ -219,6 +219,22 @@ async fn cleanup_claim_survives_a_real_process_crash_and_is_reclaimed() -> anyho
 
 struct FailureDispatcher(Mutex<HashMap<String, Option<JobFailure>>>);
 
+struct ParserFailure(PublicationParserError);
+
+#[async_trait]
+impl PublicationParser for ParserFailure {
+    fn profile_version(&self) -> &'static str {
+        "epub-test"
+    }
+
+    async fn parse(
+        &self,
+        _: &StorageKey,
+    ) -> Result<folioharbor_domain::catalog::CatalogPublication, PublicationParserError> {
+        Err(self.0)
+    }
+}
+
 #[async_trait]
 impl JobDispatcher for FailureDispatcher {
     async fn dispatch(
@@ -342,6 +358,85 @@ async fn runner_maps_all_closed_failures_to_durable_queue_states_and_retries_tra
             .fetch_one(&pools.owner)
             .await?;
     assert_eq!(transient_state, "succeeded");
+    pools.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn import_recovery_persists_typed_parser_failures_without_archive_details()
+-> anyhow::Result<()> {
+    let database = TestPostgres::provision().await?;
+    let pools = PgPools::connect_for_tests(
+        &database.owner_url()?,
+        &database.api_url()?,
+        &database.worker_url()?,
+    )
+    .await?;
+    run_migrations(&pools.owner).await?;
+    let directory = tempfile::tempdir()?;
+    let blobs: Arc<dyn BlobStore> = Arc::new(LocalBlobStore::new(directory.path()));
+
+    for (sequence, parser_error, expected_code, expected_summary) in [
+        (
+            1,
+            PublicationParserError::EncryptedContent,
+            "encrypted_epub_unsupported",
+            "encrypted EPUB files are not supported",
+        ),
+        (
+            2,
+            PublicationParserError::InvalidNavigation,
+            "invalid_epub_navigation",
+            "publication navigation is invalid",
+        ),
+        (
+            3,
+            PublicationParserError::Malformed,
+            "invalid_epub",
+            "publication is malformed",
+        ),
+    ] {
+        let seeded = seed_import(&pools, &blobs, sequence).await?;
+        let process = Arc::new(ProcessImportJob::new(
+            Arc::new(PgImportRepository::new(pools.worker.clone())),
+            Arc::new(ParserFailure(parser_error)),
+            Arc::new(PgCatalogRepository::new(pools.worker.clone())),
+            RetrySchedule::default(),
+        ));
+        let runner = WorkerRunner::new(
+            Arc::new(PgJobRepository::new(pools.worker.clone())),
+            Arc::new(WorkerHandlers::new(process)),
+            format!("typed-parser-failure-{sequence}"),
+            RunnerConfig::new(1).expect("one parser failure slot"),
+        );
+
+        assert_eq!(runner.run_once().await?, 1);
+        let persisted: (Option<String>, Option<String>, Option<String>, Option<String>) =
+            sqlx::query_as(
+                "SELECT job.error_code,job.error_summary,upload.error_code,attempt.error_summary FROM folioharbor.background_jobs job JOIN folioharbor.upload_sessions upload ON upload.upload_id=$2 JOIN folioharbor.job_attempts attempt ON attempt.job_id=job.job_id WHERE job.job_id=$1",
+            )
+            .bind(seeded.job.as_uuid())
+            .bind(seeded.upload.as_uuid())
+            .fetch_one(&pools.owner)
+            .await?;
+        assert_eq!(
+            persisted,
+            (
+                Some(expected_code.into()),
+                Some(expected_summary.into()),
+                Some(expected_code.into()),
+                Some(expected_summary.into()),
+            )
+        );
+        for summary in [persisted.1, persisted.3].into_iter().flatten() {
+            assert!(!summary.contains(seeded.storage_key.as_str()));
+            assert!(!summary.contains("book.opf"));
+            assert!(!summary.contains("<package"));
+            assert!(!summary.contains("PK\\x03\\x04"));
+        }
+    }
+
     pools.close().await;
     database.cleanup().await?;
     Ok(())
