@@ -80,6 +80,18 @@ fn archive() -> Vec<u8> {
     writer.finish().expect("fixture archive").into_inner()
 }
 
+fn calibre_titlepage_archive() -> Vec<u8> {
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default();
+    writer.start_file("titlepage.xhtml", options).expect("title page entry");
+    writer.write_all(br#"<?xml version='1.0' encoding='utf-8'?><html xmlns="http://www.w3.org/1999/xhtml" xml:lang="zh-CN"><head><title>Book title</title><meta http-equiv="Content-Type" content="text/html; charset=utf-8"/><link rel="stylesheet" type="text/css" href="stylesheet.css"/><link rel="stylesheet" type="text/css" href="page_styles.css"/></head><body id="chapter" class="calibre"><div class="booktitle">Book title</div><div class="bookauthor">Author</div></body></html>"#).expect("title page html");
+    writer.start_file("stylesheet.css", options).expect("stylesheet entry");
+    writer.write_all(b".booktitle { color: #222; }").expect("stylesheet");
+    writer.start_file("page_styles.css", options).expect("page stylesheet entry");
+    writer.write_all(b".calibre { margin: 0; }").expect("page stylesheet");
+    writer.finish().expect("fixture archive").into_inner()
+}
+
 fn request(href: &str, media_type: &str) -> ResourceReadRequest {
     ResourceReadRequest {
         item_id: ItemId::from_uuid(uuid::Uuid::from_u128(3)),
@@ -214,6 +226,42 @@ async fn sanitizes_malicious_html_and_uses_bounded_disposable_cache() {
     assert!(!html.contains("OPS/"));
     assert_eq!(first, second);
     assert_eq!(blobs.opens.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn reads_calibre_epub_two_xhtml_titlepage() {
+    let blobs = Arc::new(Blobs {
+        archive: calibre_titlepage_archive(),
+        opens: AtomicUsize::new(0),
+    });
+    let reader = EpubResourceReader::new(blobs, ResourceCacheLimits::default());
+    let package = PublicationPackageId::from_uuid(uuid::Uuid::from_u128(44));
+    let routes = ["titlepage.xhtml", "stylesheet.css", "page_styles.css"]
+        .into_iter()
+        .map(|href| {
+            (
+                href.to_owned(),
+                folioharbor_application::reader::ResourceId::for_resource(package, href)
+                    .as_str()
+                    .to_owned(),
+            )
+        })
+        .collect();
+    let html = reader
+        .read(ResourceReadRequest {
+            item_id: ItemId::from_uuid(uuid::Uuid::from_u128(43)),
+            blob_id: BlobId::from_uuid(uuid::Uuid::from_u128(45)),
+            storage_key: StorageKey::from_opaque("fixture".to_owned()),
+            package_id: package,
+            normalized_href: "titlepage.xhtml".to_owned(),
+            media_type: "application/xhtml+xml".to_owned(),
+            resource_routes: Arc::new(routes),
+        })
+        .await
+        .expect("Calibre XHTML should remain readable");
+    let html = String::from_utf8(html).expect("sanitized UTF-8");
+    assert!(html.contains("Book title"));
+    assert!(html.contains("bookauthor"));
 }
 
 #[tokio::test]

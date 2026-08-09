@@ -59,7 +59,10 @@ export async function createLaidOutPublicationBlob(blob: Blob, layout: Publicati
   const source = await readBlob(blob);
   const mediaType = blob.type.split(";", 1)[0]?.trim().toLowerCase();
   const parseType = mediaType === "text/html" ? "text/html" : "application/xhtml+xml";
-  const publication = new DOMParser().parseFromString(source, parseType);
+  let publication = new DOMParser().parseFromString(source, parseType);
+  if (publication.querySelector("parsererror") !== null && parseType === "application/xhtml+xml") {
+    publication = new DOMParser().parseFromString(source, "text/html");
+  }
   if (publication.querySelector("parsererror") !== null) {
     throw new Error("publication_markup_invalid");
   }
