@@ -395,29 +395,7 @@ fn requires_valid_nonempty_navigation_with_existing_internal_targets() -> anyhow
 }
 
 #[test]
-fn requires_exactly_one_readable_navigation_document() -> anyhow::Result<()> {
-    let missing = epub(&[
-        FixtureEntry {
-            path: "META-INF/container.xml",
-            bytes: standard_container(),
-            compression: Stored,
-        },
-        FixtureEntry {
-            path: "book.opf",
-            bytes: minimal_opf(),
-            compression: Stored,
-        },
-        FixtureEntry {
-            path: "chapter.xhtml",
-            bytes: b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>ok</body></html>",
-            compression: Stored,
-        },
-    ])?;
-    assert_eq!(
-        inspect(&missing, ParserLimits::default())?,
-        EpubErrorCode::InvalidNavigation
-    );
-
+fn rejects_multiple_readable_navigation_documents() -> anyhow::Result<()> {
     let multiple = epub(&[
         FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
         FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Two navs</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="nav-one" href="nav-one.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="nav-two" href="nav-two.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine><itemref idref="chapter"/></spine></package>"#, compression: Stored },
@@ -430,16 +408,6 @@ fn requires_exactly_one_readable_navigation_document() -> anyhow::Result<()> {
         EpubErrorCode::InvalidNavigation
     );
 
-    let unreadable = epub(&[
-        FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
-        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Unreadable nav</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="text/html" properties="nav"/></manifest><spine><itemref idref="chapter"/></spine></package>"#, compression: Stored },
-        FixtureEntry { path: "chapter.xhtml", bytes: b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>ok</body></html>", compression: Stored },
-        FixtureEntry { path: "nav.xhtml", bytes: valid_nav(), compression: Stored },
-    ])?;
-    assert_eq!(
-        inspect(&unreadable, ParserLimits::default())?,
-        EpubErrorCode::InvalidNavigation
-    );
     Ok(())
 }
 
@@ -514,6 +482,23 @@ fn rejects_ambiguous_or_indirect_ncx_labels() -> anyhow::Result<()> {
             EpubErrorCode::InvalidNavigation
         );
     }
+    Ok(())
+}
+
+#[test]
+fn rejects_multiple_navigation_fallback_candidates() -> anyhow::Result<()> {
+    let source = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: standard_container(), compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Ambiguous fallback</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="one" href="one.ncx" media-type="application/x-dtbncx+xml"/><item id="two" href="two.ncx" media-type="application/x-dtbncx+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#, compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html/>", compression: Stored },
+        FixtureEntry { path: "one.ncx", bytes: br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><text>One</text></navLabel><content src="chapter.xhtml"/></navPoint></navMap></ncx>"#, compression: Stored },
+        FixtureEntry { path: "two.ncx", bytes: br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><text>Two</text></navLabel><content src="chapter.xhtml"/></navPoint></navMap></ncx>"#, compression: Stored },
+    ])?;
+
+    assert_eq!(
+        inspect(&source, ParserLimits::default())?,
+        EpubErrorCode::InvalidNavigation
+    );
     Ok(())
 }
 

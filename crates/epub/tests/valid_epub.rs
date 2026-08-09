@@ -141,6 +141,112 @@ fn accepts_supported_epub_two_patch_and_epub_three_minor_versions() -> anyhow::R
     Ok(())
 }
 
+#[test]
+fn uses_unique_epub_two_ncx_without_spine_toc() -> anyhow::Result<()> {
+    let source = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#, compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Fallback NCX</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="text/html"/><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#, compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html/>", compression: Stored },
+        FixtureEntry { path: "toc.ncx", bytes: br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><text>Chapter</text></navLabel><content src="chapter.xhtml"/></navPoint></navMap></ncx>"#, compression: Stored },
+    ])?;
+
+    let publication = EpubParser::inspect(&mut Cursor::new(source), ParserLimits::default())?;
+
+    assert_eq!(publication.toc[0].label, "Chapter");
+    assert_eq!(publication.spine[0].href.as_str(), "chapter.xhtml");
+    assert!(
+        publication
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("fallback") && warning.contains("NCX"))
+    );
+    assert!(
+        publication
+            .resources
+            .iter()
+            .any(|resource| resource.href.as_str() == "chapter.xhtml"
+                && resource.media_type == "application/xhtml+xml")
+    );
+    Ok(())
+}
+
+#[test]
+fn keeps_epub_three_nav_precedence_over_ncx_alternative() -> anyhow::Result<()> {
+    let source = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#, compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Preferred nav</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#, compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html/>", compression: Stored },
+        FixtureEntry { path: "nav.xhtml", bytes: br#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><a href="chapter.xhtml">HTML nav</a></nav></body></html>"#, compression: Stored },
+        FixtureEntry { path: "toc.ncx", bytes: br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><text>NCX</text></navLabel><content src="chapter.xhtml"/></navPoint></navMap></ncx>"#, compression: Stored },
+    ])?;
+
+    let publication = EpubParser::inspect(&mut Cursor::new(source), ParserLimits::default())?;
+
+    assert_eq!(publication.toc[0].label, "HTML nav");
+    assert!(publication.warnings.is_empty());
+    Ok(())
+}
+
+#[test]
+fn derives_toc_from_readable_spine_when_navigation_is_absent() -> anyhow::Result<()> {
+    let source = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#, compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Spine TOC</dc:title></metadata><manifest><item id="first" href="text/first.xhtml" media-type="application/xhtml+xml"/><item id="second" href="text/second.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="first"/><itemref idref="second"/></spine></package>"#, compression: Stored },
+        FixtureEntry { path: "text/first.xhtml", bytes: b"<html/>", compression: Stored },
+        FixtureEntry { path: "text/second.xhtml", bytes: b"<html/>", compression: Stored },
+    ])?;
+
+    let publication = EpubParser::inspect(&mut Cursor::new(source), ParserLimits::default())?;
+
+    assert_eq!(publication.toc.len(), 2);
+    assert_eq!(publication.toc[0].label, "text/first.xhtml");
+    assert_eq!(publication.toc[1].href.as_str(), "text/second.xhtml");
+    assert!(
+        publication
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("spine"))
+    );
+    Ok(())
+}
+
+#[test]
+fn uses_epub_two_manifest_cover_before_guide_cover() -> anyhow::Result<()> {
+    let source = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#, compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Cover</dc:title><meta name="cover" content="manifest-cover"/></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="manifest-cover" href="cover.jpg" media-type="image/jpeg"/></manifest><spine><itemref idref="chapter"/></spine><guide><reference type="cover" href="guide.xhtml"/></guide></package>"#, compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html/>", compression: Stored },
+        FixtureEntry { path: "cover.jpg", bytes: b"jpg", compression: Stored },
+        FixtureEntry { path: "guide.xhtml", bytes: b"<html/>", compression: Stored },
+    ])?;
+
+    let publication = EpubParser::inspect(&mut Cursor::new(source), ParserLimits::default())?;
+
+    assert_eq!(
+        publication.cover.as_ref().map(EpubPath::as_str),
+        Some("cover.jpg")
+    );
+    Ok(())
+}
+
+#[test]
+fn uses_epub_two_guide_cover_when_manifest_cover_is_absent() -> anyhow::Result<()> {
+    let source = epub(&[
+        FixtureEntry { path: "META-INF/container.xml", bytes: br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#, compression: Stored },
+        FixtureEntry { path: "book.opf", bytes: br#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Guide cover</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine><guide><reference type="cover" href="guide.xhtml"/></guide></package>"#, compression: Stored },
+        FixtureEntry { path: "chapter.xhtml", bytes: b"<html/>", compression: Stored },
+        FixtureEntry { path: "guide.xhtml", bytes: b"<html/>", compression: Stored },
+    ])?;
+
+    let publication = EpubParser::inspect(&mut Cursor::new(source), ParserLimits::default())?;
+
+    assert_eq!(
+        publication.cover.as_ref().map(EpubPath::as_str),
+        Some("guide.xhtml")
+    );
+    Ok(())
+}
+
 fn sha256(input: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     Sha256::digest(input).into()

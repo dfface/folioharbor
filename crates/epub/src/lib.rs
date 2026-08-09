@@ -119,7 +119,7 @@ impl EpubPublicationParser {
 #[async_trait]
 impl PublicationParser for EpubPublicationParser {
     fn profile_version(&self) -> &'static str {
-        "epub3-v1"
+        "epub-v2"
     }
 
     async fn parse(&self, key: &StorageKey) -> Result<CatalogPublication, PublicationParserError> {
